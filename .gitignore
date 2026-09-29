@@ -13,3 +13,4 @@ __pycache__/
 # Local files
 dev/
 *.local.*
+documents/

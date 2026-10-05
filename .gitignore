@@ -10,8 +10,16 @@
 # Python test runner
 __pycache__/
 
+# C++ / CMake build artifacts
+/build/
+compile_commands.json
+
+# Editor / IDE
+.vscode/
+
 # Local files
 dev/
 *.local.*
 documents/
 .kilo/
+chats/

@@ -1,0 +1,5 @@
+// Minimal Rx program for the stage-1 parse-tree milestone.
+fn main() {
+    let a: i32 = 1 + 2;
+    println_i32(a);
+}

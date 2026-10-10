@@ -13,7 +13,7 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "" FORCE)
 endif()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -65,9 +65,11 @@ add_custom_target(rxcc_antlr DEPENDS ${GENERATED_SOURCES})
 # --- rxcc executable ---------------------------------------------------------
 add_executable(rxcc
   src/main.cpp
+  src/ast/ast.cpp
+  src/ast_builder.cpp
   ${GENERATED_SOURCES})
 
 add_dependencies(rxcc rxcc_antlr)
 
-target_include_directories(rxcc PRIVATE "${ANTLR4_INC}" "${GEN_DIR}")
+target_include_directories(rxcc PRIVATE "${ANTLR4_INC}" "${GEN_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(rxcc PRIVATE "${ANTLR4_LIB}" Threads::Threads)

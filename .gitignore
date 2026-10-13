@@ -23,3 +23,11 @@ dev/
 documents/
 .kilo/
 chats/
+
+# Local source backups
+/rxcc/backup/
+
+rxcc/tests/*
+/tests
+
+.clang-format

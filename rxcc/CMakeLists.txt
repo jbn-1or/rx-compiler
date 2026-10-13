@@ -66,10 +66,18 @@ add_custom_target(rxcc_antlr DEPENDS ${GENERATED_SOURCES})
 add_executable(rxcc
   src/main.cpp
   src/ast/ast.cpp
+  src/ast/dump.cpp
   src/ast_builder.cpp
   ${GENERATED_SOURCES})
 
 add_dependencies(rxcc rxcc_antlr)
 
-target_include_directories(rxcc PRIVATE "${ANTLR4_INC}" "${GEN_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
+# ANTLR 运行时头按 SYSTEM 引入：第三方头不按本项目告警纪律维护，
+# -Wall -Wextra 只约束本项目源码。
+target_include_directories(rxcc PRIVATE "${GEN_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(rxcc SYSTEM PRIVATE "${ANTLR4_INC}")
 target_link_libraries(rxcc PRIVATE "${ANTLR4_LIB}" Threads::Threads)
+
+# 本项目源码按 -Wall -Wextra 纪律维护；ANTLR 生成代码不在此列，关掉告警。
+target_compile_options(rxcc PRIVATE -Wall -Wextra)
+set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")

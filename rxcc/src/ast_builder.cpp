@@ -603,7 +603,7 @@ AstBuilder::build_let(RxParser::LetStatementContext *ctx) {
     return st;
 }
 
-// ══════ 3. 表达式族（93 条，全部经 dispatch） ══════
+// ══════ 3. 表达式族（全部经 dispatch） ══════
 // 形状层按优先级从低到高（= 树从顶到底）→ primary → 块与控制流。
 
 // 把 `1 + 2 * 3` 这样的一条运算链折叠成一棵树：每碰到一个运算符，就把左边已有的树和右边操作数合成一个节点，靠左结合。

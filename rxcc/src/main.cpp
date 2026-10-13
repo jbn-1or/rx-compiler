@@ -8,8 +8,12 @@
 // 读文件 → ANTLRInputStream → RxLexer → CommonTokenStream → RxParser::crate。
 // 有任何语法错误就不进构建
 
-// tests/custom/run.sh              # 自研验证点：12 个
+// tests/custom/run.sh                    # 验证点：12 个
 // python3 tests/custom/run_semantic.py   # official semantic：当前 69/236
+// ./rxcc/build/rxcc path                  # 默认 --stage ast：构建并 dump AST
+// ./rxcc/build/rxcc --stage parse path    # 只做语法分析
+// ./rxcc/build/rxcc --dump-tree path      # 附带打印 ANTLR parse tree
+// cmake --build rxcc/build -j
 
 #include <fstream>
 #include <iostream>

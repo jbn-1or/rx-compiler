@@ -131,6 +131,8 @@ struct ConstValue {
     bool bool_value = false;             // Bool，例：`true` 时 = true
     std::vector<PathSegment> path;       // Path：常量项路径，例：`a::B` 时 = {a, B}
     std::shared_ptr<ConstValue> operand; // Neg 的操作数，例：`-5` 时 = Int(5)
+    IntSuffix suffix = IntSuffix::None;  // Int：整数字面量后缀，例：`1u32` → U32
+    Span span{};                         // 该常量值的源码区间（报错定位用）
 };
 
 std::string to_string(const ConstValue &v);        // 打印与报错
@@ -401,6 +403,7 @@ struct LetStatement : Statement {
 // 例：`f();` → expr=Call(f)；`if x { 1 };` → expr=IfExpression
 struct ExpressionStatement : Statement {
     std::shared_ptr<Expression> expr; // 例：Call(f)
+    bool has_semi = true;             // 语法上有无 `;`：`{ 1 }` → false，`{ 1 };` → true
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
@@ -502,6 +505,7 @@ struct Function : Item {
     std::vector<Param> params;             // 例：{a:i32, b:i32}
     std::shared_ptr<Type> ret; // 省略 ARROW 时构建器直接填 UnitType 实例，例：i32
     std::shared_ptr<BlockExpression> body; // 例：Block{ tail=Binary(a + b) }
+    bool has_generic_params = false;       // genericParams? 是否存在，例：`fn f<'a>()` → true
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 

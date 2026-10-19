@@ -413,6 +413,7 @@ std::shared_ptr<Item> AstBuilder::build_function_definition(
     auto fn = std::make_shared<Function>();
     fn->span = span_of(ctx);
     fn->name = ctx->identifier()->getText();
+    fn->has_generic_params = ctx->genericParams() != nullptr;
     if (auto *params = ctx->functionParameters()) {
         if (params->selfParam()) {
             fn->self_param = build_self_param(params->selfParam());
@@ -563,6 +564,7 @@ AstBuilder::build_statement(RxParser::StatementContext *ctx) {
         return nullptr;
     auto st = std::make_shared<ExpressionStatement>();
     st->span = span_of(ctx);
+    st->has_semi = (ctx->SEMI() != nullptr);
     st->expr = std::move(expr);
     return st;
 }
@@ -1183,14 +1185,18 @@ ConstValue AstBuilder::build_const(RxParser::ConstValueContext *ctx) {
     if (ctx->INTEGER_LITERAL()) {
         ConstValue v;
         v.kind = ConstValue::Kind::Int;
-        v.int_value =
-            parse_int_literal(ctx->INTEGER_LITERAL()->getText()).value;
+        const auto parsed =
+            parse_int_literal(ctx->INTEGER_LITERAL()->getText());
+        v.int_value = parsed.value;
+        v.suffix = parsed.suffix;
+        v.span = span_of(ctx);
         return v;
     }
     if (ctx->TRUE() || ctx->FALSE()) {
         ConstValue v;
         v.kind = ConstValue::Kind::Bool;
         v.bool_value = ctx->TRUE() != nullptr;
+        v.span = span_of(ctx);
         return v;
     }
     if (ctx->pathInExpression()) {
@@ -1199,6 +1205,7 @@ ConstValue AstBuilder::build_const(RxParser::ConstValueContext *ctx) {
         for (auto *seg : ctx->pathInExpression()->pathExprSegment()) {
             v.path.push_back(build_segment(seg));
         }
+        v.span = span_of(ctx);
         return v;
     }
     if (ctx->MINUS()) {
@@ -1206,6 +1213,7 @@ ConstValue AstBuilder::build_const(RxParser::ConstValueContext *ctx) {
         v.kind = ConstValue::Kind::Neg;
         v.operand =
             std::make_shared<ConstValue>(build_magnitude(ctx->magnitude()));
+        v.span = span_of(ctx);
         return v;
     }
     return build_const(ctx->constValue()); // 括号解包
@@ -1217,8 +1225,11 @@ ConstValue AstBuilder::build_magnitude(RxParser::MagnitudeContext *ctx) {
     if (ctx->INTEGER_LITERAL()) {
         ConstValue v;
         v.kind = ConstValue::Kind::Int;
-        v.int_value =
-            parse_int_literal(ctx->INTEGER_LITERAL()->getText()).value;
+        const auto parsed =
+            parse_int_literal(ctx->INTEGER_LITERAL()->getText());
+        v.int_value = parsed.value;
+        v.suffix = parsed.suffix;
+        v.span = span_of(ctx);
         return v;
     }
     if (ctx->pathInExpression()) {
@@ -1227,6 +1238,7 @@ ConstValue AstBuilder::build_magnitude(RxParser::MagnitudeContext *ctx) {
         for (auto *seg : ctx->pathInExpression()->pathExprSegment()) {
             v.path.push_back(build_segment(seg));
         }
+        v.span = span_of(ctx);
         return v;
     }
     return build_magnitude(ctx->magnitude()); // 括号解包

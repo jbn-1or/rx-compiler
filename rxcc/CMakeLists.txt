@@ -68,7 +68,9 @@ add_executable(rxcc
   src/ast/ast.cpp
   src/ast/dump.cpp
   src/ast_builder.cpp
-  ${GENERATED_SOURCES})
+  src/sema/sema.cpp
+  ${GENERATED_SOURCES}
+  src/sema/type.hpp)
 
 add_dependencies(rxcc rxcc_antlr)
 

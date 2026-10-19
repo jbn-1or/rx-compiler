@@ -1,17 +1,18 @@
 // 读源文件 → ANTLR 词法 + 语法分析 → 诊断收集 → 退出码。
-//   --stage parse   语法分析为止（0 接受 / 1 拒绝）
-//   --stage ast     AST 构建并 dump（默认）
-//   --dump-tree     打印 ANTLR parse tree
-// 退出码契约：0 = 接受；1 = 拒绝（语法错误）；
+//   --stage parse    语法分析为止（0 接受 / 1 拒绝）
+//   --stage ast      AST 构建并 dump（默认）
+//   --stage semantic AST 构建后做静态语义检查，不 dump（0 接受 / 1 拒绝）
+//   --dump-tree      打印 ANTLR parse tree
+// 退出码契约：0 = 接受；1 = 拒绝（语法或语义错误）；
 // 2 = 用法错误或 IO 失败。
 
 // 读文件 → ANTLRInputStream → RxLexer → CommonTokenStream → RxParser::crate。
 // 有任何语法错误就不进构建
 
-// tests/custom/run.sh                    # 验证点：12 个
-// python3 tests/custom/run_semantic.py   # official semantic：当前 69/236
+// python3 tests/custom/run_semantic.py   # official semantic：--stage semantic，当前 70/236
 // ./rxcc/build/rxcc path                  # 默认 --stage ast：构建并 dump AST
 // ./rxcc/build/rxcc --stage parse path    # 只做语法分析
+// ./rxcc/build/rxcc --stage semantic path # AST 之上做语义检查（不 dump）
 // ./rxcc/build/rxcc --dump-tree path      # 附带打印 ANTLR parse tree
 // cmake --build rxcc/build -j
 
@@ -28,14 +29,16 @@
 #include "ast/dump.hpp"
 #include "ast_builder.hpp"
 #include "diagnostics.hpp"
+#include "sema/sema.hpp"
 
 namespace {
 
 void usage(const char *prog) {
     std::cerr << "usage: " << prog
-              << " [--stage parse|ast] [--dump-tree] <source.rx>\n"
+              << " [--stage parse|ast|semantic] [--dump-tree] <source.rx>\n"
               << "options:\n"
-              << "  --stage <name>    parse（只做语法分析）| ast（默认）\n"
+              << "  --stage <name>    parse（只做语法分析）| ast（默认，dump AST）"
+                 "| semantic（语义检查）\n"
               << "  --dump-tree       打印 ANTLR parse tree\n"
               << "  -h, --help        显示本帮助\n";
 }
@@ -111,7 +114,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (stage != "parse" && stage != "ast") {
+    if (stage != "parse" && stage != "ast" && stage != "semantic") {
         std::cerr << "rxcc: unknown stage: " << stage << "\n";
         usage(argv[0]);
         return 2;
@@ -158,7 +161,7 @@ int main(int argc, char **argv) {
         return 0; // --stage parse：到此为止
     }
 
-    // --stage ast（默认）：语法干净 → AST 构建器构建 → dump。
+    // 语法干净 → AST 构建器构建。
     // 构建失败（builder 返回空 / 诊断非空）→ 打印诊断，退出 1。
     rx::AstBuilder builder(diags);
     std::shared_ptr<rx::Crate> crate =
@@ -167,6 +170,19 @@ int main(int argc, char **argv) {
         print_diagnostics(diags, source_path, std::cerr);
         return 1;
     }
+
+    if (stage == "semantic") {
+        // --stage semantic：在 AST 上做静态语义检查，不 dump。
+        rx::SemaAnalyzer sema(diags);
+        sema.run(*crate);
+        if (!diags.ok()) {
+            print_diagnostics(diags, source_path, std::cerr);
+            return 1;
+        }
+        return 0;
+    }
+
+    // --stage ast（默认）：dump AST。
     dump(*crate, std::cout);
     return 0;
 }

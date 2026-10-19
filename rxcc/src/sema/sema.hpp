@@ -2,20 +2,50 @@
 
 #include "ast/ast.hpp"
 #include "diagnostics.hpp"
+#include <memory>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #include "sema/type.hpp"
+#include "sema/symbol.hpp"
 
 namespace rx {
 
 // SEMANTIC 阶段分析器。
+// 做什么：遍历 Crate，建立符号表并做语义检查；错误写进构造时传入的诊断收集器。
+// 例：输入 `struct S { x: i32 } fn main() {}`
+//     → type_ns_ 里有 "S"，value_ns_ 里有 "main"（以及三个内置 I/O 名）。
 class SemaAnalyzer {
 public:
+    // 构造：接入外部诊断收集器。
+    // 输入：diags（main.cpp 创建，整个阶段共用）；输出：无返回值，只保存引用。
     explicit SemaAnalyzer(Diagnostics &diags) : diags_(diags) {}
 
-    // 对整棵 crate 做语义检查，诊断写入构造时传入的 Diagnostics。
+    // 对整个 crate 做语义检查。
+    // 输入：crate（AST 根）；输出：无返回值；符号表成员被填好，错误追加到 diags_。
+    // 例：`fn main() {}` → value_ns_["main"] 指向 FnSymbol，且不产生诊断。
     void run(const Crate &crate);
 
 private:
-    Diagnostics &diags_;
+    Diagnostics &diags_; // 诊断收集器，例：N2 重名时 → diags_.error(span, "duplicate struct")
+
+    // —— 名字表：Phase 1 建立，后续 Phase 反复查询 ——
+    std::unordered_map<std::string, StructSymbol *> type_ns_; // 结构体名 → 档案，例："Point" → Point 的 StructSymbol
+    std::unordered_map<std::string, Symbol *> value_ns_;      // 值名 → 档案，例："main" → FnSymbol；"MAX" → ConstSymbol；"get_i32" → Builtin Symbol
+
+    // —— 所有权：表里只存裸指针，这些容器保证对象在分析期间不被释放 ——
+    std::vector<std::unique_ptr<StructSymbol>> structs_; // 所有结构体档案，例：每个 struct 一个元素
+    std::vector<std::unique_ptr<FnSymbol>> fns_;         // 所有函数/方法档案，例：main、S::get 各一个
+    std::vector<std::unique_ptr<ConstSymbol>> consts_;   // 所有常量/关联常量档案，例：MAX、S::K 各一个
+    std::vector<std::unique_ptr<Symbol>> builtins_;      // 内置 I/O 档案，例：get_i32/print_i32/println_i32 三条
+
+    void init_builtins();
+    void collect_struct(const Struct &s);
+    void collect_const(const Const &c);
+    void collect_function(const Function &f);
+    void collect_impl(const InherentImpl &impl);
+    void check_entry();
 };
 
 } // namespace rx

@@ -16,7 +16,7 @@ struct SemaType;
 // 递归类型（如 struct Node { next: Box<Node> }）也能安全表示。
 using SemaTypePtr = std::shared_ptr<const SemaType>;
 
-// 归一化语义类型：把 ast::Type（语法树）解析成可判等、可判能力的规范形式。
+// 把 ast::Type（语法树）解析成可判等、可判能力的规范形式。
 // 与 ast::Type 的关键差别（见实现计划 §B.0.2）：
 //   - `Self` 在 struct/impl 内先展开为 Struct(S)，故 `Self` 与 `S` 天然相等；
 //   - Array 的长度已常量求值成 uint64_t，故 `[i32; COUNT]` 与 `[i32; 3]` 按值相等；
@@ -114,7 +114,6 @@ struct SemaType {
     bool is_int() const { return kind == Kind::Int; }
 
     // 语义类型判等。
-    // 规则（规范 §10 支持的类型）：
     //   - 四种整数按 int_kind 区分；Bool/Unit/Never 各自只等于自身；
     //   - Struct 名义判等：比较 StructSymbol 指针（同形状不同名判不等）；
     //   - Ref 比较 is_mut + 内层，忽略生命周期；
@@ -144,7 +143,7 @@ struct SemaType {
         case Kind::Vec:
             return inner_equals(inner, other.inner);
         case Kind::Error:
-            return true; // 不可达（上面已处理），保留以覆盖全部枚举值
+            return true; // 不可达
         }
         return false;
     }
@@ -200,7 +199,6 @@ private:
     }
 };
 
-// 实现计划 §B.0.2 书写的自由函数形式 `equals(a, b)`；等价于 a.equals(b)。
 inline bool equals(const SemaType &a, const SemaType &b) { return a.equals(b); }
 
 } // namespace rx

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <memory>
-#include <variant>
 
 #include "RxParser.h"
 
@@ -9,14 +8,6 @@
 #include "diagnostics.hpp"
 
 namespace rx {
-
-using Boxed = std::variant<std::monostate,              // 空盒：跳过 / 失败
-                           std::shared_ptr<Expression>, // 表达式
-                           std::shared_ptr<Statement>,  // 语句
-                           std::shared_ptr<Type>,       // 类型
-                           std::shared_ptr<BlockExpression>, // 块
-                           std::shared_ptr<Item>,            // 项
-                           std::shared_ptr<Crate>>;          // crate
 
 struct AstBuilder {
 public:
@@ -26,14 +17,10 @@ public:
     std::shared_ptr<Crate> build(RxParser::CrateContext *ctx);
 
 private:
-    // 分派：把语法规则映射到对应的构建函数。每条规则都必须在这里登记，
+    // 分派：把表达式族规则映射到对应的构建函数。每条规则都必须在这里登记，
     // 没登记的规则会报错（debug 下断言，release 下直接诊断）。
-    Boxed dispatch(antlr4::tree::ParseTree *node);
-
-    // 装箱与拆箱：把表达式放进 Boxed，或从 Boxed 里取出表达式。
-    // 空盒表示跳过或已报错；取到别的类型说明分派出错，断言拦下。
-    static Boxed box_expr(std::shared_ptr<Expression> e);
-    static std::shared_ptr<Expression> expr_of(const Boxed &b);
+    // 返回空指针表示跳过或已报错。
+    std::shared_ptr<Expression> dispatch(antlr4::tree::ParseTree *node);
 
     // —— 表达式分层：按优先级从高到低，每层只处理自己那一级 ——
     //
@@ -100,7 +87,7 @@ private:
     std::shared_ptr<Item>
     build_inherent_impl(RxParser::InherentImplContext *ctx);
 
-    // 构建一个路径段：名字 + 泛型实参，不经过装箱表。
+    // 构建一个路径段：名字 + 泛型实参，不经过 dispatch。
     PathSegment build_segment(RxParser::PathExprSegmentContext *ctx);
 
     // 构建路径表达式，返回具体的 PathExpression，方便别处直接用。

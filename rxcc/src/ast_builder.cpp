@@ -225,25 +225,12 @@ std::shared_ptr<CastExpression> wrap_cast(std::shared_ptr<Expression> operand,
 } // namespace
 
 // ══════ 0. 分派机制：表达式族的统一入口 ══════
-// 把表达式装进"盒子"，dispatch 用它统一返回。
-Boxed AstBuilder::box_expr(std::shared_ptr<Expression> e) {
-    return Boxed{std::move(e)};
-}
-
-// 从盒子里取表达式：空盒给 nullptr；装的不是表达式就断言失败。
-std::shared_ptr<Expression> AstBuilder::expr_of(const Boxed &b) {
-    if (std::holds_alternative<std::monostate>(b))
-        return nullptr;
-    const auto *p = std::get_if<std::shared_ptr<Expression>>(&b);
-    assert(p && "expr_of：Boxed 装的不是表达式");
-    return *p;
-}
-
-// 总分派：看语法树节点是哪条规则产生的，转给对应的 build 函数处理。
-Boxed AstBuilder::dispatch(antlr4::tree::ParseTree *node) {
+// dispatch 把表达式族规则路由到对应构建函数；空指针表示跳过 / 已报错。
+std::shared_ptr<Expression>
+AstBuilder::dispatch(antlr4::tree::ParseTree *node) {
     auto *ctx = dynamic_cast<antlr4::ParserRuleContext *>(node);
     if (!ctx)
-        return {}; // 终结符没有规则可分派
+        return nullptr; // 终结符没有规则可分派
     switch (ctx->getRuleIndex()) {
         // 单孩子直通
         case RxParser::RuleExpression:
@@ -251,16 +238,16 @@ Boxed AstBuilder::dispatch(antlr4::tree::ParseTree *node) {
         case RxParser::RuleConditionExpression:
         case RxParser::RuleConditionBreakExpression:
         case RxParser::RulePrimaryExpression:
-            // 若没有孩子则返回空盒
+            // 若没有孩子则返回空指针
             if (ctx->children.empty())
-                return {};
+                return nullptr;
             return dispatch(ctx->children[0]);
         // 赋值层：四族镜像
         case RxParser::RuleAssignmentExpression:
         case RxParser::RuleStatementAssignmentExpression:
         case RxParser::RuleConditionAssignmentExpression:
         case RxParser::RuleConditionBreakAssignmentExpression:
-            return box_expr(build_assignment_layer(ctx));
+            return build_assignment_layer(ctx);
         // 二元运算各层：同一 handler 左折叠
         case RxParser::RuleLogicalOrExpression:
         case RxParser::RuleLogicalAndExpression:
@@ -325,7 +312,7 @@ Boxed AstBuilder::dispatch(antlr4::tree::ParseTree *node) {
         case RxParser::RuleStatementClosedAdditiveExpression:
         case RxParser::RuleStatementMultiplicativeExpression:
         case RxParser::RuleStatementClosedMultiplicativeExpression:
-            return box_expr(fold_chain(ctx));
+            return fold_chain(ctx);
         // —— cast / 一元 / 后缀：四族 × 开放/closed ——
         case RxParser::RuleCastExpression:
         case RxParser::RuleClosedCastExpression:
@@ -335,50 +322,50 @@ Boxed AstBuilder::dispatch(antlr4::tree::ParseTree *node) {
         case RxParser::RuleConditionBreakClosedCastExpression:
         case RxParser::RuleStatementCastExpression:
         case RxParser::RuleStatementClosedCastExpression:
-            return box_expr(build_cast_layer(ctx));
+            return build_cast_layer(ctx);
         case RxParser::RuleUnaryExpression:
         case RxParser::RuleConditionUnaryExpression:
         case RxParser::RuleConditionBreakUnaryExpression:
         case RxParser::RuleStatementUnaryExpression:
-            return box_expr(build_unary_layer(ctx));
+            return build_unary_layer(ctx);
         case RxParser::RulePostfixExpression:
         case RxParser::RuleConditionPostfixExpression:
         case RxParser::RuleConditionBreakPostfixExpression:
         case RxParser::RuleStatementPostfixExpression:
-            return box_expr(build_postfix_layer(ctx));
+            return build_postfix_layer(ctx);
         // —— primary 与字面量——
         case RxParser::RuleNonBlockPrimary:
-            return box_expr(build_non_block_primary(
-                static_cast<RxParser::NonBlockPrimaryContext *>(ctx)));
+            return build_non_block_primary(
+                static_cast<RxParser::NonBlockPrimaryContext *>(ctx));
         case RxParser::RuleLiteralExpression:
-            return box_expr(build_literal(
-                static_cast<RxParser::LiteralExpressionContext *>(ctx)));
+            return build_literal(
+                static_cast<RxParser::LiteralExpressionContext *>(ctx));
         case RxParser::RuleArrayExpression:
-            return box_expr(build_array_expr(
-                static_cast<RxParser::ArrayExpressionContext *>(ctx)));
+            return build_array_expr(
+                static_cast<RxParser::ArrayExpressionContext *>(ctx));
         case RxParser::RulePathInExpression:
-            return box_expr(build_path(
-                static_cast<RxParser::PathInExpressionContext *>(ctx)));
+            return build_path(
+                static_cast<RxParser::PathInExpressionContext *>(ctx));
         // —— 块类与控制流
         case RxParser::RuleExpressionWithBlock:
-            return box_expr(build_expression_with_block(
-                static_cast<RxParser::ExpressionWithBlockContext *>(ctx)));
+            return build_expression_with_block(
+                static_cast<RxParser::ExpressionWithBlockContext *>(ctx));
         case RxParser::RuleIfExpression:
-            return box_expr(
-                build_if(static_cast<RxParser::IfExpressionContext *>(ctx)));
+            return build_if(
+                static_cast<RxParser::IfExpressionContext *>(ctx));
         case RxParser::RuleConditionPrimary:
-            return box_expr(build_condition_primary(
-                static_cast<RxParser::ConditionPrimaryContext *>(ctx)));
+            return build_condition_primary(
+                static_cast<RxParser::ConditionPrimaryContext *>(ctx));
         case RxParser::RuleConditionPrimaryWithoutBareBlock:
-            return box_expr(build_condition_primary_nb(
+            return build_condition_primary_nb(
                 static_cast<
-                    RxParser::ConditionPrimaryWithoutBareBlockContext *>(ctx)));
+                    RxParser::ConditionPrimaryWithoutBareBlockContext *>(ctx));
         default:
             assert(false &&
                    "dispatch：未登记规则（走类型化 helper，不应到达）");
             diags_.error(span_of(ctx), "dispatch：未登记规则 index=" +
                                            std::to_string(ctx->getRuleIndex()));
-            return {};
+            return nullptr;
     }
 }
 
@@ -550,7 +537,7 @@ AstBuilder::build_block(RxParser::BlockExpressionContext *ctx) {
             block->statements.push_back(std::move(node));
     }
     if (ctx->statementExpression()) {
-        block->tail = expr_of(dispatch(ctx->statementExpression()));
+        block->tail = dispatch(ctx->statementExpression());
     }
     return block;
 }
@@ -568,7 +555,7 @@ AstBuilder::build_statement(RxParser::StatementContext *ctx) {
         // 块类表达式语句，分号可省
         expr = build_expression_with_block(ctx->expressionWithBlock());
     } else if (ctx->statementExpression()) {
-        expr = expr_of(dispatch(ctx->statementExpression()));
+        expr = dispatch(ctx->statementExpression());
     } else {
         return nullptr; // 只剩裸分号，合法跳过
     }
@@ -596,7 +583,7 @@ AstBuilder::build_let(RxParser::LetStatementContext *ctx) {
         st->type_annotation = std::move(ty);
     }
     // equalsSign 几种 token 拼装全是 `=`，无视
-    auto init = expr_of(dispatch(ctx->expression()));
+    auto init = dispatch(ctx->expression());
     if (!init)
         return nullptr;
     st->init = std::move(init);
@@ -618,7 +605,7 @@ AstBuilder::fold_chain(antlr4::ParserRuleContext *ctx) {
             pending_op = map_binop(child);
             continue;
         }
-        auto operand = expr_of(dispatch(child));
+        auto operand = dispatch(child);
         if (!operand)
             return nullptr;
         if (!acc) {
@@ -649,12 +636,12 @@ AstBuilder::build_assignment_layer(antlr4::ParserRuleContext *ctx) {
     const auto &children = ctx->children;
     // 若没有赋值号，说明只是普通表达式，转发
     if (children.size() == 1)
-        return expr_of(dispatch(children[0]));
+        return dispatch(children[0]);
     if (children.size() != 3) {
         diags_.error(span_of(ctx), "赋值层：孩子形状异常（防御分支）");
         return nullptr;
     }
-    auto lhs = expr_of(dispatch(children[0]));
+    auto lhs = dispatch(children[0]);
     if (!lhs)
         return nullptr;
     auto *op_ctx =
@@ -669,7 +656,7 @@ AstBuilder::build_assignment_layer(antlr4::ParserRuleContext *ctx) {
         return nullptr;
     }
     // 右结合：rhs 里再遇到赋值号会递归回到这里
-    auto rhs = expr_of(dispatch(children[2]));
+    auto rhs = dispatch(children[2]);
     if (!rhs)
         return nullptr;
     auto node = std::make_shared<AssignmentExpression>();
@@ -696,7 +683,7 @@ AstBuilder::build_cast_layer(antlr4::ParserRuleContext *ctx) {
         if (closed)
             break;
     }
-    auto e = expr_of(dispatch(children[0]));
+    auto e = dispatch(children[0]);
     if (!e)
         return nullptr;
     if (closed) {
@@ -727,12 +714,12 @@ AstBuilder::build_unary_layer(antlr4::ParserRuleContext *ctx) {
     if (children.size() >= 2) {
         if (auto *op_ctx =
                 dynamic_cast<RxParser::UnaryOperatorContext *>(children[0])) {
-            return make_unary(op_ctx, expr_of(dispatch(children[1])));
+            return make_unary(op_ctx, dispatch(children[1]));
         }
     }
     // 若没有一元运算符，说明还没到一元层，转发
     if (children.size() == 1)
-        return expr_of(dispatch(children[0]));
+        return dispatch(children[0]);
     diags_.error(span_of(ctx), "一元层：孩子形状异常（防御分支）");
     return nullptr;
 }
@@ -746,7 +733,7 @@ AstBuilder::build_postfix_layer(antlr4::ParserRuleContext *ctx) {
         diags_.error(span_of(ctx), "后缀层：空孩子（防御分支）");
         return nullptr;
     }
-    auto e = expr_of(dispatch(children[0]));
+    auto e = dispatch(children[0]);
     std::size_t i = 1;
     // 若以块开头，后面只允许点后缀
     if (dynamic_cast<RxParser::ExpressionWithBlockContext *>(children[0])) {
@@ -795,7 +782,7 @@ AstBuilder::build_non_block_primary(RxParser::NonBlockPrimaryContext *ctx) {
                 for (auto *f : fields->structExprField()) {
                     StructExprField field;
                     field.name = f->identifier()->getText();
-                    field.value = expr_of(dispatch(f->expression()));
+                    field.value = dispatch(f->expression());
                     if (!field.value)
                         return nullptr;
                     node->fields.push_back(std::move(field));
@@ -808,7 +795,7 @@ AstBuilder::build_non_block_primary(RxParser::NonBlockPrimaryContext *ctx) {
     if (ctx->LPAREN()) {
         // 若括号里有表达式则解包，否则是空元组 ()
         if (ctx->expression()) {
-            return expr_of(dispatch(ctx->expression()));
+            return dispatch(ctx->expression());
         }
         auto unit = std::make_shared<UnitExpression>();
         unit->span = span_of(ctx);
@@ -818,7 +805,7 @@ AstBuilder::build_non_block_primary(RxParser::NonBlockPrimaryContext *ctx) {
         auto node = std::make_shared<BreakExpression>();
         node->span = span_of(ctx);
         if (ctx->expression()) {
-            node->value = expr_of(dispatch(ctx->expression()));
+            node->value = dispatch(ctx->expression());
             if (!node->value)
                 return nullptr;
         }
@@ -828,7 +815,7 @@ AstBuilder::build_non_block_primary(RxParser::NonBlockPrimaryContext *ctx) {
         auto node = std::make_shared<ReturnExpression>();
         node->span = span_of(ctx);
         if (ctx->expression()) {
-            node->value = expr_of(dispatch(ctx->expression()));
+            node->value = dispatch(ctx->expression());
             if (!node->value)
                 return nullptr;
         }
@@ -877,7 +864,7 @@ AstBuilder::build_array_expr(RxParser::ArrayExpressionContext *ctx) {
     }
     // 若有 `;` 则是重复形 `[值; 个数]`
     if (ctx->SEMI()) {
-        auto value = expr_of(dispatch(ctx->expression(0)));
+        auto value = dispatch(ctx->expression(0));
         if (!value)
             return nullptr;
         node->repeat_value = std::move(value);
@@ -885,7 +872,7 @@ AstBuilder::build_array_expr(RxParser::ArrayExpressionContext *ctx) {
         return node;
     }
     for (auto *e : ctx->expression()) {
-        auto el = expr_of(dispatch(e));
+        auto el = dispatch(e);
         if (!el)
             return nullptr;
         node->elements.push_back(std::move(el));
@@ -927,7 +914,7 @@ std::shared_ptr<Expression> AstBuilder::build_expression_with_block(
 // 例：`if c { a } else { b }` → IfExpression{condition=c, then=a, else_=b}。
 std::shared_ptr<Expression>
 AstBuilder::build_if(RxParser::IfExpressionContext *ctx) {
-    auto cond = expr_of(dispatch(ctx->conditionExpression()));
+    auto cond = dispatch(ctx->conditionExpression());
     if (!cond)
         return nullptr;
     auto then = build_block(ctx->blockExpression(0));
@@ -974,7 +961,7 @@ std::shared_ptr<Expression> AstBuilder::build_condition_primary_nb(
     }
     if (ctx->LPAREN()) {
         if (ctx->expression()) {
-            return expr_of(dispatch(ctx->expression())); // (e) 解包
+            return dispatch(ctx->expression()); // (e) 解包
         }
         auto unit = std::make_shared<UnitExpression>();
         unit->span = span_of(ctx);
@@ -998,7 +985,7 @@ std::shared_ptr<Expression> AstBuilder::build_condition_primary_nb(
         node->span = span_of(ctx);
         // break 的值走 conditionBreak 族
         if (ctx->conditionBreakExpression()) {
-            node->value = expr_of(dispatch(ctx->conditionBreakExpression()));
+            node->value = dispatch(ctx->conditionBreakExpression());
             if (!node->value)
                 return nullptr;
         }
@@ -1008,7 +995,7 @@ std::shared_ptr<Expression> AstBuilder::build_condition_primary_nb(
         auto node = std::make_shared<ReturnExpression>();
         node->span = span_of(ctx);
         if (ctx->conditionExpression()) {
-            node->value = expr_of(dispatch(ctx->conditionExpression()));
+            node->value = dispatch(ctx->conditionExpression());
             if (!node->value)
                 return nullptr;
         }
@@ -1309,7 +1296,7 @@ AstBuilder::apply_suffix(std::shared_ptr<Expression> e,
         node->callee = std::move(e);
         // 遍历实参逐个构建收进 args
         for (auto *arg : call->expression()) {
-            auto a = expr_of(dispatch(arg));
+            auto a = dispatch(arg);
             if (!a)
                 return nullptr;
             node->args.push_back(std::move(a));
@@ -1317,7 +1304,7 @@ AstBuilder::apply_suffix(std::shared_ptr<Expression> e,
         return node;
     }
     if (ctx->LBRACKET()) {
-        auto idx = expr_of(dispatch(ctx->expression()));
+        auto idx = dispatch(ctx->expression());
         if (!idx)
             return nullptr;
         auto node = std::make_shared<IndexExpression>();
@@ -1344,7 +1331,7 @@ AstBuilder::apply_dot_suffix(std::shared_ptr<Expression> e,
         node->receiver = std::move(e);
         node->method = build_segment(dot->pathExprSegment());
         for (auto *arg : dot->callArguments()->expression()) {
-            auto a = expr_of(dispatch(arg));
+            auto a = dispatch(arg);
             if (!a)
                 return nullptr;
             node->args.push_back(std::move(a));
@@ -1378,7 +1365,7 @@ std::shared_ptr<Expression>
 AstBuilder::build_while(antlr4::ParserRuleContext *whole,
                         RxParser::ConditionExpressionContext *cond_ctx,
                         RxParser::BlockExpressionContext *body_ctx) {
-    auto cond = expr_of(dispatch(cond_ctx));
+    auto cond = dispatch(cond_ctx);
     if (!cond)
         return nullptr;
     auto body = build_block(body_ctx);

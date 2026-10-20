@@ -29,14 +29,20 @@ private:
     Diagnostics &diags_; // 诊断收集器，例：N2 重名时 → diags_.error(span, "duplicate struct")
 
     // 名字表
-    std::unordered_map<std::string, StructSymbol *> type_ns_; // 结构体名 → 档案，例："Point" → Point 的 StructSymbol
-    std::unordered_map<std::string, Symbol *> value_ns_;      // 值名 → 档案，例："main" → FnSymbol；"MAX" → ConstSymbol；"get_i32" → Builtin Symbol
+    // 结构体名 → 档案，例："Point" → Point 的 StructSymbol
+    std::unordered_map<std::string, StructSymbol *> type_ns_;
+    // 值名 → 档案，例："main" → FnSymbol；"MAX" → ConstSymbol；"get_i32" → Builtin Symbol
+    std::unordered_map<std::string, Symbol *> value_ns_;
 
     // —— 所有权：表里只存裸指针，这些容器保证对象在分析期间不被释放 ——
-    std::vector<std::unique_ptr<StructSymbol>> structs_; // 所有结构体档案，例：每个 struct 一个元素
-    std::vector<std::unique_ptr<FnSymbol>> fns_;         // 所有函数/方法档案，例：main、S::get 各一个
-    std::vector<std::unique_ptr<ConstSymbol>> consts_;   // 所有常量/关联常量档案，例：MAX、S::K 各一个
-    std::vector<std::unique_ptr<Symbol>> builtins_;      // 内置 I/O 档案，例：get_i32/print_i32/println_i32 三条
+    // 所有结构体档案，例：每个 struct 一个元素
+    std::vector<std::unique_ptr<StructSymbol>> structs_;
+    // 所有函数/方法档案，例：main、S::get 各一个
+    std::vector<std::unique_ptr<FnSymbol>> fns_;
+    // 所有常量/关联常量档案，例：MAX、S::K 各一个
+    std::vector<std::unique_ptr<ConstSymbol>> consts_;
+    // 内置 I/O 档案，例：get_i32/print_i32/println_i32 三条
+    std::vector<std::unique_ptr<Symbol>> builtins_;
 
     void init_builtins();
     void collect_struct(const Struct &s);

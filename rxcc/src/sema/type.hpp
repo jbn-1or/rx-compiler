@@ -19,9 +19,11 @@ using SemaTypePtr = std::shared_ptr<const SemaType>;
 // 把 ast::Type（语法树）解析成可判等、可判能力的规范形式。
 // 与 ast::Type 的关键差别（见实现计划 §B.0.2）：
 //   - `Self` 在 struct/impl 内先展开为 Struct(S)，故 `Self` 与 `S` 天然相等；
-//   - Array 的长度已常量求值成 uint64_t，故 `[i32; COUNT]` 与 `[i32; 3]` 按值相等；
+//   - Array 的长度已常量求值成 uint64_t，故 `[i32; COUNT]` 与 `[i32; 3]`
+//   按值相等；
 //   - 生命周期不进入 Ref 的判等（只比较 is_mut 与内层类型）。
-// 例：`i32` → Int(I32)；`&mut S` → Ref(is_mut=true, Struct(S))；`[u32; 3]` → Array(Int(U32), 3)。
+// 例：`i32` → Int(I32)；`&mut S` → Ref(is_mut=true, Struct(S))；`[u32; 3]` →
+// Array(Int(U32), 3)。
 struct SemaType {
     enum class Kind {
         Unit,   // ()，函数/控制流结果
@@ -42,9 +44,9 @@ struct SemaType {
     Kind kind = Kind::Error;
     IntKind int_kind = IntKind::I32;          // 仅 Kind::Int 有意义，例：I32
     const StructSymbol *struct_sym = nullptr; // 仅 Kind::Struct 有意义，例：S
-    bool is_mut = false;                      // 仅 Kind::Ref 有意义，例：`&mut T` 时 = true
-    SemaTypePtr inner;                        // Ref/Box/Vec 的内层；Array 的元素；例：&S 时 = S
-    uint64_t len = 0;                         // 仅 Kind::Array 有意义，例：`[i32; 3]` 时 = 3
+    bool is_mut = false; // 仅 Kind::Ref 有意义，例：`&mut T` 时 = true
+    SemaTypePtr inner;   // Ref/Box/Vec 的内层；Array 的元素；例：&S 时 = S
+    uint64_t len = 0;    // 仅 Kind::Array 有意义，例：`[i32; 3]` 时 = 3
 
     // —— 构造原语（替代裸露字段赋值，保证 kind 与字段一致）——
     // 例：int_(IntKind::U32) → `u32`；ref(false, int_(IntKind::I32)) → `&i32`。
@@ -127,23 +129,24 @@ struct SemaType {
         if (kind != other.kind)
             return false;
         switch (kind) {
-        case Kind::Unit:
-        case Kind::Never:
-        case Kind::Bool:
-            return true;
-        case Kind::Int:
-            return int_kind == other.int_kind;
-        case Kind::Struct:
-            return struct_sym == other.struct_sym;
-        case Kind::Ref:
-            return is_mut == other.is_mut && inner_equals(inner, other.inner);
-        case Kind::Array:
-            return len == other.len && inner_equals(inner, other.inner);
-        case Kind::Box:
-        case Kind::Vec:
-            return inner_equals(inner, other.inner);
-        case Kind::Error:
-            return true; // 不可达
+            case Kind::Unit:
+            case Kind::Never:
+            case Kind::Bool:
+                return true;
+            case Kind::Int:
+                return int_kind == other.int_kind;
+            case Kind::Struct:
+                return struct_sym == other.struct_sym;
+            case Kind::Ref:
+                return is_mut == other.is_mut &&
+                       inner_equals(inner, other.inner);
+            case Kind::Array:
+                return len == other.len && inner_equals(inner, other.inner);
+            case Kind::Box:
+            case Kind::Vec:
+                return inner_equals(inner, other.inner);
+            case Kind::Error:
+                return true; // 不可达
         }
         return false;
     }
@@ -153,42 +156,43 @@ struct SemaType {
     // Phase 3 符号表落地后可改为打印其名字）。
     std::string toString() const {
         switch (kind) {
-        case Kind::Unit:
-            return "()";
-        case Kind::Never:
-            return "!";
-        case Kind::Error:
-            return "<error>";
-        case Kind::Int:
-            switch (int_kind) {
-            case IntKind::I32:
+            case Kind::Unit:
+                return "()";
+            case Kind::Never:
+                return "!";
+            case Kind::Error:
+                return "<error>";
+            case Kind::Int:
+                switch (int_kind) {
+                    case IntKind::I32:
+                        return "i32";
+                    case IntKind::U32:
+                        return "u32";
+                    case IntKind::Isize:
+                        return "isize";
+                    case IntKind::Usize:
+                        return "usize";
+                }
                 return "i32";
-            case IntKind::U32:
-                return "u32";
-            case IntKind::Isize:
-                return "isize";
-            case IntKind::Usize:
-                return "usize";
-            }
-            return "i32";
-        case Kind::Bool:
-            return "bool";
-        case Kind::Struct:
-            return "struct";
-        case Kind::Ref:
-            return (is_mut ? "&mut " : "&") + inner_str(inner);
-        case Kind::Array:
-            return "[" + inner_str(inner) + "; " + std::to_string(len) + "]";
-        case Kind::Box:
-            return "Box<" + inner_str(inner) + ">";
-        case Kind::Vec:
-            return "Vec<" + inner_str(inner) + ">";
+            case Kind::Bool:
+                return "bool";
+            case Kind::Struct:
+                return "struct";
+            case Kind::Ref:
+                return (is_mut ? "&mut " : "&") + inner_str(inner);
+            case Kind::Array:
+                return "[" + inner_str(inner) + "; " + std::to_string(len) + "]";
+            case Kind::Box:
+                return "Box<" + inner_str(inner) + ">";
+            case Kind::Vec:
+                return "Vec<" + inner_str(inner) + ">";
         }
         return "<error>";
     }
 
 private:
-    // 递归比较两个子类型指针：都为空视为相等（如 Unit 无 inner），否则解引用比较。
+    // 递归比较两个子类型指针：
+    // 都为空视为相等（如Unit无inner），否则解引用比较。
     static bool inner_equals(const SemaTypePtr &a, const SemaTypePtr &b) {
         if (!a || !b)
             return a == b;
@@ -199,6 +203,8 @@ private:
     }
 };
 
-inline bool equals(const SemaType &a, const SemaType &b) { return a.equals(b); }
+inline bool equals(const SemaType &a, const SemaType &b) {
+    return a.equals(b);
+}
 
 } // namespace rx

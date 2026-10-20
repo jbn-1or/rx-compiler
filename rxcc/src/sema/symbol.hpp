@@ -16,7 +16,7 @@ struct FieldDecl {
     Span span{};
 };
 
-// value_ns_ 里的符号基类：函数、常量、内置 I/O 都用这条记录。
+// func_const_namespace 里的符号基类：函数、常量、内置 I/O 都用这条记录。
 // 存：名字 + 类别 + 声明位置；子类再补充各自的 AST 节点。
 // `fn main() {}` → {kind=Fn, name="main"}；内置 `get_i32` → {kind=Builtin, name="get_i32"}
 struct Symbol {

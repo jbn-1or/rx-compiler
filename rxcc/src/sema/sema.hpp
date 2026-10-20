@@ -15,7 +15,7 @@ namespace rx {
 // SEMANTIC 阶段分析器。
 // 遍历 Crate，建立符号表并做语义检查；错误写进构造时传入的诊断收集器。
 // 例：输入 `struct S { x: i32 } fn main() {}`
-//     → type_ns_ 里有 "S"，value_ns_ 里有 "main"（以及三个内置 I/O 名）。
+//     → type_namespace 里有 "S"，func_const_namespace 里有 "main"（以及三个内置 I/O 名）。
 class SemaAnalyzer {
 public:
     // 构造：接入外部诊断收集器。
@@ -30,9 +30,9 @@ private:
 
     // 名字表
     // 结构体名 → 档案，例："Point" → Point 的 StructSymbol
-    std::unordered_map<std::string, StructSymbol *> type_ns_;
+    std::unordered_map<std::string, StructSymbol *> type_namespace;
     // 值名 → 档案，例："main" → FnSymbol；"MAX" → ConstSymbol；"get_i32" → Builtin Symbol
-    std::unordered_map<std::string, Symbol *> value_ns_;
+    std::unordered_map<std::string, Symbol *> func_const_namespace;
 
     // —— 所有权：表里只存裸指针，这些容器保证对象在分析期间不被释放 ——
     // 所有结构体档案，例：每个 struct 一个元素
@@ -48,6 +48,7 @@ private:
     void collect_struct(const Struct &s);
     void collect_const(const Const &c);
     void collect_function(const Function &f);
+    void check_param_names(const std::vector<Param> &params, Span fallback);
     void collect_impl(const InherentImpl &impl);
     void check_entry();
 };

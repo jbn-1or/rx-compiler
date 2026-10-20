@@ -30,7 +30,7 @@ struct Symbol {
 struct StructSymbol;
 
 // 一个函数或方法的档案（impl 内带/不带 self 的都算）。
-// 存什么：Symbol 部分 + 指向 AST Function 节点 + 所属结构体。
+// Symbol 部分 + 指向 AST Function 节点 + 所属结构体。
 // `fn add(a: i32) -> i32` → {name="add", node=Function(add), owner=nullptr}
 // `impl S { fn get(&self) -> i32 }` → {name="get", node=Function(get), owner=S}
 struct FnSymbol : Symbol {
@@ -39,7 +39,7 @@ struct FnSymbol : Symbol {
 };
 
 // 一个常量的档案（顶层 const 或 impl 内的关联 const）。
-// 存什么：Symbol 部分 + 指向 AST Const 节点 + 所属结构体。
+// Symbol 部分 + 指向 AST Const 节点 + 所属结构体。
 // `const MAX: i32 = 10;` → {name="MAX", node=Const(MAX), owner=nullptr}
 //     `impl S { const K: i32 = 1; }` → {name="K", owner=S}
 struct ConstSymbol : Symbol {
@@ -48,7 +48,7 @@ struct ConstSymbol : Symbol {
 };
 
 // 一个结构体的档案：后续按类型名查结构体、挂 impl 成员都靠它。
-// 存什么：名字 + AST 节点 + 字段列表 + derive 集合 + impl 关联项表。
+// 名字 + AST 节点 + 字段列表 + derive 集合 + impl 关联项表。
 // `struct Point { x: i32, y: i32 }`
 //     → {name="Point", fields={{x,i32},{y,i32}}, derives={}, assoc_items={}}
 //   再配 `impl Point { fn len(&self) -> i32 }`

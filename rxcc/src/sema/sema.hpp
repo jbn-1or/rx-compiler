@@ -13,24 +13,22 @@
 namespace rx {
 
 // SEMANTIC 阶段分析器。
-// 做什么：遍历 Crate，建立符号表并做语义检查；错误写进构造时传入的诊断收集器。
+// 遍历 Crate，建立符号表并做语义检查；错误写进构造时传入的诊断收集器。
 // 例：输入 `struct S { x: i32 } fn main() {}`
 //     → type_ns_ 里有 "S"，value_ns_ 里有 "main"（以及三个内置 I/O 名）。
 class SemaAnalyzer {
 public:
     // 构造：接入外部诊断收集器。
-    // 输入：diags（main.cpp 创建，整个阶段共用）；输出：无返回值，只保存引用。
+    // 输入：diags（main.cpp 创建，整个阶段共用）
     explicit SemaAnalyzer(Diagnostics &diags) : diags_(diags) {}
 
     // 对整个 crate 做语义检查。
-    // 输入：crate（AST 根）；输出：无返回值；符号表成员被填好，错误追加到 diags_。
-    // 例：`fn main() {}` → value_ns_["main"] 指向 FnSymbol，且不产生诊断。
     void run(const Crate &crate);
 
 private:
     Diagnostics &diags_; // 诊断收集器，例：N2 重名时 → diags_.error(span, "duplicate struct")
 
-    // —— 名字表：Phase 1 建立，后续 Phase 反复查询 ——
+    // 名字表
     std::unordered_map<std::string, StructSymbol *> type_ns_; // 结构体名 → 档案，例："Point" → Point 的 StructSymbol
     std::unordered_map<std::string, Symbol *> value_ns_;      // 值名 → 档案，例："main" → FnSymbol；"MAX" → ConstSymbol；"get_i32" → Builtin Symbol
 

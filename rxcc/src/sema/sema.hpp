@@ -49,6 +49,7 @@ private:
     void collect_const(const Const &c);
     void collect_function(const Function &f);
     void check_param_names(const std::vector<Param> &params, Span fallback);
+    StructSymbol *resolve_impl_target(const Type &t);
     void collect_impl(const InherentImpl &impl);
     void check_entry();
 };

@@ -157,16 +157,81 @@ void SemaAnalyzer::check_param_names(const std::vector<Param> &params,
     }
 }
 
-// 输入：`impl S { fn get(&self) {} }` 的 AST 节点
-// 效果：成功 → S 的 assoc_items["get"] = FnSymbol；
-//       目标不是用户结构体 → 报 G7，目标带类型实参 → 报 G1，成员重名 → 报 N6。
-// 两个 impl 都定义 get → 报 N6；`impl i32 {}` → 报 G7。
-// TODO(1.5)：实现 G7/G1/G8/N6/N5 与关联项登记。
-void SemaAnalyzer::collect_impl(const InherentImpl &impl) {
-    (void)impl;
+// 输入：`impl S` 的 self_type 节点
+// 输出：S 对应的 StructSymbol；不是用户结构体或带类型实参时追加诊断并返回 nullptr。
+// 例：`impl S` → S；`impl Box<i32>``impl [i32; 2]``impl &S` → G7；`impl S<i32>` → G1。
+StructSymbol *SemaAnalyzer::resolve_impl_target(const Type &t) {
+    const auto *pt = dynamic_cast<const PathType *>(&t);
+    if (!pt || pt->segments.size() != 1) {  // impl对象不唯一
+        diags_.error(t.span, "impl target must be a user-defined struct");
+        return nullptr;
+    }
+    const PathSegment &seg = pt->segments[0];
+    const auto it = type_namespace.find(seg.name);
+    if (it == type_namespace.end()) {  // impl对象还未定义或者是自留类名
+        diags_.error(t.span,
+                     "impl target must be a user-defined struct: " + seg.name);
+        return nullptr;
+    }
+    if (!seg.generics.empty()) { // impl对象带类型实参
+        diags_.error(t.span, "structs have no type parameters: " + seg.name);
+        return nullptr;
+    }
+    return it->second;
 }
 
-// 输入：已填好的 func_const_namespace；输出：无返回值；不合法时追加 E1–E3 诊断。
+// 把 impl 的目标类型解析成已登记的结构体。
+// 输入：`impl S { fn get(&self) {} }` 的 AST 节点
+// 效果：成功 → S 的 assoc_items["get"] = FnSymbol；
+//       目标不是用户结构体 → 报 G7，目标带类型实参 → 报 G1，成员重名 → 报 N6，
+//       方法参数重名 → 报 N5。
+// 例：两个 impl 都定义 get → 报 N6；`impl i32 {}` → 报 G7。
+void SemaAnalyzer::collect_impl(const InherentImpl &impl) {
+    StructSymbol *target = resolve_impl_target(*impl.self_type);
+    if (!target)
+        return;
+
+    for (const auto &item : impl.items) {
+        // impl成员是函数还是常量
+        if (const auto *fn = dynamic_cast<const Function *>(item.get())) {
+            // N6：跨 impl 方法/关联函数/关联常量也不能重名。
+            if (target->assoc_items.count(fn->name)) {
+                diags_.error(fn->span,
+                             "duplicate associated item: " + fn->name);
+                continue; // 保留先登记的那个
+            }
+            // N5：方法参数名必须唯一。
+            check_param_names(fn->params, fn->span);
+            // 创建函数symbol
+            auto sym = std::make_unique<FnSymbol>();
+            sym->kind = Symbol::Kind::Fn;
+            sym->name = fn->name;
+            sym->span = fn->span;
+            sym->node = fn;
+            sym->owner = target;
+            target->assoc_items[fn->name] = sym.get();
+            fns_.push_back(std::move(sym));
+        } else if (const auto *c = dynamic_cast<const Const *>(item.get())) {
+            // N6：关联常量与同名方法/关联函数冲突。
+            if (target->assoc_items.count(c->name)) {
+                diags_.error(c->span,
+                             "duplicate associated item: " + c->name);
+                continue;
+            }
+            // 创建常量symbol
+            auto sym = std::make_unique<ConstSymbol>();
+            sym->kind = Symbol::Kind::Const;
+            sym->name = c->name;
+            sym->span = c->span;
+            sym->node = c;
+            sym->owner = target;
+            target->assoc_items[c->name] = sym.get();
+            consts_.push_back(std::move(sym));
+        }
+    }
+}
+
+// 检查填好的 func_const_namespace；
 // 例：没有 main → E1；`const main: i32 = 1;` → E1；`fn main(x: i32)` → E2；
 //     `fn main<'a>()` → E3；`fn main() {}` → 无诊断。
 void SemaAnalyzer::check_entry() {

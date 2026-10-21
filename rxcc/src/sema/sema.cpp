@@ -167,9 +167,24 @@ void SemaAnalyzer::collect_impl(const InherentImpl &impl) {
 }
 
 // 输入：已填好的 func_const_namespace；输出：无返回值；不合法时追加 E1–E3 诊断。
-// 没有 main → E1；`fn main(x: i32)` → E2；`fn main<T>()` → E3；正常 main →
-// 无诊断。
-// TODO(1.4)：实现 E1/E2/E3。
-void SemaAnalyzer::check_entry() {}
+// 例：没有 main → E1；`const main: i32 = 1;` → E1；`fn main(x: i32)` → E2；
+//     `fn main<'a>()` → E3；`fn main() {}` → 无诊断。
+void SemaAnalyzer::check_entry() {
+    const auto it = func_const_namespace.find("main");
+    const bool has_fn_main =
+        it != func_const_namespace.end() && it->second->kind == Symbol::Kind::Fn;
+    // E1：可执行程序必须有一个顶层 fn main。
+    if (!has_fn_main) {
+        diags_.error(Span{}, "an executable needs a top-level main");
+        return;
+    }
+    const auto *fn = static_cast<const FnSymbol *>(it->second);
+    // E2：main 不能有值参数。
+    if (!fn->node->params.empty())
+        diags_.error(fn->span, "main cannot have value parameters");
+    // E3：main 不能有泛型/生命周期参数。
+    if (fn->node->has_generic_params)
+        diags_.error(fn->span, "main cannot have generic parameters");
+}
 
 } // namespace rx

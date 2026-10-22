@@ -52,6 +52,10 @@ private:
     StructSymbol *resolve_impl_target(const Type &t);
     void collect_impl(const InherentImpl &impl);
     void check_entry();
+    // 2.2：求值不依赖名字的常量值（整数/布尔/负数）；路径留给 2.3。
+    EvaluatedConst evaluated_const_value(const ConstValue &value,
+                                         const SemaType *expected,
+                                         const StructSymbol *current);
 };
 
 } // namespace rx

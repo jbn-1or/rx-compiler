@@ -12,6 +12,33 @@ const std::set<std::string> kBuiltinTypes = {"i32",  "u32", "isize", "usize",
 const std::set<std::string> kBuiltinValueNames = {"get_i32", "print_i32",
                                                   "println_i32"};
 
+// 求值失败哨兵：ty 默认是 Error，value 默认是 monostate，ok = false。
+EvaluatedConst failed_evaluated() { return EvaluatedConst{}; }
+
+// 把整数字面量后缀映射成对应的语义整数类型。
+SemaType type_from_suffix(IntSuffix suffix) {
+    switch (suffix) {
+        case IntSuffix::I32:
+            return SemaType::int_(SemaType::IntKind::I32);
+        case IntSuffix::U32:
+            return SemaType::int_(SemaType::IntKind::U32);
+        case IntSuffix::Isize:
+            return SemaType::int_(SemaType::IntKind::Isize);
+        case IntSuffix::Usize:
+            return SemaType::int_(SemaType::IntKind::Usize);
+        case IntSuffix::None:
+            break;
+    }
+    return SemaType::error();
+}
+
+// 是否是i32/isize
+bool is_signed_int(const SemaType &ty) {
+    return ty.kind == SemaType::Kind::Int &&
+           (ty.int_kind == SemaType::IntKind::I32 ||
+            ty.int_kind == SemaType::IntKind::Isize);
+}
+
 } // namespace
 
 // 先登记内置 I/O 名，再逐条登记顶层声明，最后检查 main；错误进 diags_。
@@ -19,10 +46,15 @@ const std::set<std::string> kBuiltinValueNames = {"get_i32", "print_i32",
 //   → type_namespace = {"S" → S}，func_const_namespace = {kBuiltinValueNames, "main"}
 void SemaAnalyzer::run(const Crate &crate) {
     init_builtins();
-    for (const auto &item : crate.items) { // 第一遍：登记名字
+    // 第一遍只登记结构体：规范要求顶层名称查找与声明顺序无关，故 impl 可以
+    // 出现在 struct 之前；先建好 type_namespace，1.5 解析 impl 目标时才能命中。
+    for (const auto &item : crate.items) {
         if (auto *s = dynamic_cast<Struct *>(item.get()))
             collect_struct(*s);
-        else if (auto *c = dynamic_cast<Const *>(item.get()))
+    }
+    // 第二遍登记值名与 impl（结构体已在上一步处理）。
+    for (const auto &item : crate.items) {
+        if (auto *c = dynamic_cast<Const *>(item.get()))
             collect_const(*c);
         else if (auto *f = dynamic_cast<Function *>(item.get()))
             collect_function(*f);
@@ -250,6 +282,101 @@ void SemaAnalyzer::check_entry() {
     // E3：main 不能有泛型/生命周期参数。
     if (fn->node->has_generic_params)
         diags_.error(fn->span, "main cannot have generic parameters");
+}
+
+// value要求值的ast节点，expected期望的类型，current所在结构体
+// 例：`3u32` → {u32, 3, true}；`const N: i32 = -1;` 的 `-1` → {i32, -1, true}；
+//     `true` 在期望 i32 的位置 → C1；`-1u32` → C5。Path 分支留给 2.3。
+EvaluatedConst SemaAnalyzer::evaluated_const_value(const ConstValue &value,
+                                                   const SemaType *expected,
+                                                   const StructSymbol *current) {
+    // 期望类型已经出错时不再追加诊断
+    if (expected && expected->is_error())
+        return failed_evaluated();
+
+    switch (value.kind) {
+        case ConstValue::Kind::Int: {
+            SemaType ty = SemaType::error();
+            if (value.suffix != IntSuffix::None) {
+                // 有后缀时后缀优先；与声明/上下文的期望类型冲突 → C1。
+                ty = type_from_suffix(value.suffix);
+                if (expected && !expected->equals(ty)) {
+                    diags_.error(value.span,
+                                 "integer literal suffix does not match the "
+                                 "expected type");
+                    return failed_evaluated();
+                }
+            } else if (expected) {
+                // 无后缀，有期望的整数类型；非整数期望（如 bool）→ C1。
+                if (!expected->is_int()) {
+                    diags_.error(value.span,
+                                 "integer constant does not match the expected "
+                                 "type");
+                    return failed_evaluated();
+                }
+                ty = *expected;
+            } else {
+                // 无后缀无期望类型时回退 i32（§10 整数文字规则）。
+                ty = SemaType::int_(SemaType::IntKind::I32);
+            }
+
+            EvaluatedConst result;
+            result.ty = ty;
+            if (ty.int_kind == SemaType::IntKind::U32 ||
+                ty.int_kind == SemaType::IntKind::Usize)
+                result.value = static_cast<uint64_t>(value.int_value);
+            else
+                result.value = value.int_value;
+            result.ok = true;
+            return result;
+        }
+
+        case ConstValue::Kind::Bool: {
+            // 期望不是bool类型
+            if (expected && expected->kind != SemaType::Kind::Bool) {
+                diags_.error(value.span,
+                             "boolean constant does not match the expected type");
+                return failed_evaluated();
+            }
+            EvaluatedConst result;
+            result.ty = SemaType::bool_();
+            result.value = value.bool_value;
+            result.ok = true;
+            return result;
+        }
+
+        case ConstValue::Kind::Neg: {
+            if (!value.operand)  // 操作数为空
+                return failed_evaluated();
+            // 规范 §12：期望类型不穿过一元负号
+            // 递归求-后部分，取无期望类型
+            EvaluatedConst operand =
+                evaluated_const_value(*value.operand, nullptr, current);
+            if (!operand.ok || operand.ty.is_error()) // 子结果失败
+                return failed_evaluated();
+            if (!is_signed_int(operand.ty)) {
+                // 对 u32/usize/bool 等取负 → C5。
+                diags_.error(value.span,
+                             "cannot negate an unsigned or non-integer constant");
+                return failed_evaluated();
+            }
+            // 取出int64_t值并取负
+            const auto *magnitude = std::get_if<int64_t>(&operand.value);
+            if (!magnitude)
+                return failed_evaluated();
+            EvaluatedConst result;
+            result.ty = operand.ty;
+            result.value = -*magnitude;
+            result.ok = true;
+            return result;
+        }
+
+        case ConstValue::Kind::Path:
+            // 常量路径解析（含前向引用与环检测）在 2.3 实现。
+            return failed_evaluated();
+    }
+
+    return failed_evaluated();
 }
 
 } // namespace rx

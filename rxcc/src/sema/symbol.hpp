@@ -1,8 +1,11 @@
 #pragma once
 #include "ast/ast.hpp"
+#include "sema/type.hpp"
+#include <cstdint>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <variant>
 #include <vector>
 
 namespace rx {
@@ -29,6 +32,18 @@ struct Symbol {
 
 struct StructSymbol;
 
+// 常量求值结果：类型 + 值（有符号/无符号整数或 bool）+ 是否成功。
+// 失败时 ty 为 Error、value 为 monostate、ok 为 false，供上层静默放行。
+// 例：`3u32` → {ty=u32, value=uint64_t{3}, ok=true}；`true` → {ty=bool, value=true, ok=true}
+struct EvaluatedConst {
+    SemaType ty;
+    std::variant<std::monostate, int64_t, uint64_t, bool> value;
+    bool ok = false;
+};
+
+// ConstSymbol 的三色求值状态：递归求值遇到 Visiting 说明形成了常量环。
+enum class ConstState { Unvisited, Visiting, Visited };
+
 // 一个函数或方法的档案（impl 内带/不带 self 的都算）。
 // Symbol 部分 + 指向 AST Function 节点 + 所属结构体。
 // `fn add(a: i32) -> i32` → {name="add", node=Function(add), owner=nullptr}
@@ -45,6 +60,8 @@ struct FnSymbol : Symbol {
 struct ConstSymbol : Symbol {
     const Const *node = nullptr;   // 指向 AST 常量节点（非拥有），可取 node->type、node->value
     StructSymbol *owner = nullptr;
+    ConstState state = ConstState::Unvisited; // 求值三色状态，2.3 使用
+    EvaluatedConst evaluated;                 // 求值缓存，2.3/2.5 写入
 };
 
 // 一个结构体的档案：后续按类型名查结构体、挂 impl 成员都靠它。

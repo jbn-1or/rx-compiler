@@ -90,6 +90,7 @@ void SemaAnalyzer::run(const Crate &crate) {
             collect_impl(*i);
     }
     check_entry();
+    evaluated_all_constants();
 }
 
 // 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin
@@ -317,6 +318,14 @@ void SemaAnalyzer::check_entry() {
         diags_.error(fn->span, "main cannot have generic parameters");
 }
 
+// 驱动所有常量求值：consts_ 同时包含顶层常量和 impl 关联常量。
+// evaluated_const 内部负责三色环检测、C1 比对与缓存，这里只负责遍历。
+// 无引用者、只声明不求值的常量也会在这里被检查。
+void SemaAnalyzer::evaluated_all_constants() {
+    for (auto &sym : consts_)
+        evaluated_const(*sym);
+}
+
 // 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的
 //       结构体；顶层常量为 nullptr）。解析到 ConstSymbol*
 // 作用：把 `N`、`Type::N`、`Self::N` 解析成常量符号，只查名字不求值；
@@ -532,7 +541,7 @@ SemaType SemaAnalyzer::resolve_type(const Type &type,
     return SemaType::error();
 }
 
-// 根据ConstSymbol输出EvaluatedConst，evaluated_const_value的工具函数
+// 根据ConstSymbol输出EvaluatedConst
 // 成功时 ty/value 为初始化器结果，失败时ty=Error、value=monostate、ok=false。
 // 作用：DFS求值常量并写缓存；求值时使用目标自己的声明类型，引用方的 expected 不传入。
 // 例：`const A: i32 = B; const B: i32 = 3;` 求 A 时递归求 B；

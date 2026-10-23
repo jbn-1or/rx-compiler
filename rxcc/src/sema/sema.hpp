@@ -52,6 +52,8 @@ private:
     StructSymbol *resolve_impl_target(const Type &t);
     void collect_impl(const InherentImpl &impl);
     void check_entry();
+    // 扫一遍所有顶层/关联常量，逐个求值并落缓存。
+    void evaluated_all_constants();
     // 求值不依赖名字的常量值（整数/布尔/负数）。
     EvaluatedConst evaluated_const_value(const ConstValue &value,
                                          const SemaType *expected,

@@ -406,43 +406,133 @@ SemaAnalyzer::resolve_const_path(const std::vector<PathSegment> &path,
     return static_cast<ConstSymbol *>(it->second);
 }
 
-// 根据type、current（Self 所属的结构体）输出对应的 SemaType
-// 给 evaluated_const 提供“目标常量自己的声明类型”，避免把引用方的
-//       expected 传进目标常量；完整的类型归一化由 2.4 的 resolve_type 接替。
-// 例：`usize` → usize；impl S 内的 `Self` → S；`[i32; 2]` → Error（等 2.4）。
-SemaType SemaAnalyzer::resolve_const_decl_type(const Type &type,
-                                               const StructSymbol *current) {
-    // `()` 是唯一的非路径标量类型；常量值本身不能是 unit，但先解析出来
-    // 让后续 C1 能给出类型不匹配。
+// 输入：type（语法类型节点）、current（Self 所属的结构体，可为 nullptr）。
+// 输出：归一化后的 SemaType；解析失败统一返回 SemaType::error()。
+// 作用：把基本类型、Unit、引用、数组、Box/Vec、用户结构体和 Self 转换成语义
+//       类型；数组长度在这里按 usize 常量求值，保证 [i32; N] 与 [i32; 3] 等价。
+// 例：`usize` → usize；`&mut S` → &mut S；`[i32; 3]` → [i32; 3]；
+//     `Box<Vec<i32>>` → Box<Vec<i32>>；无 current 的 `Self` → N10。
+SemaType SemaAnalyzer::resolve_type(const Type &type,
+                                    const StructSymbol *current) {
+    // `()`：函数/控制流结果，也是省略返回类型时的类型。
     if (dynamic_cast<const UnitType *>(&type))
         return SemaType::unit();
 
-    // 2.3 只处理单段路径类型。多段路径、引用、数组等留给 2.4，
-    // 这里返回 Error 让调用方静默跳过，不提前报 N15/G1 等诊断。
-    const auto *pt = dynamic_cast<const PathType *>(&type);
-    if (!pt || pt->segments.size() != 1)
-        return SemaType::error();
+    if (const auto *pt = dynamic_cast<const PathType *>(&type)) {
+        // 类型位置没有 associated type；多段路径（如 S::T）无法解析。
+        if (pt->segments.size() != 1) {
+            diags_.error(type.span, "unresolved type: " + pt->name());
+            return SemaType::error();
+        }
 
-    const PathSegment &seg = pt->segments[0];
-    // 带类型实参的声明类型需要 G1/G3/G4/G5 诊断，统一交给 2.4。
-    if (!seg.generics.empty())
-        return SemaType::error();
-    // Self 只在结构体/impl 上下文中有目标；没有 current 时留给 2.4 报 N10。
-    if (seg.name == "Self")
-        return current ? SemaType::struct_(current) : SemaType::error();
+        const PathSegment &seg = pt->segments[0];
 
-    // 先查基本类型，再查用户结构体；两者都不命中 → 未知类型，等 2.4 报 N15。
-    const SemaType basic = basic_type_from_name(seg.name);
-    if (!basic.is_error())
-        return basic;
+        // Self 只表示当前结构体/impl 目标
+        if (seg.name == "Self") {
+            // self无指代
+            if (!current) {
+                diags_.error(
+                    type.span,
+                    "Self is not available outside a struct or impl");
+                return SemaType::error();
+            }
+            // self不能有实参
+            if (!seg.generics.empty()) {
+                diags_.error(type.span,
+                             "structs have no type parameters: Self");
+                return SemaType::error();
+            }
+            return SemaType::struct_(current);
+        }
 
-    const auto it = type_namespace.find(seg.name);
-    if (it != type_namespace.end())
+        // 基本类型不接受类型实参。
+        const SemaType basic = basic_type_from_name(seg.name);
+        if (!basic.is_error()) {
+            if (!seg.generics.empty()) {
+                diags_.error(type.span,
+                             "primitives take no type parameters: " +
+                                 seg.name);
+                return SemaType::error();
+            }
+            return basic;
+        }
+
+        // Box/Vec 恰好一个具体类型实参
+        if (seg.name == "Box" || seg.name == "Vec") {
+            if (seg.generics.size() != 1) {
+                diags_.error(
+                    type.span,
+                    seg.name + " requires exactly one concrete type argument");
+                return SemaType::error();
+            }
+            if (!seg.generics[0])
+                return SemaType::error();
+            // 从typeAST节点得到sematype
+            const SemaType inner = resolve_type(*seg.generics[0], current);
+            if (inner.is_error())
+                return SemaType::error();
+            return seg.name == "Box" ? SemaType::boxed(inner)
+                                     : SemaType::vec(inner);
+        }
+
+        // 用户结构体：名义类型，不接受类型实参。
+        const auto it = type_namespace.find(seg.name);
+        if (it == type_namespace.end()) {  // 没找到
+            diags_.error(type.span, "unresolved type: " + seg.name);
+            return SemaType::error();
+        }
+        if (!seg.generics.empty()) { // 不能有实参
+            diags_.error(type.span,
+                         "structs have no type parameters: " + seg.name);
+            return SemaType::error();
+        }
         return SemaType::struct_(it->second);
+    }
+
+    // &T / &mut T
+    if (const auto *rt = dynamic_cast<const ReferenceType *>(&type)) {
+        if (!rt->inner)
+            return SemaType::error();
+        const SemaType inner = resolve_type(*rt->inner, current);
+        if (inner.is_error())
+            return SemaType::error();
+        return SemaType::ref(rt->is_mut, inner);
+    }
+
+    // [T; N]：元素递归解析，长度按 usize 常量求值后存成 uint64_t。
+    if (const auto *at = dynamic_cast<const ArrayType *>(&type)) {
+        if (!at->element)
+            return SemaType::error();
+        const SemaType element = resolve_type(*at->element, current);
+        if (element.is_error())
+            return SemaType::error();
+
+        const SemaType usize_ty = SemaType::int_(SemaType::IntKind::Usize);
+        // 得到数组长度
+        const EvaluatedConst length =
+            evaluated_const_value(at->length, &usize_ty, current);
+        // 求值器已报 C1/C2/C4/C5 等错误时不再重复报 C3。
+        if (!length.ok || length.ty.is_error())
+            return SemaType::error();
+        if (!length.ty.equals(usize_ty)) {  //数组长度不是usize
+            diags_.error(at->length.span,
+                         "array length must be a usize constant");
+            return SemaType::error();
+        }
+        // variant是否是uint_64
+        const auto *len = std::get_if<uint64_t>(&length.value);
+        if (!len) {
+            diags_.error(at->length.span,
+                         "array length must be a usize constant");
+            return SemaType::error();
+        }
+        return SemaType::array(element, *len);
+    }
+
     return SemaType::error();
 }
 
-// 根据sym（要递归求值的常量符号）输出EvaluatedConst；
+// 根据ConstSymbol输出EvaluatedConst，evaluated_const_value的工具函数
 // 成功时 ty/value 为初始化器结果，失败时ty=Error、value=monostate、ok=false。
 // 作用：DFS求值常量并写缓存；求值时使用目标自己的声明类型，引用方的 expected 不传入。
 // 例：`const A: i32 = B; const B: i32 = 3;` 求 A 时递归求 B；
@@ -457,8 +547,8 @@ EvaluatedConst SemaAnalyzer::evaluated_const(ConstSymbol &sym) {
         return failed_evaluated();
     }
 
-    // 先置 Visiting，再解析声明类型；2.4 把这里换成完整的 resolve_type 后，
-    // 数组长度里的自引用（如 `const A: [i32; A]`）也会被 C4 捕获。
+    // 先置 Visiting，再解析声明类型；这样数组长度里的自引用
+    // （如 `const A: [i32; A]`）也会被 C4 捕获。
     sym.state = ConstState::Visiting;
     // AST 正常情况下由 builder 保证 node/type 非空；这里防御性缓存失败。
     if (!sym.node || !sym.node->type) {
@@ -467,18 +557,25 @@ EvaluatedConst SemaAnalyzer::evaluated_const(ConstSymbol &sym) {
         return sym.evaluated;
     }
 
-    const SemaType declared =
-        resolve_const_decl_type(*sym.node->type, sym.owner);
-    // 声明类型当前无法解析（2.3 只支持标量/结构体，2.4 会补诊断）。
-    // 无论哪种失败都缓存 Error，后续引用直接静默放行。
+    const SemaType declared = resolve_type(*sym.node->type, sym.owner);
+    // 声明类型解析失败时已经报过 N10/N15/G1/G3/G4/G5 等诊断；
+    // 统一缓存 Error，后续引用直接静默放行。
     if (declared.is_error()) {
         sym.state = ConstState::Visited;
         sym.evaluated = failed_evaluated();
         return sym.evaluated;
     }
 
-    const EvaluatedConst result =
+    EvaluatedConst result =
         evaluated_const_value(sym.node->value, &declared, sym.owner);
+    // 求值器没报错但结果类型与声明不一致（例如去掉路径期望传播后的
+    // `const N: isize = -1;`）时，在单个常量内部补 C1，避免把错误结果
+    // 发布给后续引用者。
+    if (result.ok && !result.ty.is_error() && !result.ty.equals(declared)) {
+        diags_.error(sym.node->value.span,
+                     "constant initializer does not match declared type");
+        result = failed_evaluated();
+    }
     // 只有“求值成功且类型不是 Error”才保留结果；C1/C5 等失败统一缓存 Error。
     sym.state = ConstState::Visited;
     sym.evaluated =
@@ -597,17 +694,10 @@ SemaAnalyzer::evaluated_const_value(const ConstValue &value,
             // 目标求值失败（C1/C4/C5/C2 等）时，路径也返回失败，
             if (!target_eval.ok || target_eval.ty.is_error())
                 return failed_evaluated();
-            // 路径的结果类型是目标项的声明类型；调用方的 expected 只用于
-            // 它自己的 C1/数组长度检查，不能拿来重新定型目标常量。
-            const SemaType declared =
-                resolve_const_decl_type(*target->node->type, target->owner);
-            if (declared.is_error())
-                return failed_evaluated();
-            EvaluatedConst result;
-            result.ty = declared;
-            result.value = target_eval.value;
-            result.ok = true;
-            return result;
+            // 目标常量已在 evaluated_const 内用声明类型求值并通过 C1 比对，
+            // 缓存里的 ty 就是目标声明类型；直接复用，不能再用调用方的
+            // expected 重新定型目标常量。
+            return target_eval;
         }
     }
 

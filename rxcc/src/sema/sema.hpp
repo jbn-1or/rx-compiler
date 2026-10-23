@@ -60,10 +60,9 @@ private:
     ConstSymbol *resolve_const_path(const std::vector<PathSegment> &path,
                                     Span span, const StructSymbol *current);
     EvaluatedConst evaluated_const(ConstSymbol &sym);
-    // 2.3 临时：只解析常量声明可能用到的标量/结构体类型；完整类型归一化
-    //（引用/数组/Box/Vec 及其诊断）留给 2.4 的 resolve_type。
-    SemaType resolve_const_decl_type(const Type &type,
-                                     const StructSymbol *current);
+    // 把语法类型归一化为 SemaType：基本类型/Unit/引用/数组/Box/Vec/Self，
+    // 数组长度在这里按 usize 常量求值。
+    SemaType resolve_type(const Type &type, const StructSymbol *current);
 };
 
 } // namespace rx

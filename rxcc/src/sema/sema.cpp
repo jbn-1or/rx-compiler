@@ -12,10 +12,18 @@ const std::set<std::string> kBuiltinTypes = {"i32",  "u32", "isize", "usize",
 const std::set<std::string> kBuiltinValueNames = {"get_i32", "print_i32",
                                                   "println_i32"};
 
-// 求值失败哨兵：ty 默认是 Error，value 默认是 monostate，ok = false。
-EvaluatedConst failed_evaluated() { return EvaluatedConst{}; }
+// 输入：无。
+// 输出：失败的 EvaluatedConst（ty=Error、value=monostate、ok=false）。
+// 作用：统一构造求值失败哨兵，避免每个失败分支重复写空结果。
+// 例：常量路径解析失败时 → return failed_evaluated();
+EvaluatedConst failed_evaluated() {
+    return EvaluatedConst{};
+}
 
-// 把整数字面量后缀映射成对应的语义整数类型。
+// 输入：整数字面量的后缀 IntSuffix。
+// 输出：对应的 SemaType 整数类型；没有后缀时返回 Error。
+// 作用：把语法后缀（如 `1u32` 的 u32）转成语义类型。
+// 例：IntSuffix::U32 → u32；IntSuffix::None → Error。
 SemaType type_from_suffix(IntSuffix suffix) {
     switch (suffix) {
         case IntSuffix::I32:
@@ -32,18 +40,38 @@ SemaType type_from_suffix(IntSuffix suffix) {
     return SemaType::error();
 }
 
-// 是否是i32/isize
+// 输入：一个语义类型。
+// 输出：true = 该类型是 i32 或 isize。
+// 作用：判断负数常量 `-magnitude` 的操作数是否为有符号整数（C5）。
+// 例：i32 → true；isize → true；u32/usize/bool → false。
 bool is_signed_int(const SemaType &ty) {
     return ty.kind == SemaType::Kind::Int &&
            (ty.int_kind == SemaType::IntKind::I32 ||
             ty.int_kind == SemaType::IntKind::Isize);
 }
 
+// 在类型解析和常量路径中识别 i32/u32/isize/usize/bool。输出对应的 SemaType
+// 例："usize" → SemaType::int_(Usize)；"S" 或 "Box" → Error。
+SemaType basic_type_from_name(const std::string &name) {
+    if (name == "i32")
+        return SemaType::int_(SemaType::IntKind::I32);
+    if (name == "u32")
+        return SemaType::int_(SemaType::IntKind::U32);
+    if (name == "isize")
+        return SemaType::int_(SemaType::IntKind::Isize);
+    if (name == "usize")
+        return SemaType::int_(SemaType::IntKind::Usize);
+    if (name == "bool")
+        return SemaType::bool_();
+    return SemaType::error();
+}
+
 } // namespace
 
 // 先登记内置 I/O 名，再逐条登记顶层声明，最后检查 main；错误进 diags_。
 // `struct S { x: i32 } fn main() {}`
-//   → type_namespace = {"S" → S}，func_const_namespace = {kBuiltinValueNames, "main"}
+//   → type_namespace = {"S" → S}，func_const_namespace = {kBuiltinValueNames,
+//   "main"}
 void SemaAnalyzer::run(const Crate &crate) {
     init_builtins();
     // 第一遍只登记结构体：规范要求顶层名称查找与声明顺序无关，故 impl 可以
@@ -64,8 +92,9 @@ void SemaAnalyzer::run(const Crate &crate) {
     check_entry();
 }
 
-// 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin 放进 func_const_namespace，
-// 对象由 builtins_ 持有（func_const_namespace 里只存指针）。
+// 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin
+// 放进func_const_namespace 对象由 builtins_
+// 持有（func_const_namespace里只存指针）。
 void SemaAnalyzer::init_builtins() {
     for (const char *n : {"get_i32", "print_i32", "println_i32"}) {
         auto sym = std::make_unique<Symbol>();
@@ -77,9 +106,11 @@ void SemaAnalyzer::init_builtins() {
 }
 
 // 输入：`struct Point { x: i32 }` 的 AST 节点
-// 成功 → type_namespace["Point"] = 新 StructSymbol；名字非法 → 只追加诊断，不登记。
+// 成功 → type_namespace["Point"] = 新 StructSymbol；名字非法 →
+// 追加诊断，不登记。
 void SemaAnalyzer::collect_struct(const Struct &s) {
-    // N17：结构体名不能占用语言自带的类型名。报错后不登记，避免污染 type_namespace。
+    // N17：结构体名不能占用语言自带的类型名。报错后不登记，避免污染
+    // type_namespace。
     if (kBuiltinTypes.count(s.name)) {
         diags_.error(s.span, "protected type name: " + s.name);
         return;
@@ -89,7 +120,8 @@ void SemaAnalyzer::collect_struct(const Struct &s) {
         diags_.error(s.span, "duplicate struct: " + s.name);
         return;
     }
-    // N4：同一结构体内字段名必须唯一。StructField 没有span，用字段类型节点的位置。
+    // N4：同一结构体内字段名必须唯一。StructField
+    // 没有span，用字段类型节点的位置。
     std::set<std::string> seen_fields;
     for (const auto &f : s.fields) {
         if (!seen_fields.insert(f.name).second) {
@@ -119,8 +151,9 @@ void SemaAnalyzer::collect_struct(const Struct &s) {
 }
 
 // 输入：`const MAX: i32 = 10;` 的 AST 节点
-// 效果：成功 → func_const_namespace["MAX"] = 新 ConstSymbol；名字非法 → 只追加诊断，不登记。
-// 例：第二个 `const MAX` → 报 N1；`const get_i32` → 报 N18。
+// 效果：成功 → func_const_namespace["MAX"] = 新 ConstSymbol；名字非法 →
+// 只追加诊断，不登记。 例：第二个 `const MAX` → 报 N1；`const get_i32` → 报
+// N18。
 void SemaAnalyzer::collect_const(const Const &c) {
     // N18：内置 I/O 名是受保护值名，用户常量不能占用。
     // 必须先于 N1 检查：这三个名字已经预登记在 func_const_namespace 中。
@@ -145,8 +178,9 @@ void SemaAnalyzer::collect_const(const Const &c) {
 }
 
 // 输入：`fn f(a: i32) {}` 的 AST 节点
-// 效果：成功 → func_const_namespace["f"] = 新 FnSymbol；名字非法 → 只追加诊断，不登记。
-// 例：`fn f(a: i32, a: i32)` → 报 N5；顶层 `fn f(&self)` → 报 N8；
+// 效果：成功 → func_const_namespace["f"] = 新 FnSymbol；名字非法 →
+// 只追加诊断，不登记。 例：`fn f(a: i32, a: i32)` → 报 N5；顶层 `fn f(&self)` →
+// 报 N8；
 void SemaAnalyzer::collect_function(const Function &f) {
     // N18：内置 I/O 名是受保护值名，用户函数不能占用。
     if (kBuiltinValueNames.count(f.name)) {
@@ -190,17 +224,18 @@ void SemaAnalyzer::check_param_names(const std::vector<Param> &params,
 }
 
 // 输入：`impl S` 的 self_type 节点
-// 输出：S 对应的 StructSymbol；不是用户结构体或带类型实参时追加诊断并返回 nullptr。
-// 例：`impl S` → S；`impl Box<i32>``impl [i32; 2]``impl &S` → G7；`impl S<i32>` → G1。
+// 输出：S 对应的 StructSymbol；不是用户结构体或带类型实参时追加诊断并返回
+// nullptr。 例：`impl S` → S；`impl Box<i32>``impl [i32; 2]``impl &S` →
+// G7；`impl S<i32>` → G1。
 StructSymbol *SemaAnalyzer::resolve_impl_target(const Type &t) {
     const auto *pt = dynamic_cast<const PathType *>(&t);
-    if (!pt || pt->segments.size() != 1) {  // impl对象不唯一
+    if (!pt || pt->segments.size() != 1) { // impl对象不唯一
         diags_.error(t.span, "impl target must be a user-defined struct");
         return nullptr;
     }
     const PathSegment &seg = pt->segments[0];
     const auto it = type_namespace.find(seg.name);
-    if (it == type_namespace.end()) {  // impl对象还未定义或者是自留类名
+    if (it == type_namespace.end()) { // impl对象还未定义或者是自留类名
         diags_.error(t.span,
                      "impl target must be a user-defined struct: " + seg.name);
         return nullptr;
@@ -215,9 +250,8 @@ StructSymbol *SemaAnalyzer::resolve_impl_target(const Type &t) {
 // 把 impl 的目标类型解析成已登记的结构体。
 // 输入：`impl S { fn get(&self) {} }` 的 AST 节点
 // 效果：成功 → S 的 assoc_items["get"] = FnSymbol；
-//       目标不是用户结构体 → 报 G7，目标带类型实参 → 报 G1，成员重名 → 报 N6，
-//       方法参数重名 → 报 N5。
-// 例：两个 impl 都定义 get → 报 N6；`impl i32 {}` → 报 G7。
+// 目标不是用户结构体 → 报 G7，目标带类型实参 → G1，成员重名 → N6，方法参数重名
+// → N5。 例：两个 impl 都定义 get → 报 N6；`impl i32 {}` → 报 G7。
 void SemaAnalyzer::collect_impl(const InherentImpl &impl) {
     StructSymbol *target = resolve_impl_target(*impl.self_type);
     if (!target)
@@ -246,8 +280,7 @@ void SemaAnalyzer::collect_impl(const InherentImpl &impl) {
         } else if (const auto *c = dynamic_cast<const Const *>(item.get())) {
             // N6：关联常量与同名方法/关联函数冲突。
             if (target->assoc_items.count(c->name)) {
-                diags_.error(c->span,
-                             "duplicate associated item: " + c->name);
+                diags_.error(c->span, "duplicate associated item: " + c->name);
                 continue;
             }
             // 创建常量symbol
@@ -268,8 +301,8 @@ void SemaAnalyzer::collect_impl(const InherentImpl &impl) {
 //     `fn main<'a>()` → E3；`fn main() {}` → 无诊断。
 void SemaAnalyzer::check_entry() {
     const auto it = func_const_namespace.find("main");
-    const bool has_fn_main =
-        it != func_const_namespace.end() && it->second->kind == Symbol::Kind::Fn;
+    const bool has_fn_main = it != func_const_namespace.end() &&
+                             it->second->kind == Symbol::Kind::Fn;
     // E1：可执行程序必须有一个顶层 fn main。
     if (!has_fn_main) {
         diags_.error(Span{}, "an executable needs a top-level main");
@@ -284,13 +317,188 @@ void SemaAnalyzer::check_entry() {
         diags_.error(fn->span, "main cannot have generic parameters");
 }
 
-// value要求值的ast节点，expected期望的类型，current所在结构体
-// 例：`3u32` → {u32, 3, true}；`const N: i32 = -1;` 的 `-1` → {i32, -1, true}；
-//     `true` 在期望 i32 的位置 → C1；`-1u32` → C5。Path 分支留给 2.3。
-EvaluatedConst SemaAnalyzer::evaluated_const_value(const ConstValue &value,
-                                                   const SemaType *expected,
-                                                   const StructSymbol *current) {
-    // 期望类型已经出错时不再追加诊断
+// 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的
+//       结构体；顶层常量为 nullptr）。解析到 ConstSymbol*
+// 作用：把 `N`、`Type::N`、`Self::N` 解析成常量符号，只查名字不求值；
+//       关联常量只查 assoc_items，不进入顶层值名空间（C7）。
+// 例：`N` → 顶层 const N；`Config::N` → Config 的关联常量；
+//     `Self::B` 在 impl S 内 → S::B；`fn_name` 或 `S::method` → C2。
+ConstSymbol *
+SemaAnalyzer::resolve_const_path(const std::vector<PathSegment> &path,
+                                 Span span, const StructSymbol *current) {
+    // 常量路径只允许 1 段或 2 段；0/>2 段都不可能是常量项。
+    if (path.empty() || path.size() > 2) {
+        diags_.error(span, "constant path must resolve to a constant");
+        return nullptr;
+    }
+
+    const PathSegment &first = path[0];
+    if (path.size() == 1) {
+        // 顶层常量不能带类型实参；带实参说明不是常量项。
+        if (!first.generics.empty()) {
+            diags_.error(span, "constant path must resolve to a constant");
+            return nullptr;
+        }
+        const auto it = func_const_namespace.find(first.name);
+        // 名字不存在，或名字存在但是函数/内置 I/O
+        if (it == func_const_namespace.end() ||
+            it->second->kind != Symbol::Kind::Const) {
+            // C2：未找到，或找到函数/内置 I/O（都不是常量）。
+            diags_.error(span, "constant path must resolve to a constant");
+            return nullptr;
+        }
+        return static_cast<ConstSymbol *>(it->second);
+    }
+
+    // 2 段：先解析前缀结构体，再查 associated const。
+    const StructSymbol *owner = nullptr;
+    if (first.name == "Self") {
+        // N10：Self 只在结构体/impl 的上下文中有目标。
+        if (!current) {
+            diags_.error(span,
+                         "Self is not available outside a struct or impl");
+            return nullptr;
+        }
+        if (!first.generics.empty()) {
+            // G1：Self不接受类型实参。
+            diags_.error(span, "structs have no type parameters: Self");
+            return nullptr;
+        }
+        owner = current;
+    } else {  // 前缀不是 `Self`
+        // 已登记的用户结构体才能有 associated const。
+        const auto it = type_namespace.find(first.name);
+        if (it != type_namespace.end()) {  // 在type名字空间中找到
+            if (!first.generics.empty()) {
+                // G1：用户结构体不接受类型实参。
+                diags_.error(span,
+                             "structs have no type parameters: " + first.name);
+                return nullptr;
+            }
+            owner = it->second;
+        } else {
+            // 带类型实参的基本类型（如 i32<bool>::X）是 G3；
+            if (!first.generics.empty() &&
+                !basic_type_from_name(first.name).is_error()) {
+                diags_.error(span, "primitives take no type parameters: " +
+                                       first.name);
+            } else { //// Box/Vec 或其他非结构体前缀没有 associated const， C2。
+                diags_.error(span, "constant path must resolve to a constant");
+            }
+            return nullptr;
+        }
+    }
+
+    // associated constant 本身不接受类型实参。
+    const PathSegment &second = path[1];
+    if (!second.generics.empty()) {
+        diags_.error(span, "constant path must resolve to a constant");
+        return nullptr;
+    }
+    const auto it = owner->assoc_items.find(second.name);
+    // 联合条件：成员不存在，或成员存在但它是方法/关联函数而不是常量。
+    if (it == owner->assoc_items.end() ||
+        it->second->kind != Symbol::Kind::Const) {
+        // C2：不存在，或成员是方法/关联函数。
+        diags_.error(span, "constant path must resolve to a constant");
+        return nullptr;
+    }
+    return static_cast<ConstSymbol *>(it->second);
+}
+
+// 根据type、current（Self 所属的结构体）输出对应的 SemaType
+// 给 evaluated_const 提供“目标常量自己的声明类型”，避免把引用方的
+//       expected 传进目标常量；完整的类型归一化由 2.4 的 resolve_type 接替。
+// 例：`usize` → usize；impl S 内的 `Self` → S；`[i32; 2]` → Error（等 2.4）。
+SemaType SemaAnalyzer::resolve_const_decl_type(const Type &type,
+                                               const StructSymbol *current) {
+    // `()` 是唯一的非路径标量类型；常量值本身不能是 unit，但先解析出来
+    // 让后续 C1 能给出类型不匹配。
+    if (dynamic_cast<const UnitType *>(&type))
+        return SemaType::unit();
+
+    // 2.3 只处理单段路径类型。多段路径、引用、数组等留给 2.4，
+    // 这里返回 Error 让调用方静默跳过，不提前报 N15/G1 等诊断。
+    const auto *pt = dynamic_cast<const PathType *>(&type);
+    if (!pt || pt->segments.size() != 1)
+        return SemaType::error();
+
+    const PathSegment &seg = pt->segments[0];
+    // 带类型实参的声明类型需要 G1/G3/G4/G5 诊断，统一交给 2.4。
+    if (!seg.generics.empty())
+        return SemaType::error();
+    // Self 只在结构体/impl 上下文中有目标；没有 current 时留给 2.4 报 N10。
+    if (seg.name == "Self")
+        return current ? SemaType::struct_(current) : SemaType::error();
+
+    // 先查基本类型，再查用户结构体；两者都不命中 → 未知类型，等 2.4 报 N15。
+    const SemaType basic = basic_type_from_name(seg.name);
+    if (!basic.is_error())
+        return basic;
+
+    const auto it = type_namespace.find(seg.name);
+    if (it != type_namespace.end())
+        return SemaType::struct_(it->second);
+    return SemaType::error();
+}
+
+// 根据sym（要递归求值的常量符号）输出EvaluatedConst；
+// 成功时 ty/value 为初始化器结果，失败时ty=Error、value=monostate、ok=false。
+// 作用：DFS求值常量并写缓存；求值时使用目标自己的声明类型，引用方的 expected 不传入。
+// 例：`const A: i32 = B; const B: i32 = 3;` 求 A 时递归求 B；
+//     `const A: i32 = A;` → C4 并把 A 缓存为 Error。
+EvaluatedConst SemaAnalyzer::evaluated_const(ConstSymbol &sym) {
+    // 已求过直接取缓存
+    if (sym.state == ConstState::Visited)
+        return sym.evaluated;
+    // 还在当前递归栈上又被访问 → 形成常量依赖环（C4）。
+    if (sym.state == ConstState::Visiting) {
+        diags_.error(sym.span, "constant dependency cycle");
+        return failed_evaluated();
+    }
+
+    // 先置 Visiting，再解析声明类型；2.4 把这里换成完整的 resolve_type 后，
+    // 数组长度里的自引用（如 `const A: [i32; A]`）也会被 C4 捕获。
+    sym.state = ConstState::Visiting;
+    // AST 正常情况下由 builder 保证 node/type 非空；这里防御性缓存失败。
+    if (!sym.node || !sym.node->type) {
+        sym.state = ConstState::Visited;
+        sym.evaluated = failed_evaluated();
+        return sym.evaluated;
+    }
+
+    const SemaType declared =
+        resolve_const_decl_type(*sym.node->type, sym.owner);
+    // 声明类型当前无法解析（2.3 只支持标量/结构体，2.4 会补诊断）。
+    // 无论哪种失败都缓存 Error，后续引用直接静默放行。
+    if (declared.is_error()) {
+        sym.state = ConstState::Visited;
+        sym.evaluated = failed_evaluated();
+        return sym.evaluated;
+    }
+
+    const EvaluatedConst result =
+        evaluated_const_value(sym.node->value, &declared, sym.owner);
+    // 只有“求值成功且类型不是 Error”才保留结果；C1/C5 等失败统一缓存 Error。
+    sym.state = ConstState::Visited;
+    sym.evaluated =
+        (result.ok && !result.ty.is_error()) ? result : failed_evaluated();
+    return sym.evaluated;
+}
+
+// 输入：value（常量值 AST）、expected（期望类型，可为 nullptr）、
+//       current（Self 所属结构体，供路径求值使用）。
+// 输出：EvaluatedConst；成功 = 类型 + 值 + ok，失败 = Error/monostate/false。
+// 求不依赖名字的常量值（整数、布尔、负数）；
+// 常量路径委托给resolve_const_path/evaluated_const 递归处理。
+// 例：`3u32` → {u32, 3, true}；`const N: i32 = -1;` 的 `-1` →
+//     {i32, -1, true}；`true` 在 expected=i32 下 → C1；`-1u32` → C5；
+//     `N` → 走 Path 分支。
+EvaluatedConst
+SemaAnalyzer::evaluated_const_value(const ConstValue &value,
+                                    const SemaType *expected,
+                                    const StructSymbol *current) {
+    // 期望类型本身已经出错：不再追加新诊断，直接把失败向上传递。
     if (expected && expected->is_error())
         return failed_evaluated();
 
@@ -298,7 +506,7 @@ EvaluatedConst SemaAnalyzer::evaluated_const_value(const ConstValue &value,
         case ConstValue::Kind::Int: {
             SemaType ty = SemaType::error();
             if (value.suffix != IntSuffix::None) {
-                // 有后缀时后缀优先；与声明/上下文的期望类型冲突 → C1。
+                // 有后缀时后缀优先；若与声明/上下文期望的类型不同 → C1。
                 ty = type_from_suffix(value.suffix);
                 if (expected && !expected->equals(ty)) {
                     diags_.error(value.span,
@@ -307,7 +515,8 @@ EvaluatedConst SemaAnalyzer::evaluated_const_value(const ConstValue &value,
                     return failed_evaluated();
                 }
             } else if (expected) {
-                // 无后缀，有期望的整数类型；非整数期望（如 bool）→ C1。
+                // 无后缀但有期望类型：只有期望是整数时才能直接采用；
+                // 期望 bool/结构体等非整数 → C1。
                 if (!expected->is_int()) {
                     diags_.error(value.span,
                                  "integer constant does not match the expected "
@@ -316,12 +525,14 @@ EvaluatedConst SemaAnalyzer::evaluated_const_value(const ConstValue &value,
                 }
                 ty = *expected;
             } else {
-                // 无后缀无期望类型时回退 i32（§10 整数文字规则）。
+                // 无后缀且无期望类型：按 §10 规则回退 i32。
                 ty = SemaType::int_(SemaType::IntKind::I32);
             }
 
             EvaluatedConst result;
             result.ty = ty;
+            // 无符号整数存 uint64_t，有符号整数存 int64_t；这样负数也能
+            // 保留符号，后续 C5/数组长度检查不会混淆符号性。
             if (ty.int_kind == SemaType::IntKind::U32 ||
                 ty.int_kind == SemaType::IntKind::Usize)
                 result.value = static_cast<uint64_t>(value.int_value);
@@ -332,10 +543,11 @@ EvaluatedConst SemaAnalyzer::evaluated_const_value(const ConstValue &value,
         }
 
         case ConstValue::Kind::Bool: {
-            // 期望不是bool类型
+            // 有期望类型时它必须是 bool；期望是整数/结构体等 → C1。
             if (expected && expected->kind != SemaType::Kind::Bool) {
-                diags_.error(value.span,
-                             "boolean constant does not match the expected type");
+                diags_.error(
+                    value.span,
+                    "boolean constant does not match the expected type");
                 return failed_evaluated();
             }
             EvaluatedConst result;
@@ -346,21 +558,24 @@ EvaluatedConst SemaAnalyzer::evaluated_const_value(const ConstValue &value,
         }
 
         case ConstValue::Kind::Neg: {
-            if (!value.operand)  // 操作数为空
+            // 负数 AST 必须带 magnitude 子节点；缺失说明 AST 不完整。
+            if (!value.operand)
                 return failed_evaluated();
-            // 规范 §12：期望类型不穿过一元负号
-            // 递归求-后部分，取无期望类型
+            // 规范 §12：期望类型不穿过一元负号，因此子节点传 nullptr。
+            // 子节点会按自己的后缀/常量声明类型或 i32 回退求值。
             EvaluatedConst operand =
                 evaluated_const_value(*value.operand, nullptr, current);
-            if (!operand.ok || operand.ty.is_error()) // 子结果失败
+            // 子节点已经失败或类型是 Error：直接向上传递，避免重复诊断。
+            if (!operand.ok || operand.ty.is_error())
                 return failed_evaluated();
+            // 只有 i32/isize 能取负；u32/usize/bool 等 → C5。
             if (!is_signed_int(operand.ty)) {
-                // 对 u32/usize/bool 等取负 → C5。
-                diags_.error(value.span,
-                             "cannot negate an unsigned or non-integer constant");
+                diags_.error(
+                    value.span,
+                    "cannot negate an unsigned or non-integer constant");
                 return failed_evaluated();
             }
-            // 取出int64_t值并取负
+            // 有符号整数应存 int64_t；variant 不是 int64_t 说明内部状态不一致。
             const auto *magnitude = std::get_if<int64_t>(&operand.value);
             if (!magnitude)
                 return failed_evaluated();
@@ -371,9 +586,29 @@ EvaluatedConst SemaAnalyzer::evaluated_const_value(const ConstValue &value,
             return result;
         }
 
-        case ConstValue::Kind::Path:
-            // 常量路径解析（含前向引用与环检测）在 2.3 实现。
-            return failed_evaluated();
+        case ConstValue::Kind::Path: {
+            // 先做名字解析；失败时 resolve_const_path 已报 C2/N10/G1/G3。
+            ConstSymbol *target =
+                resolve_const_path(value.path, value.span, current);
+            if (!target)
+                return failed_evaluated();
+            // 递归求目标常量
+            const EvaluatedConst target_eval = evaluated_const(*target);
+            // 目标求值失败（C1/C4/C5/C2 等）时，路径也返回失败，
+            if (!target_eval.ok || target_eval.ty.is_error())
+                return failed_evaluated();
+            // 路径的结果类型是目标项的声明类型；调用方的 expected 只用于
+            // 它自己的 C1/数组长度检查，不能拿来重新定型目标常量。
+            const SemaType declared =
+                resolve_const_decl_type(*target->node->type, target->owner);
+            if (declared.is_error())
+                return failed_evaluated();
+            EvaluatedConst result;
+            result.ty = declared;
+            result.value = target_eval.value;
+            result.ok = true;
+            return result;
+        }
     }
 
     return failed_evaluated();

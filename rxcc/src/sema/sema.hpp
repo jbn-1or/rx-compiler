@@ -52,10 +52,18 @@ private:
     StructSymbol *resolve_impl_target(const Type &t);
     void collect_impl(const InherentImpl &impl);
     void check_entry();
-    // 2.2：求值不依赖名字的常量值（整数/布尔/负数）；路径留给 2.3。
+    // 求值不依赖名字的常量值（整数/布尔/负数）。
     EvaluatedConst evaluated_const_value(const ConstValue &value,
                                          const SemaType *expected,
                                          const StructSymbol *current);
+    // 常量路径解析 + 三色递归求值。
+    ConstSymbol *resolve_const_path(const std::vector<PathSegment> &path,
+                                    Span span, const StructSymbol *current);
+    EvaluatedConst evaluated_const(ConstSymbol &sym);
+    // 2.3 临时：只解析常量声明可能用到的标量/结构体类型；完整类型归一化
+    //（引用/数组/Box/Vec 及其诊断）留给 2.4 的 resolve_type。
+    SemaType resolve_const_decl_type(const Type &type,
+                                     const StructSymbol *current);
 };
 
 } // namespace rx

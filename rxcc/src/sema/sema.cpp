@@ -469,6 +469,63 @@ void SemaAnalyzer::visit_layout_type(const SemaType &ty, Span at,
     }
 }
 
+// 查询类型是否具备 trait 能力（D6）；结构体递归时用 visiting 假设成立，
+// 保证递归类型能够终止（D7）。Error 视为满足，避免连锁诊断。
+bool SemaAnalyzer::has_trait(
+    const SemaType &ty, Derive trait,
+    std::set<std::pair<const StructSymbol *, Derive>> &visiting) const {
+    switch (ty.kind) {
+        case SemaType::Kind::Int:
+        case SemaType::Kind::Bool:
+            return true;
+        case SemaType::Kind::Error:
+            return true;
+        case SemaType::Kind::Unit:
+        case SemaType::Kind::Never:
+            return false;
+        case SemaType::Kind::Ref:
+            if (!ty.inner)
+                return false;
+            // &T 无条件 Copy/Clone；&mut T 两者都没有。
+            if (trait == Derive::Copy || trait == Derive::Clone)
+                return !ty.is_mut;
+            // 别的trait解引用递归查
+            return has_trait(*ty.inner, trait, visiting);
+        case SemaType::Kind::Array:
+            return ty.inner && has_trait(*ty.inner, trait, visiting);
+        case SemaType::Kind::Box:
+        case SemaType::Kind::Vec:
+            if (trait == Derive::Copy)
+                return false;
+            return ty.inner && has_trait(*ty.inner, trait, visiting);
+        case SemaType::Kind::Struct: {
+            const StructSymbol *sym = ty.struct_sym;
+            if (!sym || !sym->derives.count(trait))
+                return false;
+            // Copy 必须显式请求 Clone；Eq 必须显式请求 PartialEq。
+            if (trait == Derive::Copy && !sym->derives.count(Derive::Clone))
+                return false;
+            if (trait == Derive::Eq && !sym->derives.count(Derive::PartialEq))
+                return false;
+
+            const auto key = std::make_pair(sym, trait);
+            if (visiting.count(key))
+                return true;
+            visiting.insert(key);
+            bool ok = true;
+            for (const auto &field : sym->field_types) {
+                if (!has_trait(field.second, trait, visiting)) {
+                    ok = false;
+                    break;
+                }
+            }
+            visiting.erase(key);
+            return ok;
+        }
+    }
+    return false;
+}
+
 // 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的
 //       结构体；顶层常量为 nullptr）。解析到 ConstSymbol*
 // 作用：把 `N`、`Type::N`、`Self::N` 解析成常量符号，只查名字不求值；

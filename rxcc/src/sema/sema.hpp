@@ -7,6 +7,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include "sema/type.hpp"
 #include "sema/symbol.hpp"
@@ -65,6 +66,10 @@ private:
     void visit_layout(const StructSymbol *sym, LayoutVisitStates &states);
     void visit_layout_type(const SemaType &ty, Span at,
                            LayoutVisitStates &states);
+    // 判断类型是否具备指定 derive 能力（D6/D7）；visiting 记录递归假设。
+    bool has_trait(
+        const SemaType &ty, Derive trait,
+        std::set<std::pair<const StructSymbol *, Derive>> &visiting) const;
     // 扫一遍所有顶层/关联常量，逐个求值并落缓存。
     void evaluate_all_constants();
     // 求值不依赖名字的常量值（整数/布尔/负数）。

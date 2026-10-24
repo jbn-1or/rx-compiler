@@ -70,6 +70,9 @@ private:
     bool has_trait(
         const SemaType &ty, Derive trait,
         std::set<std::pair<const StructSymbol *, Derive>> &visiting) const;
+    // 检查结构体已请求的 derive 是否合法（D2–D5）。
+    void check_derives();
+    void check_one_derive(StructSymbol &sym, Derive trait);
     // 扫一遍所有顶层/关联常量，逐个求值并落缓存。
     void evaluate_all_constants();
     // 求值不依赖名字的常量值（整数/布尔/负数）。

@@ -94,6 +94,7 @@ void SemaAnalyzer::run(const Crate &crate) {
     resolve_declared_types();
     check_main_return_type();
     check_inline_layout_cycles();
+    check_derives();
 }
 
 // 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin
@@ -500,6 +501,7 @@ bool SemaAnalyzer::has_trait(
             return ty.inner && has_trait(*ty.inner, trait, visiting);
         case SemaType::Kind::Struct: {
             const StructSymbol *sym = ty.struct_sym;
+            // 结构体必须显式请求该 trait。
             if (!sym || !sym->derives.count(trait))
                 return false;
             // Copy 必须显式请求 Clone；Eq 必须显式请求 PartialEq。
@@ -513,6 +515,7 @@ bool SemaAnalyzer::has_trait(
                 return true;
             visiting.insert(key);
             bool ok = true;
+            // 所有字段都必须具备该能力。
             for (const auto &field : sym->field_types) {
                 if (!has_trait(field.second, trait, visiting)) {
                     ok = false;
@@ -524,6 +527,35 @@ bool SemaAnalyzer::has_trait(
         }
     }
     return false;
+}
+
+// 逐个结构体、逐个显式 derive 检查配套要求和字段能力。
+void SemaAnalyzer::check_derives() {
+    for (auto &sym : structs_) {
+        for (Derive trait : sym->derives)
+            check_one_derive(*sym, trait);
+    }
+}
+
+// 检查一个 derive：Copy 必须显式带 Clone，Eq 必须显式带 PartialEq；
+// 然后要求每个字段都具备该能力。
+void SemaAnalyzer::check_one_derive(StructSymbol &sym, Derive trait) {
+    if (trait == Derive::Copy && !sym.derives.count(Derive::Clone))
+        diags_.error(sym.span, "Copy requires an explicit Clone derive");
+    if (trait == Derive::Eq && !sym.derives.count(Derive::PartialEq))
+        diags_.error(sym.span, "Eq requires an explicit PartialEq derive");
+
+    for (const auto &field : sym.fields) {
+        const auto it = sym.field_types.find(field.name);
+        if (it == sym.field_types.end())
+            continue;
+
+        std::set<std::pair<const StructSymbol *, Derive>> visiting;
+        if (!has_trait(it->second, trait, visiting)) {
+            diags_.error(field.span, "field " + field.name +
+                                          " does not support " + name(trait));
+        }
+    }
 }
 
 // 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的

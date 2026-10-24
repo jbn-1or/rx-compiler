@@ -89,10 +89,11 @@ void SemaAnalyzer::run(const Crate &crate) {
         else if (auto *i = dynamic_cast<InherentImpl *>(item.get()))
             collect_impl(*i);
     }
-    check_entry();
-    evaluated_all_constants();
-    resolve_signatures();
-    check_main_return();
+    check_main_declaration();
+    evaluate_all_constants();
+    resolve_declared_types();
+    check_main_return_type();
+    check_inline_layout_cycles();
 }
 
 // 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin
@@ -302,7 +303,7 @@ void SemaAnalyzer::collect_impl(const InherentImpl &impl) {
 // 检查填好的 func_const_namespace；
 // 例：没有 main → E1；`const main: i32 = 1;` → E1；`fn main(x: i32)` → E2；
 //     `fn main<'a>()` → E3；`fn main() {}` → 无诊断。
-void SemaAnalyzer::check_entry() {
+void SemaAnalyzer::check_main_declaration() {
     const auto it = func_const_namespace.find("main");
     const bool has_fn_main = it != func_const_namespace.end() &&
                              it->second->kind == Symbol::Kind::Fn;
@@ -323,14 +324,14 @@ void SemaAnalyzer::check_entry() {
 // 驱动所有常量求值：consts_ 同时包含顶层常量和 impl 关联常量。
 // evaluated_const 内部负责三色环检测、C1 比对与缓存，这里只负责遍历。
 // 无引用者、只声明不求值的常量也会在这里被检查。
-void SemaAnalyzer::evaluated_all_constants() {
+void SemaAnalyzer::evaluate_all_constants() {
     for (auto &sym : consts_)
         evaluated_const(*sym);
 }
 
 // 遍历所有结构体和函数，把 AST 类型节点定型为 SemaType。
 // 单个字段/签名解析失败时保留 Error，不中断其余项。
-void SemaAnalyzer::resolve_signatures() {
+void SemaAnalyzer::resolve_declared_types() {
     for (auto &sym : structs_) {
         // 处理 struct 定义中的字段
         for (const auto &field : sym->fields) {
@@ -386,7 +387,7 @@ void SemaAnalyzer::resolve_function_signature(FnSymbol &fn,
 
 // 检查 main 的返回类型（E4）。
 // 避免把 ConstSymbol 当成 FnSymbol；返回类型解析失败时静默放行。
-void SemaAnalyzer::check_main_return() {
+void SemaAnalyzer::check_main_return_type() {
     const auto it = func_const_namespace.find("main");
     // 没有 main（E1 已报）或 main 不是函数时跳过。
     if (it == func_const_namespace.end() ||
@@ -399,6 +400,73 @@ void SemaAnalyzer::check_main_return() {
     const Span at =
         fn->node && fn->node->ret ? fn->node->ret->span : fn->span;
     diags_.error(at, "main must return unit");
+}
+
+// 从每个结构体出发做三色 DFS，共享同一张颜色表。
+void SemaAnalyzer::check_inline_layout_cycles() {
+    LayoutVisitStates states;
+    for (const auto &sym : structs_)
+        visit_layout(sym.get(), states);
+}
+
+// 三色 DFS：Visiting 表示当前递归栈上存在该结构体，再次遇到即为内联环。
+void SemaAnalyzer::visit_layout(const StructSymbol *sym,
+                                LayoutVisitStates &states) {
+    if (!sym)
+        return;
+
+    LayoutVisitState &state = states[sym];
+    if (state == LayoutVisitState::Visited)
+        return;
+    if (state == LayoutVisitState::Visiting) {
+        diags_.error(sym->span, "infinite inline layout cycle");
+        return;
+    }
+
+    state = LayoutVisitState::Visiting;
+    // 检查结构体内的所有字段
+    for (const auto &field : sym->fields) {
+        const auto it = sym->field_types.find(field.name);
+        // 字段类型解析失败时已报过错，不在这里制造连锁布局错误。
+        if (it == sym->field_types.end() || it->second.is_error())
+            continue;
+        visit_layout_type(it->second, field.span, states);
+    }
+    state = LayoutVisitState::Visited;
+}
+
+// 数组按值内联元素，继续向下；引用/Box/Vec 是间接层，打断内联。
+void SemaAnalyzer::visit_layout_type(const SemaType &ty, Span at,
+                                     LayoutVisitStates &states) {
+    switch (ty.kind) {
+        case SemaType::Kind::Struct: {
+            if (!ty.struct_sym)
+                return;
+            // 在访问表中找到这个结构体的visit态
+            const auto it = states.find(ty.struct_sym);
+            if (it != states.end() &&
+                it->second == LayoutVisitState::Visiting) {
+                diags_.error(at, "infinite inline layout cycle");
+                return;
+            }
+            visit_layout(ty.struct_sym, states);
+            return;
+        }
+        // 若为数组则对其类型递归检查
+        case SemaType::Kind::Array:
+            if (ty.inner)
+                visit_layout_type(*ty.inner, at, states);
+            return;
+        case SemaType::Kind::Unit:
+        case SemaType::Kind::Never:
+        case SemaType::Kind::Error:
+        case SemaType::Kind::Int:
+        case SemaType::Kind::Bool:
+        case SemaType::Kind::Ref:
+        case SemaType::Kind::Box:
+        case SemaType::Kind::Vec:
+            return;
+    }
 }
 
 // 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的
@@ -619,20 +687,20 @@ SemaType SemaAnalyzer::resolve_type(const Type &type,
 //     `const A: i32 = A;` → C4 并把 A 缓存为 Error。
 EvaluatedConst SemaAnalyzer::evaluated_const(ConstSymbol &sym) {
     // 已求过直接取缓存
-    if (sym.state == ConstState::Visited)
+    if (sym.state == ConstEvalState::Visited)
         return sym.evaluated;
     // 还在当前递归栈上又被访问 → 形成常量依赖环（C4）。
-    if (sym.state == ConstState::Visiting) {
+    if (sym.state == ConstEvalState::Visiting) {
         diags_.error(sym.span, "constant dependency cycle");
         return failed_evaluated();
     }
 
     // 先置 Visiting，再解析声明类型；这样数组长度里的自引用
     // （如 `const A: [i32; A]`）也会被 C4 捕获。
-    sym.state = ConstState::Visiting;
+    sym.state = ConstEvalState::Visiting;
     // AST 正常情况下由 builder 保证 node/type 非空；这里防御性缓存失败。
     if (!sym.node || !sym.node->type) {
-        sym.state = ConstState::Visited;
+        sym.state = ConstEvalState::Visited;
         sym.evaluated = failed_evaluated();
         return sym.evaluated;
     }
@@ -641,7 +709,7 @@ EvaluatedConst SemaAnalyzer::evaluated_const(ConstSymbol &sym) {
     // 声明类型解析失败时已经报过 N10/N15/G1/G3/G4/G5 等诊断；
     // 统一缓存 Error，后续引用直接静默放行。
     if (declared.is_error()) {
-        sym.state = ConstState::Visited;
+        sym.state = ConstEvalState::Visited;
         sym.evaluated = failed_evaluated();
         return sym.evaluated;
     }
@@ -657,7 +725,7 @@ EvaluatedConst SemaAnalyzer::evaluated_const(ConstSymbol &sym) {
         result = failed_evaluated();
     }
     // 只有“求值成功且类型不是 Error”才保留结果；C1/C5 等失败统一缓存 Error。
-    sym.state = ConstState::Visited;
+    sym.state = ConstEvalState::Visited;
     sym.evaluated =
         (result.ok && !result.ty.is_error()) ? result : failed_evaluated();
     return sym.evaluated;

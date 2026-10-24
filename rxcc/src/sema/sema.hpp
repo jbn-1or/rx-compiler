@@ -2,6 +2,7 @@
 
 #include "ast/ast.hpp"
 #include "diagnostics.hpp"
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -51,14 +52,21 @@ private:
     void check_param_names(const std::vector<Param> &params, Span fallback);
     StructSymbol *resolve_impl_target(const Type &t);
     void collect_impl(const InherentImpl &impl);
-    void check_entry();
+    void check_main_declaration();
     // 把字段、参数、返回类型从 AST 定型为 SemaType。
-    void resolve_signatures();
+    void resolve_declared_types();
     void resolve_function_signature(FnSymbol &fn, StructSymbol *owner);
     // 入口检查的最后一块：main 的返回类型必须是 unit（E4）。
-    void check_main_return();
+    void check_main_return_type();
+    // 按字段类型检测结构体是否存在按值内联的无限布局环（T5）。
+    enum class LayoutVisitState { Unvisited, Visiting, Visited };
+    using LayoutVisitStates = std::map<const StructSymbol *, LayoutVisitState>;
+    void check_inline_layout_cycles();
+    void visit_layout(const StructSymbol *sym, LayoutVisitStates &states);
+    void visit_layout_type(const SemaType &ty, Span at,
+                           LayoutVisitStates &states);
     // 扫一遍所有顶层/关联常量，逐个求值并落缓存。
-    void evaluated_all_constants();
+    void evaluate_all_constants();
     // 求值不依赖名字的常量值（整数/布尔/负数）。
     EvaluatedConst evaluated_const_value(const ConstValue &value,
                                          const SemaType *expected,

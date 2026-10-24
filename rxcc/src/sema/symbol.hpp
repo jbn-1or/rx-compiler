@@ -42,7 +42,7 @@ struct EvaluatedConst {
 };
 
 // ConstSymbol 的三色求值状态
-enum class ConstState { Unvisited, Visiting, Visited };
+enum class ConstEvalState { Unvisited, Visiting, Visited };
 
 // ----------------函数括号内的形式参数---------------------
 // 定型后的普通参数：语义类型 + 绑定可变性；对应 AST 的 Param。
@@ -80,7 +80,7 @@ struct FnSymbol : Symbol {
 struct ConstSymbol : Symbol {
     const Const *node = nullptr;   // 指向 AST 常量节点（非拥有），可取 node->type、node->value
     StructSymbol *owner = nullptr;
-    ConstState state = ConstState::Unvisited; // 求值三色状态
+    ConstEvalState state = ConstEvalState::Unvisited; // 求值三色状态
     EvaluatedConst evaluated;                 // 求值缓存
 };
 

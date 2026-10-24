@@ -52,6 +52,9 @@ private:
     StructSymbol *resolve_impl_target(const Type &t);
     void collect_impl(const InherentImpl &impl);
     void check_entry();
+    // 把字段、参数、返回类型从 AST 定型为 SemaType。
+    void resolve_signatures();
+    void resolve_function_signature(FnSymbol &fn, StructSymbol *owner);
     // 扫一遍所有顶层/关联常量，逐个求值并落缓存。
     void evaluated_all_constants();
     // 求值不依赖名字的常量值（整数/布尔/负数）。

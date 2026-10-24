@@ -91,6 +91,7 @@ void SemaAnalyzer::run(const Crate &crate) {
     }
     check_entry();
     evaluated_all_constants();
+    resolve_signatures();
 }
 
 // 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin
@@ -326,6 +327,62 @@ void SemaAnalyzer::evaluated_all_constants() {
         evaluated_const(*sym);
 }
 
+// 遍历所有结构体和函数，把 AST 类型节点定型为 SemaType。
+// 单个字段/签名解析失败时保留 Error，不中断其余项。
+void SemaAnalyzer::resolve_signatures() {
+    for (auto &sym : structs_) {
+        // 处理 struct 定义中的字段
+        for (const auto &field : sym->fields) {
+            sym->field_types[field.name] =
+                field.type ? resolve_type(*field.type, sym.get())
+                           : SemaType::error();
+        }
+    }
+    for (auto &sym : fns_)
+        resolve_function_signature(*sym, sym->owner);
+}
+
+// 定型一个函数的参数、返回类型和接收者形态。
+// `fn f(mut x: i32) -> &mut S` → params={i32, is_mut=true}、ret=&mut S。
+void SemaAnalyzer::resolve_function_signature(FnSymbol &fn,
+                                              StructSymbol *owner) {
+    fn.params.clear();
+    fn.self_param = ReceiverInfo{};
+    if (!fn.node) {
+        fn.ret = SemaType::error();
+        return;
+    }
+
+    // 处理函数形式参数
+    fn.params.reserve(fn.node->params.size());
+    for (const auto &param : fn.node->params) {
+        const SemaType ty = param.type ? resolve_type(*param.type, owner)
+                                       : SemaType::error();
+        fn.params.push_back(ParamDecl{ty, param.is_mut});
+    }
+    // 处理函数返回类型
+    fn.ret = fn.node->ret ? resolve_type(*fn.node->ret, owner)
+                          : SemaType::error();
+
+    if (!fn.node->self_param)
+        return;
+    fn.self_param.present = true;
+    switch (fn.node->self_param->kind) {
+        case SelfParam::Kind::Value:
+            break;
+        case SelfParam::Kind::MutValue:
+            fn.self_param.is_mut = true;
+            break;
+        case SelfParam::Kind::Ref:
+            fn.self_param.by_ref = true;
+            break;
+        case SelfParam::Kind::RefMut:
+            fn.self_param.by_ref = true;
+            fn.self_param.is_mut = true;
+            break;
+    }
+}
+
 // 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的
 //       结构体；顶层常量为 nullptr）。解析到 ConstSymbol*
 // 作用：把 `N`、`Type::N`、`Self::N` 解析成常量符号，只查名字不求值；
@@ -415,12 +472,8 @@ SemaAnalyzer::resolve_const_path(const std::vector<PathSegment> &path,
     return static_cast<ConstSymbol *>(it->second);
 }
 
-// 输入：type（语法类型节点）、current（Self 所属的结构体，可为 nullptr）。
-// 输出：归一化后的 SemaType；解析失败统一返回 SemaType::error()。
-// 作用：把基本类型、Unit、引用、数组、Box/Vec、用户结构体和 Self 转换成语义
-//       类型；数组长度在这里按 usize 常量求值，保证 [i32; N] 与 [i32; 3] 等价。
-// 例：`usize` → usize；`&mut S` → &mut S；`[i32; 3]` → [i32; 3]；
-//     `Box<Vec<i32>>` → Box<Vec<i32>>；无 current 的 `Self` → N10。
+// 把基本类型、Unit、引用、数组、Box/Vec、用户结构体和 Self 转换成语义类型；
+// 数组长度在这里按 usize 常量求值，保证 [i32; N] 与 [i32; 3] 等价。
 SemaType SemaAnalyzer::resolve_type(const Type &type,
                                     const StructSymbol *current) {
     // `()`：函数/控制流结果，也是省略返回类型时的类型。
@@ -596,10 +649,6 @@ EvaluatedConst SemaAnalyzer::evaluated_const(ConstSymbol &sym) {
 //       current（Self 所属结构体，供路径求值使用）。
 // 输出：EvaluatedConst；成功 = 类型 + 值 + ok，失败 = Error/monostate/false。
 // 求不依赖名字的常量值（整数、布尔、负数）；
-// 常量路径委托给resolve_const_path/evaluated_const 递归处理。
-// 例：`3u32` → {u32, 3, true}；`const N: i32 = -1;` 的 `-1` →
-//     {i32, -1, true}；`true` 在 expected=i32 下 → C1；`-1u32` → C5；
-//     `N` → 走 Path 分支。
 EvaluatedConst
 SemaAnalyzer::evaluated_const_value(const ConstValue &value,
                                     const SemaType *expected,

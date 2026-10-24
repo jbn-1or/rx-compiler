@@ -41,16 +41,36 @@ struct EvaluatedConst {
     bool ok = false;
 };
 
-// ConstSymbol 的三色求值状态：递归求值遇到 Visiting 说明形成了常量环。
+// ConstSymbol 的三色求值状态
 enum class ConstState { Unvisited, Visiting, Visited };
+
+// ----------------函数括号内的形式参数---------------------
+// 定型后的普通参数：语义类型 + 绑定可变性；对应 AST 的 Param。
+// `mut x: i32` → {ty=i32, is_mut=true}。
+struct ParamDecl {
+    SemaType ty;
+    bool is_mut = false;
+};
+
+// 定型后的 self 接收者形态；对应 AST 的 SelfParam，不保存类型。
+// 接收者的实际类型由 owner 推导，方法查找只需要下面三个标志：
+// present：有无 self | is_mut：有无mut | by_ref：有无引用
+struct ReceiverInfo {
+    bool present = false;
+    bool by_ref = false;
+    bool is_mut = false;
+};
 
 // 一个函数或方法的档案（impl 内带/不带 self 的都算）。
 // Symbol 部分 + 指向 AST Function 节点 + 所属结构体。
 // `fn add(a: i32) -> i32` → {name="add", node=Function(add), owner=nullptr}
 // `impl S { fn get(&self) -> i32 }` → {name="get", node=Function(get), owner=S}
 struct FnSymbol : Symbol {
-    const Function *node = nullptr; // 指向 AST 函数节点（非拥有），可取 node->params、node->ret
-    StructSymbol *owner = nullptr;  // 所属结构体；顶层函数为 nullptr，impl S 内方法指向 S
+    const Function *node = nullptr;    // 指向 AST 函数节点（非拥有），可取 node->params、node->ret
+    StructSymbol *owner = nullptr;     // 所属结构体；顶层函数为 nullptr，impl S 内方法指向 S
+    std::vector<ParamDecl> params;     // 定型后的参数，按声明顺序
+    SemaType ret;                      // 返回类型；省略时为 Unit
+    ReceiverInfo self_param;           // 接收者形态；普通函数 present=false
 };
 
 // 一个常量的档案（顶层 const 或 impl 内的关联 const）。
@@ -60,8 +80,8 @@ struct FnSymbol : Symbol {
 struct ConstSymbol : Symbol {
     const Const *node = nullptr;   // 指向 AST 常量节点（非拥有），可取 node->type、node->value
     StructSymbol *owner = nullptr;
-    ConstState state = ConstState::Unvisited; // 求值三色状态，2.3 使用
-    EvaluatedConst evaluated;                 // 求值缓存，2.3/2.5 写入
+    ConstState state = ConstState::Unvisited; // 求值三色状态
+    EvaluatedConst evaluated;                 // 求值缓存
 };
 
 // 一个结构体的档案：后续按类型名查结构体、挂 impl 成员都靠它。
@@ -75,7 +95,8 @@ struct StructSymbol {
     Span span{};
     const Struct *node = nullptr; 
     std::vector<FieldDecl> fields; // 按声明顺序的字段，Point → [{x,i32},{y,i32}]
-    std::set<Derive> derives{};    // 合并去重后的 derive 请求，`#[derive(Copy, Clone)]` → {Copy, Clone}
+    std::unordered_map<std::string, SemaType> field_types; // 字段名 → 定型后的语义类型
+    std::set<Derive> derives{};    // 合并去重后的 derive ，`#[derive(Copy, Clone)]` → {Copy, Clone}
     // impl 里的成员：名字 → FnSymbol/ConstSymbol（非拥有），"len" → FnSymbol(len)
     std::unordered_map<std::string, Symbol *> assoc_items;
 };

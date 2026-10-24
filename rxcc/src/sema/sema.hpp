@@ -55,6 +55,8 @@ private:
     // 把字段、参数、返回类型从 AST 定型为 SemaType。
     void resolve_signatures();
     void resolve_function_signature(FnSymbol &fn, StructSymbol *owner);
+    // 入口检查的最后一块：main 的返回类型必须是 unit（E4）。
+    void check_main_return();
     // 扫一遍所有顶层/关联常量，逐个求值并落缓存。
     void evaluated_all_constants();
     // 求值不依赖名字的常量值（整数/布尔/负数）。

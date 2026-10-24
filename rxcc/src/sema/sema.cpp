@@ -92,6 +92,7 @@ void SemaAnalyzer::run(const Crate &crate) {
     check_entry();
     evaluated_all_constants();
     resolve_signatures();
+    check_main_return();
 }
 
 // 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin
@@ -381,6 +382,23 @@ void SemaAnalyzer::resolve_function_signature(FnSymbol &fn,
             fn.self_param.is_mut = true;
             break;
     }
+}
+
+// 检查 main 的返回类型（E4）。
+// 避免把 ConstSymbol 当成 FnSymbol；返回类型解析失败时静默放行。
+void SemaAnalyzer::check_main_return() {
+    const auto it = func_const_namespace.find("main");
+    // 没有 main（E1 已报）或 main 不是函数时跳过。
+    if (it == func_const_namespace.end() ||
+        it->second->kind != Symbol::Kind::Fn)
+        return;
+    const auto *fn = static_cast<const FnSymbol *>(it->second);
+    if (fn->ret.is_error() || fn->ret.is_unit())
+        return;
+
+    const Span at =
+        fn->node && fn->node->ret ? fn->node->ret->span : fn->span;
+    diags_.error(at, "main must return unit");
 }
 
 // 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的

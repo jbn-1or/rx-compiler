@@ -7,24 +7,24 @@
 namespace rx {
 
 // 结构体符号
-// 这里前向声明：SemaType 以指针引用它
+// 这里前向声明：SemanticType 以指针引用它
 struct StructSymbol;
 
-struct SemaType;
+struct SemanticType;
 
 // 子类型（引用/数组元素/Box/Vec 内层）共享且不可变，用 shared_ptr<const> 承载，
 // 递归类型（如 struct Node { next: Box<Node> }）也能安全表示。
-using SemaTypePtr = std::shared_ptr<const SemaType>;
+using SemanticTypePointer = std::shared_ptr<const SemanticType>;
 
 // 把 ast::Type（语法树）解析成可判等、可判能力的规范形式。
 // 与 ast::Type 的关键差别（见实现计划 §B.0.2）：
 //   - `Self` 在 struct/impl 内先展开为 Struct(S)，故 `Self` 与 `S` 天然相等；
 //   - Array 的长度已常量求值成 uint64_t，故 `[i32; COUNT]` 与 `[i32; 3]`
 //   按值相等；
-//   - 生命周期不进入 Ref 的判等（只比较 is_mut 与内层类型）。
-// 例：`i32` → Int(I32)；`&mut S` → Ref(is_mut=true, Struct(S))；`[u32; 3]` →
+//   - 生命周期不进入 Reference 的判等（只比较 is_mut 与内层类型）。
+// 例：`i32` → Int(I32)；`&mut S` → Reference(is_mut=true, Struct(S))；`[u32; 3]` →
 // Array(Int(U32), 3)。
-struct SemaType {
+struct SemanticType {
     enum class Kind {
         Unit,   // ()，函数/控制流结果
         Never,  // !，发散表达式（return/break/continue/loop 无 break）
@@ -32,8 +32,8 @@ struct SemaType {
         Int,    // 四种整数之一，具体见 int_kind
         Bool,   // bool
         Struct, // 用户定义结构体（名义类型）
-        Ref,    // &T / &mut T，可变性见 is_mut
-        Array,  // [T; N]，N 已求值为 len（uint64_t）
+        Reference, // &T / &mut T，可变性见 is_mut
+        Array,  // [T; N]，N 已求值为 length（uint64_t）
         Box,    // Box<T>
         Vec,    // Vec<T>
     };
@@ -43,69 +43,71 @@ struct SemaType {
 
     Kind kind = Kind::Error;
     IntKind int_kind = IntKind::I32;          // 仅 Kind::Int 有意义，例：I32
-    const StructSymbol *struct_sym = nullptr; // 仅 Kind::Struct 有意义，例：S
-    bool is_mut = false; // 仅 Kind::Ref 有意义，例：`&mut T` 时 = true
-    SemaTypePtr inner;   // Ref/Box/Vec 的内层；Array 的元素；例：&S 时 = S
-    uint64_t len = 0;    // 仅 Kind::Array 有意义，例：`[i32; 3]` 时 = 3
+    // 仅 Kind::Struct 有意义，例：S
+    const StructSymbol *struct_symbol = nullptr;
+    bool is_mut = false; // 仅 Kind::Reference 有意义，例：`&mut T` 时 = true
+    // Reference/Box/Vec 的内层；Array 的元素；例：&S 时 = S
+    SemanticTypePointer inner;
+    uint64_t length = 0; // 仅 Kind::Array 有意义，例：`[i32; 3]` 时 = 3
 
     // —— 构造原语（替代裸露字段赋值，保证 kind 与字段一致）——
-    // 例：int_(IntKind::U32) → `u32`；ref(false, int_(IntKind::I32)) → `&i32`。
-    static SemaType unit() {
-        SemaType t;
+    // 例：int_(IntKind::U32) → `u32`；reference(false, int_(IntKind::I32)) → `&i32`。
+    static SemanticType unit() {
+        SemanticType t;
         t.kind = Kind::Unit;
         return t;
     }
-    static SemaType never() {
-        SemaType t;
+    static SemanticType never() {
+        SemanticType t;
         t.kind = Kind::Never;
         return t;
     }
-    static SemaType error() {
-        SemaType t;
+    static SemanticType error() {
+        SemanticType t;
         t.kind = Kind::Error;
         return t;
     }
-    static SemaType int_(IntKind k) {
-        SemaType t;
+    static SemanticType int_(IntKind k) {
+        SemanticType t;
         t.kind = Kind::Int;
         t.int_kind = k;
         return t;
     }
-    static SemaType bool_() {
-        SemaType t;
+    static SemanticType bool_() {
+        SemanticType t;
         t.kind = Kind::Bool;
         return t;
     }
-    static SemaType struct_(const StructSymbol *s) {
-        SemaType t;
+    static SemanticType struct_(const StructSymbol *s) {
+        SemanticType t;
         t.kind = Kind::Struct;
-        t.struct_sym = s;
+        t.struct_symbol = s;
         return t;
     }
-    static SemaType ref(bool is_mut, const SemaType &inner) {
-        SemaType t;
-        t.kind = Kind::Ref;
+    static SemanticType reference(bool is_mut, const SemanticType &inner) {
+        SemanticType t;
+        t.kind = Kind::Reference;
         t.is_mut = is_mut;
-        t.inner = std::make_shared<const SemaType>(inner);
+        t.inner = std::make_shared<const SemanticType>(inner);
         return t;
     }
-    static SemaType array(const SemaType &elem, uint64_t len) {
-        SemaType t;
+    static SemanticType array(const SemanticType &element, uint64_t length) {
+        SemanticType t;
         t.kind = Kind::Array;
-        t.inner = std::make_shared<const SemaType>(elem);
-        t.len = len;
+        t.inner = std::make_shared<const SemanticType>(element);
+        t.length = length;
         return t;
     }
-    static SemaType boxed(const SemaType &inner) {
-        SemaType t;
+    static SemanticType boxed(const SemanticType &inner) {
+        SemanticType t;
         t.kind = Kind::Box;
-        t.inner = std::make_shared<const SemaType>(inner);
+        t.inner = std::make_shared<const SemanticType>(inner);
         return t;
     }
-    static SemaType vec(const SemaType &inner) {
-        SemaType t;
+    static SemanticType vec(const SemanticType &inner) {
+        SemanticType t;
         t.kind = Kind::Vec;
-        t.inner = std::make_shared<const SemaType>(inner);
+        t.inner = std::make_shared<const SemanticType>(inner);
         return t;
     }
 
@@ -118,12 +120,12 @@ struct SemaType {
     // 语义类型判等。
     //   - 四种整数按 int_kind 区分；Bool/Unit/Never 各自只等于自身；
     //   - Struct 名义判等：比较 StructSymbol 指针（同形状不同名判不等）；
-    //   - Ref 比较 is_mut + 内层，忽略生命周期；
-    //   - Array 比较元素类型 + 求值后的 len 值；
+    //   - Reference 比较 is_mut + 内层，忽略生命周期；
+    //   - Array 比较元素类型 + 求值后的 length 值；
     //   - Box/Vec 比较内层。
     // 特例：任一侧为 Error 一律返回 true——Error 是错误恢复哨兵，用于在已报过
     // 错后静默放行后续检查，避免级联报错（见实现计划 §B.0.2 / §C.2）。
-    bool equals(const SemaType &other) const {
+    bool equals(const SemanticType &other) const {
         if (kind == Kind::Error || other.kind == Kind::Error)
             return true;
         if (kind != other.kind)
@@ -136,12 +138,12 @@ struct SemaType {
             case Kind::Int:
                 return int_kind == other.int_kind;
             case Kind::Struct:
-                return struct_sym == other.struct_sym;
-            case Kind::Ref:
+                return struct_symbol == other.struct_symbol;
+            case Kind::Reference:
                 return is_mut == other.is_mut &&
                        inner_equals(inner, other.inner);
             case Kind::Array:
-                return len == other.len && inner_equals(inner, other.inner);
+                return length == other.length && inner_equals(inner, other.inner);
             case Kind::Box:
             case Kind::Vec:
                 return inner_equals(inner, other.inner);
@@ -178,14 +180,14 @@ struct SemaType {
                 return "bool";
             case Kind::Struct:
                 return "struct";
-            case Kind::Ref:
-                return (is_mut ? "&mut " : "&") + inner_str(inner);
+            case Kind::Reference:
+                return (is_mut ? "&mut " : "&") + inner_string(inner);
             case Kind::Array:
-                return "[" + inner_str(inner) + "; " + std::to_string(len) + "]";
+                return "[" + inner_string(inner) + "; " + std::to_string(length) + "]";
             case Kind::Box:
-                return "Box<" + inner_str(inner) + ">";
+                return "Box<" + inner_string(inner) + ">";
             case Kind::Vec:
-                return "Vec<" + inner_str(inner) + ">";
+                return "Vec<" + inner_string(inner) + ">";
         }
         return "<error>";
     }
@@ -193,17 +195,18 @@ struct SemaType {
 private:
     // 递归比较两个子类型指针：
     // 都为空视为相等（如Unit无inner），否则解引用比较。
-    static bool inner_equals(const SemaTypePtr &a, const SemaTypePtr &b) {
+    static bool inner_equals(const SemanticTypePointer &a,
+                             const SemanticTypePointer &b) {
         if (!a || !b)
             return a == b;
         return a->equals(*b);
     }
-    static std::string inner_str(const SemaTypePtr &t) {
+    static std::string inner_string(const SemanticTypePointer &t) {
         return t ? t->toString() : std::string();
     }
 };
 
-inline bool equals(const SemaType &a, const SemaType &b) {
+inline bool equals(const SemanticType &a, const SemanticType &b) {
     return a.equals(b);
 }
 

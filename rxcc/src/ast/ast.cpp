@@ -36,22 +36,22 @@ struct ChildWalker : AstVisitor {
     AstVisitor &out;
     explicit ChildWalker(AstVisitor &out) : out(out) {}
 
-    void visit(IntLit &) override {} // 叶子：无孩子
+    void visit(IntegerLiteral &) override {} // 叶子：无孩子
 
     void visit(BinaryExpression &e) override {
-        e.lhs->accept(out); // 普通操作数：从左到右
-        e.rhs->accept(out);
+        e.left->accept(out); // 普通操作数：从左到右
+        e.right->accept(out);
     }
 
-    void visit(BoolLit &) override {}
+    void visit(BooleanLiteral &) override {}
     void visit(UnitExpression &) override {}
     void visit(PathExpression &) override {}
 
     void visit(UnaryExpression &e) override { e.operand->accept(out); }
 
     void visit(AssignmentExpression &e) override {
-        e.rhs->accept(out);
-        e.lhs->accept(
+        e.right->accept(out);
+        e.left->accept(
             out); // walk 顺序 = 求值顺序，赋值不是"从左到右"的普通操作数
     }
 
@@ -61,13 +61,13 @@ struct ChildWalker : AstVisitor {
 
     void visit(CallExpression &e) override {
         e.callee->accept(out); // callee 先
-        for (auto &a : e.args)
+        for (auto &a : e.arguments)
             a->accept(out); // 参数从左到右
     }
 
     void visit(MethodCallExpression &e) override {
         e.receiver->accept(out); // receiver 先；method 段非 Node 不下钻
-        for (auto &a : e.args)
+        for (auto &a : e.arguments)
             a->accept(out);
     }
 
@@ -86,10 +86,10 @@ struct ChildWalker : AstVisitor {
     }
 
     void visit(LetStatement &e) override {
-        e.init->accept(out); // 唯一的 Node 孩子；name/is_mut/标注都不是
+        e.initializer->accept(out); // 唯一的 Node 孩子；name/is_mut/标注都不是
     }
 
-    void visit(ExpressionStatement &e) override { e.expr->accept(out); }
+    void visit(ExpressionStatement &e) override { e.expression->accept(out); }
 
     void visit(IfExpression &e) override {
         e.condition->accept(out); // 条件先
@@ -127,7 +127,7 @@ struct ChildWalker : AstVisitor {
     }
 
     void visit(StructExpression &e) override {
-        e.path->accept(out); // 路径先（res 槽位所在）
+        e.path->accept(out); // 路径先（resolution 槽位所在）
         for (auto &f : e.fields)
             f.value->accept(out); // 字段值按源代码顺序
     }
@@ -137,7 +137,7 @@ struct ChildWalker : AstVisitor {
     void visit(Struct &) override {
     } // 字段类型是 Type、derives 是枚举——都不下钻
 
-    void visit(Const &) override {} // value 是 ConstValue 纯值——声明不"执行"
+    void visit(Const &) override {} // value 是 ConstantValue 纯值——声明不"执行"
 
     void visit(InherentImpl &e) override {
         for (auto &i : e.items)
@@ -152,102 +152,102 @@ void walk(Node &node, AstVisitor &visitor) {
     node.accept(w);
 }
 
-const char *name(BinOp op) {
-    switch (op) {
-        case BinOp::Add:
+const char *name(BinaryOperator operation) {
+    switch (operation) {
+        case BinaryOperator::Add:
             return "Add";
-        case BinOp::Sub:
+        case BinaryOperator::Subtract:
             return "Sub";
-        case BinOp::Mul:
+        case BinaryOperator::Multiply:
             return "Mul";
-        case BinOp::Div:
+        case BinaryOperator::Divide:
             return "Div";
-        case BinOp::Rem:
+        case BinaryOperator::Remainder:
             return "Rem";
-        case BinOp::BitAnd:
+        case BinaryOperator::BitwiseAnd:
             return "BitAnd";
-        case BinOp::BitXor:
+        case BinaryOperator::BitwiseXor:
             return "BitXor";
-        case BinOp::BitOr:
+        case BinaryOperator::BitwiseOr:
             return "BitOr";
-        case BinOp::Shl:
+        case BinaryOperator::ShiftLeft:
             return "Shl";
-        case BinOp::Shr:
+        case BinaryOperator::ShiftRight:
             return "Shr";
-        case BinOp::Eq:
+        case BinaryOperator::Equal:
             return "Eq";
-        case BinOp::Ne:
+        case BinaryOperator::NotEqual:
             return "Ne";
-        case BinOp::Lt:
+        case BinaryOperator::LessThan:
             return "Lt";
-        case BinOp::Le:
+        case BinaryOperator::LessThanOrEqual:
             return "Le";
-        case BinOp::Gt:
+        case BinaryOperator::GreaterThan:
             return "Gt";
-        case BinOp::Ge:
+        case BinaryOperator::GreaterThanOrEqual:
             return "Ge";
-        case BinOp::LogAnd:
+        case BinaryOperator::LogicalAnd:
             return "LogAnd";
-        case BinOp::LogOr:
+        case BinaryOperator::LogicalOr:
             return "LogOr";
     }
     return "";
 }
 
-const char *name(UnOp op) {
-    switch (op) {
-        case UnOp::Neg:
+const char *name(UnaryOperator operation) {
+    switch (operation) {
+        case UnaryOperator::Negative:
             return "Neg";
-        case UnOp::Not:
+        case UnaryOperator::Not:
             return "Not";
-        case UnOp::Deref:
+        case UnaryOperator::Dereference:
             return "Deref";
-        case UnOp::Borrow:
+        case UnaryOperator::Borrow:
             return "Borrow";
-        case UnOp::BorrowMut:
+        case UnaryOperator::MutableBorrow:
             return "BorrowMut";
     }
     return "";
 }
 
-const char *name(AssignOp op) {
-    switch (op) {
-        case AssignOp::Assign:
+const char *name(AssignmentOperator operation) {
+    switch (operation) {
+        case AssignmentOperator::Assign:
             return "Assign";
-        case AssignOp::AddAssign:
+        case AssignmentOperator::AddAssignment:
             return "AddAssign";
-        case AssignOp::SubAssign:
+        case AssignmentOperator::SubtractAssignment:
             return "SubAssign";
-        case AssignOp::MulAssign:
+        case AssignmentOperator::MultiplyAssignment:
             return "MulAssign";
-        case AssignOp::DivAssign:
+        case AssignmentOperator::DivideAssignment:
             return "DivAssign";
-        case AssignOp::RemAssign:
+        case AssignmentOperator::RemainderAssignment:
             return "RemAssign";
-        case AssignOp::BitAndAssign:
+        case AssignmentOperator::BitwiseAndAssignment:
             return "BitAndAssign";
-        case AssignOp::BitXorAssign:
+        case AssignmentOperator::BitwiseXorAssignment:
             return "BitXorAssign";
-        case AssignOp::BitOrAssign:
+        case AssignmentOperator::BitwiseOrAssignment:
             return "BitOrAssign";
-        case AssignOp::ShlAssign:
+        case AssignmentOperator::ShiftLeftAssignment:
             return "ShlAssign";
-        case AssignOp::ShrAssign:
+        case AssignmentOperator::ShiftRightAssignment:
             return "ShrAssign";
     }
     return "";
 }
 
-std::string to_string(const ConstValue &v) {
+std::string to_string(const ConstantValue &v) {
     switch (v.kind) {
-        case ConstValue::Kind::Int:
+        case ConstantValue::Kind::Int:
             return std::to_string(v.int_value);
-        case ConstValue::Kind::Bool:
+        case ConstantValue::Kind::Bool:
             return v.bool_value ? "true" : "false";
-        case ConstValue::Kind::Path:
+        case ConstantValue::Kind::Path:
             return to_string(v.path);
-        case ConstValue::Kind::Neg:
-            assert(v.operand); // Neg 的操作数在完整树中必非空
+        case ConstantValue::Kind::Negative:
+            assert(v.operand); // Negative 的操作数在完整树中必非空
             return "-" + to_string(*v.operand);
     }
     return "";
@@ -267,15 +267,15 @@ const char *name(Derive d) {
     return "";
 }
 
-const char *name(SelfParam::Kind k) {
+const char *name(SelfParameter::Kind k) {
     switch (k) {
-        case SelfParam::Kind::Value:
+        case SelfParameter::Kind::Value:
             return "self";
-        case SelfParam::Kind::MutValue:
+        case SelfParameter::Kind::MutableValue:
             return "mut self";
-        case SelfParam::Kind::Ref:
+        case SelfParameter::Kind::Reference:
             return "&self";
-        case SelfParam::Kind::RefMut:
+        case SelfParameter::Kind::MutableReference:
             return "&mut self";
     }
     return "";
@@ -284,8 +284,8 @@ const char *name(SelfParam::Kind k) {
 // —— Type 层次的 equals/name 实现 ——
 namespace {
 
-bool type_ptr_equals(const std::shared_ptr<Type> &a,
-                     const std::shared_ptr<Type> &b) {
+bool type_pointer_equals(const std::shared_ptr<Type> &a,
+                         const std::shared_ptr<Type> &b) {
     assert(a && b);
     return a->equals(*b);
 }
@@ -300,26 +300,26 @@ bool segments_equal(const std::vector<PathSegment> &a,
         if (a[i].generics.size() != b[i].generics.size())
             return false;
         for (size_t j = 0; j < a[i].generics.size(); ++j) {
-            if (!type_ptr_equals(a[i].generics[j], b[i].generics[j]))
+            if (!type_pointer_equals(a[i].generics[j], b[i].generics[j]))
                 return false;
         }
     }
     return true;
 }
 
-bool const_value_equals(const ConstValue &a, const ConstValue &b) {
+bool constant_value_equals(const ConstantValue &a, const ConstantValue &b) {
     if (a.kind != b.kind)
         return false;
     switch (a.kind) {
-        case ConstValue::Kind::Int:
+        case ConstantValue::Kind::Int:
             return a.int_value == b.int_value;
-        case ConstValue::Kind::Bool:
+        case ConstantValue::Kind::Bool:
             return a.bool_value == b.bool_value;
-        case ConstValue::Kind::Path:
+        case ConstantValue::Kind::Path:
             return segments_equal(a.path, b.path);
-        case ConstValue::Kind::Neg:
+        case ConstantValue::Kind::Negative:
             assert(a.operand && b.operand);
-            return const_value_equals(*a.operand, *b.operand);
+            return constant_value_equals(*a.operand, *b.operand);
     }
     return false;
 }
@@ -346,7 +346,7 @@ std::string ReferenceType::name() const {
 
 bool ReferenceType::equals(const Type &other) const {
     auto r = dynamic_cast<const ReferenceType *>(&other);
-    return r && is_mut == r->is_mut && type_ptr_equals(inner, r->inner);
+    return r && is_mut == r->is_mut && type_pointer_equals(inner, r->inner);
 }
 
 std::string ArrayType::name() const {
@@ -356,8 +356,8 @@ std::string ArrayType::name() const {
 
 bool ArrayType::equals(const Type &other) const {
     auto a = dynamic_cast<const ArrayType *>(&other);
-    return a && type_ptr_equals(element, a->element) &&
-           const_value_equals(length, a->length);
+    return a && type_pointer_equals(element, a->element) &&
+           constant_value_equals(length, a->length);
 }
 
 } // namespace rx

@@ -17,20 +17,20 @@ struct Printer : AstVisitor {
             os << "  ";
     }
 
-    void visit(IntLit &e) override {
+    void visit(IntegerLiteral &e) override {
         indent();
         os << "IntLit " << e.value << "\n";
     }
 
     void visit(BinaryExpression &e) override {
         indent();
-        os << "Binary " << name(e.op) << "\n";
+        os << "Binary " << name(e.operation) << "\n";
         ++depth;        // 进孩子前加深缩进
         walk(e, *this); // 继续访问孩子
         --depth;        // 出来还原
     }
 
-    void visit(BoolLit &e) override {
+    void visit(BooleanLiteral &e) override {
         indent();
         os << "BoolLit " << (e.value ? "true" : "false") << "\n";
     }
@@ -47,7 +47,7 @@ struct Printer : AstVisitor {
 
     void visit(UnaryExpression &e) override {
         indent();
-        os << "Unary " << name(e.op) << "\n";
+        os << "Unary " << name(e.operation) << "\n";
         ++depth;
         walk(e, *this);
         --depth;
@@ -55,10 +55,10 @@ struct Printer : AstVisitor {
 
     void visit(AssignmentExpression &e) override {
         indent();
-        os << "Assignment " << name(e.op) << "\n";
+        os << "Assignment " << name(e.operation) << "\n";
         ++depth;
         walk(e, *this);
-        --depth; // 孩子顺序由 walk 定：rhs 先（求值顺序）
+        --depth; // 孩子顺序由 walk 定：right 先（求值顺序）
     }
 
     void visit(CastExpression &e) override {
@@ -203,15 +203,15 @@ struct Printer : AstVisitor {
     }
 
     void visit(Function &e) override {
-        // ret 非空约定：省略 ARROW 时构建器直接填 UnitType 实例，打印为 ()
+        // return_type 非空约定：省略 ARROW 时构建器直接填 UnitType 实例，打印为 ()
         indent();
-        os << "Function " << e.name << " -> " << e.ret->name() << "\n";
+        os << "Function " << e.name << " -> " << e.return_type->name() << "\n";
         ++depth;
-        if (e.self_param) {
+        if (e.self_parameter) {
             indent();
-            os << "Self " << name(e.self_param->kind) << "\n";
+            os << "Self " << name(e.self_parameter->kind) << "\n";
         }
-        for (auto &p : e.params) {
+        for (auto &p : e.parameters) {
             indent();
             os << "Param " << (p.is_mut ? "mut " : "") << p.name << ": "
                << p.type->name() << "\n";
@@ -252,9 +252,9 @@ struct Printer : AstVisitor {
 
 } // namespace
 
-void dump(Expression &expr, std::ostream &os) {
+void dump(Expression &expression, std::ostream &os) {
     Printer p{os};
-    expr.accept(p);
+    expression.accept(p);
 }
 
 void dump(Crate &crate, std::ostream &os) {

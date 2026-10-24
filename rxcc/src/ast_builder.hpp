@@ -11,7 +11,7 @@ namespace rx {
 
 struct AstBuilder {
 public:
-    explicit AstBuilder(Diagnostics &diags) : diags_(diags) {}
+    explicit AstBuilder(Diagnostics &diagnostics) : diagnostics_(diagnostics) {}
 
     // 总入口：从 ANTLR 解析树的根节点开始，递归构建整个 AST。
     std::shared_ptr<Crate> build(RxParser::CrateContext *ctx);
@@ -51,13 +51,13 @@ private:
     std::shared_ptr<Expression>
     build_literal(RxParser::LiteralExpressionContext *ctx);
     std::shared_ptr<Expression>
-    build_array_expr(RxParser::ArrayExpressionContext *ctx);
+    build_array_expression(RxParser::ArrayExpressionContext *ctx);
     std::shared_ptr<Expression>
     build_expression_with_block(RxParser::ExpressionWithBlockContext *ctx);
     std::shared_ptr<Expression> build_if(RxParser::IfExpressionContext *ctx);
     std::shared_ptr<Expression>
     build_condition_primary(RxParser::ConditionPrimaryContext *ctx);
-    std::shared_ptr<Expression> build_condition_primary_nb(
+    std::shared_ptr<Expression> build_condition_primary_without_bare_block(
         RxParser::ConditionPrimaryWithoutBareBlockContext *ctx);
 
     // —— 语句层：块、普通语句、let 语句 ——
@@ -67,7 +67,7 @@ private:
     std::shared_ptr<Statement> build_let(RxParser::LetStatementContext *ctx);
 
     // —— 类型层：路径类型、引用类型、数组类型等 ——
-    std::shared_ptr<Type> build_type_ref(RxParser::TypeRefContext *ctx);
+    std::shared_ptr<Type> build_type_reference(RxParser::TypeRefContext *ctx);
     std::shared_ptr<Type> build_type_path(RxParser::TypePathContext *ctx);
     std::shared_ptr<Type>
     build_reference_type(RxParser::ReferenceTypeContext *ctx);
@@ -105,18 +105,18 @@ private:
     build_generic_types(RxParser::GenericArgsContext *ctx);
 
     // 构建引用类型：`&&` 算两层引用，`&` 算一层。
-    std::shared_ptr<Type> build_ref_type(antlr4::ParserRuleContext *whole,
-                                         antlr4::tree::TerminalNode *andand,
-                                         bool is_mut,
-                                         std::shared_ptr<Type> inner);
+    std::shared_ptr<Type>
+    make_reference_type(antlr4::ParserRuleContext *whole,
+                        antlr4::tree::TerminalNode *andand, bool is_mut,
+                        std::shared_ptr<Type> inner);
 
     // 解析常量值（数组长度 `[x; N]` 和 const 项的初始化器共用）。
-    ConstValue build_const(RxParser::ConstValueContext *ctx);
-    ConstValue build_magnitude(RxParser::MagnitudeContext *ctx);
+    ConstantValue build_constant_value(RxParser::ConstValueContext *ctx);
+    ConstantValue build_magnitude(RxParser::MagnitudeContext *ctx);
 
     // 构建 self 参数的四种形态：self / mut self / &self / &mut self。
-    std::shared_ptr<SelfParam>
-    build_self_param(RxParser::SelfParamContext *ctx);
+    std::shared_ptr<SelfParameter>
+    build_self_parameter(RxParser::SelfParamContext *ctx);
 
     // —— 一元与后缀的共用构件 ——
     //
@@ -144,7 +144,7 @@ private:
                 RxParser::ConditionExpressionContext *cond_ctx,
                 RxParser::BlockExpressionContext *body_ctx);
 
-    Diagnostics &diags_;
+    Diagnostics &diagnostics_;
 };
 
 } // namespace rx

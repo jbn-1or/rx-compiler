@@ -60,7 +60,7 @@ std::string read_file(const std::string &path, bool &ok) {
 // 摘掉默认控制台监听器。
 class CollectErrors : public antlr4::BaseErrorListener {
 public:
-    explicit CollectErrors(rx::Diagnostics &diags) : diags_(diags) {}
+    explicit CollectErrors(rx::Diagnostics &diags) : diagnostics_(diags) {}
 
     void syntaxError(antlr4::Recognizer * /*recognizer*/,
                      antlr4::Token * /*offendingSymbol*/, size_t line,
@@ -69,12 +69,13 @@ public:
         // 词法错误无 token 可指：报点位上的零宽 span（列 +1 成最小区间）。
         const rx::Position at{static_cast<int>(line),
                               static_cast<int>(charPositionInLine)};
-        diags_.error(rx::Span{at, rx::Position{at.line, at.column + 1}},
-                     "syntax error: " + msg);
+        diagnostics_.error(
+            rx::Span{at, rx::Position{at.line, at.column + 1}},
+            "syntax error: " + msg);
     }
 
 private:
-    rx::Diagnostics &diags_;
+    rx::Diagnostics &diagnostics_;
 };
 
 void print_diagnostics(const rx::Diagnostics &diags, const std::string &path,
@@ -173,8 +174,8 @@ int main(int argc, char **argv) {
 
     if (stage == "semantic") {
         // --stage semantic：在 AST 上做静态语义检查，不 dump。
-        rx::SemaAnalyzer sema(diags);
-        sema.run(*crate);
+        rx::SemanticAnalyzer analyzer(diags);
+        analyzer.run(*crate);
         if (!diags.ok()) {
             print_diagnostics(diags, source_path, std::cerr);
             return 1;

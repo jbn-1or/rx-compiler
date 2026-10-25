@@ -1,13 +1,16 @@
-// 编排语义检查流程：声明收集、入口检查、常量求值、签名定型、布局与 derive 检查。
+// 编排语义检查流程：声明收集、入口检查、常量求值、签名定型、布局与 derive 检查，
+// 最后检查所有函数体。
 // 先收集所有结构体，再收集值声明和 impl，保证全局名称查找不受声明顺序影响。
-// 各阶段的具体规则由对应模块实现；函数体检查目前尚未接入。
+// 各阶段的具体规则由对应模块实现。
 
+#include "sema/body.hpp"
 #include "sema/sema.hpp"
 
 namespace rx {
 
-// 编排 crate 级检查：声明收集 → 入口形态 → 常量 → 签名 → 布局与 derive。
-// 各 Pass 的实现按职责放在独立 .cpp；函数体检查尚待 4.3 接入。
+// 编排 crate 级检查：声明收集 → 入口形态 → 常量 → 签名 → 布局与 derive →
+// 函数体。
+// 各 Pass 的实现按职责放在独立 .cpp。
 void SemanticAnalyzer::run(const Crate &crate) {
     initialize_builtins();
     // 第一遍只登记结构体：规范要求顶层名称查找与声明顺序无关，故 impl 可以
@@ -31,6 +34,13 @@ void SemanticAnalyzer::run(const Crate &crate) {
     check_main_return_type();
     check_inline_layout_cycles();
     check_derives();
+
+    // 每个函数使用独立的 BodyChecker：局部作用域和循环状态不跨函数共享。
+    // 未调用、方法和关联函数也在 functions_ 中，一并检查。
+    for (const auto &fn : functions_) {
+        BodyChecker checker(*this);
+        checker.check_function(*fn);
+    }
 }
 
 } // namespace rx

@@ -76,6 +76,8 @@ add_executable(rxcc
   src/sema/layout.cpp
   src/sema/traits.cpp
   src/sema/body.cpp
+  src/sema/expression.cpp
+  src/sema/value_path.cpp
   src/sema/place.cpp
   src/sema/coercion.cpp
   ${GENERATED_SOURCES})

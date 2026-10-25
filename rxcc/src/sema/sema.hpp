@@ -98,6 +98,20 @@ private:
                                       const SemanticType *expected);
     ExpressionResult check_block(const BlockExpression &block,
                                  const SemanticType *expected);
+    // 4.2：place 物化与一次内置解引用。
+    PlaceAccessInformation
+    materialize_place(const PlaceAccessInformation &place) const;
+    ExpressionResult dereference_place(const SemanticType &base_type,
+                                       const PlaceAccessInformation &base_place,
+                                       Span at);
+    // 4.2：一对一强制转换判定、固定目标报错与多分支 LUB。
+    bool can_coerce(const SemanticType &from,
+                    const PlaceAccessInformation &place,
+                    const SemanticType &to) const;
+    void require_coerce(const ExpressionResult &from, const SemanticType &to,
+                        Span at);
+    SemanticType compute_least_upper_bound(
+        const std::vector<ExpressionResult> &results) const;
     // 扫一遍所有顶层/关联常量，逐个求值并落缓存。
     void evaluate_all_constants();
     // 求值不依赖名字的常量值（整数/布尔/负数）。

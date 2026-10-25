@@ -1,3 +1,7 @@
+// 定义统一的语义类型表示，提供类型构造、判等及诊断用的字符串输出。
+// 保存已解析的结构体身份、引用可变性、容器元素类型和数组长度。
+// 包含 unit、never 和错误恢复类型；AST 类型的解析由 resolve_type.cpp 负责。
+
 #pragma once
 
 #include <cstdint>

@@ -69,8 +69,16 @@ add_executable(rxcc
   src/ast/dump.cpp
   src/ast_builder.cpp
   src/sema/sema.cpp
-  ${GENERATED_SOURCES}
-  src/sema/type.hpp)
+  src/sema/collect.cpp
+  src/sema/constants.cpp
+  src/sema/resolve_type.cpp
+  src/sema/signatures.cpp
+  src/sema/layout.cpp
+  src/sema/traits.cpp
+  src/sema/body.cpp
+  src/sema/place.cpp
+  src/sema/coercion.cpp
+  ${GENERATED_SOURCES})
 
 add_dependencies(rxcc rxcc_antlr)
 

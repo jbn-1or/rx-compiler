@@ -1,3 +1,7 @@
+// 定义结构体、函数、常量和内置项的符号数据，以及字段和定型后的签名信息。
+// 常量符号额外保存求值状态与缓存，结构体符号保存字段、derive 和关联项索引。
+// 符号由 SemanticAnalyzer 持有，各检查阶段共享同一份声明信息。
+
 #pragma once
 #include "ast/ast.hpp"
 #include "sema/type.hpp"

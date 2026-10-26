@@ -78,6 +78,8 @@ add_executable(rxcc
   src/sema/body.cpp
   src/sema/expression.cpp
   src/sema/value_path.cpp
+  src/sema/call.cpp
+  src/sema/builtins.cpp
   src/sema/place.cpp
   src/sema/coercion.cpp
   ${GENERATED_SOURCES})

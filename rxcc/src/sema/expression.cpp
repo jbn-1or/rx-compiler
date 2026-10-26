@@ -1,6 +1,6 @@
 // 实现表达式检查分派和最小字面量规则。
-// 处理整数/布尔/unit 字面量、路径、块、普通调用，并识别 return 的发散类型；
-// 其他表达式类别由后续步骤接入，当前返回 Error 占位，保留已有诊断并避免连锁报错。
+// 处理整数/布尔/unit 字面量、路径、块、普通调用与 4.5 运算符节点，
+// 并识别 return 的发散类型；其他表达式类别由后续步骤接入。
 
 #include "sema/body.hpp"
 #include "sema/sema.hpp"
@@ -58,6 +58,17 @@ BodyChecker::check_expression(const Expression &expression,
     // 普通函数调用 / 内置 I/O：4.4 只处理单段路径 callee。
     if (const auto *call = dynamic_cast<const CallExpression *>(&expression))
         return check_call(*call);
+
+    // 运算、赋值、借用、解引用和 cast：4.5 的节点不吸收外层期望类型。
+    if (const auto *binary = dynamic_cast<const BinaryExpression *>(&expression))
+        return check_binary(*binary);
+    if (const auto *unary = dynamic_cast<const UnaryExpression *>(&expression))
+        return check_unary(*unary);
+    if (const auto *assignment =
+            dynamic_cast<const AssignmentExpression *>(&expression))
+        return check_assignment(*assignment);
+    if (const auto *cast = dynamic_cast<const CastExpression *>(&expression))
+        return check_cast(*cast);
 
     // 块：检查里面的语句和最后的值；外面希望的类型继续往里传。
     if (const auto *block = dynamic_cast<const BlockExpression *>(&expression))

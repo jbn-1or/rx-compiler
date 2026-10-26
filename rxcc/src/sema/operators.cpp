@@ -1,0 +1,423 @@
+// 实现函数体中的运算、赋值、借用、解引用和显式转换规则。
+// 操作数默认独立定型，不吸收外层期望类型；只有普通赋值的右侧接收左侧类型。
+// place、转换和 trait 查询复用 4.2/4.4 已有工具，结果按表达式类别返回值或 place。
+
+#include "sema/body.hpp"
+#include "sema/sema.hpp"
+#include <optional>
+#include <set>
+#include <utility>
+#include <vector>
+
+namespace rx {
+
+namespace {
+
+// 构造运算符检查失败的结果；具体诊断由调用点按运算类别记录。
+ExpressionResult failed_expression() {
+    return ExpressionResult{SemanticType::error(), PlaceAccessInformation{}};
+}
+
+// 构造成功但不可作为 place 的表达式结果，用于算术、比较和借用等值表达式。
+ExpressionResult value_expression(SemanticType type) {
+    return ExpressionResult{std::move(type), PlaceAccessInformation{}};
+}
+
+// 判断类型是否为不带引用层的直接标量（整数或 bool）。
+bool is_direct_scalar(const SemanticType &type) {
+    return type.kind == SemanticType::Kind::Int ||
+           type.kind == SemanticType::Kind::Bool;
+}
+
+// 运算操作数只允许一层共享引用：T 或 &T。
+// &mut、&& 以及 Box 都必须拒绝；这里不做通用的引用解引用。
+std::optional<SemanticType> scalar_operand(const SemanticType &type) {
+    if (is_direct_scalar(type))
+        return type;
+    if (type.kind == SemanticType::Kind::Reference && !type.is_mut &&
+        type.inner && is_direct_scalar(*type.inner))
+        return *type.inner;
+    return std::nullopt;
+}
+
+// 判断整数类型是否为有符号整数（i32 或 isize）。
+bool is_signed_integer(const SemanticType &type) {
+    return type.kind == SemanticType::Kind::Int &&
+           (type.int_kind == SemanticType::IntKind::I32 ||
+            type.int_kind == SemanticType::IntKind::Isize);
+}
+
+// 排序比较保留完整引用层级：外层到内层的可变性 + 最终标量类型。
+struct OrderingShape {
+    std::vector<bool> mutable_layers;
+    SemanticType base;
+};
+
+// 提取排序比较所需的完整引用层级和最终标量类型；遇到 Box 等非引用类型停止。
+std::optional<OrderingShape> ordering_shape(const SemanticType &type) {
+    OrderingShape shape;
+    const SemanticType *current = &type;
+    while (current->kind == SemanticType::Kind::Reference) {
+        if (!current->inner)
+            return std::nullopt;
+        shape.mutable_layers.push_back(current->is_mut);
+        current = current->inner.get();
+    }
+    if (!is_direct_scalar(*current))
+        return std::nullopt;
+    shape.base = *current;
+    return shape;
+}
+
+// 判断两侧排序操作数的引用层级是否可匹配。
+// 只允许最外层把右侧 &mut T 调整为 &T；更内层的可变性必须完全一致。
+bool ordering_layers_match(const std::vector<bool> &left,
+                           const std::vector<bool> &right) {
+    if (left.size() != right.size())
+        return false;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        // 唯一特例：左 &T、右 &mut T 可以把最外层调整为 &T。
+        if (index == 0 && !left[index] && right[index])
+            continue;
+        if (left[index] != right[index])
+            return false;
+    }
+    return true;
+}
+
+// 判断复合赋值是否属于算术类（+=、-=、*=、/=、%=）。
+bool is_arithmetic_assignment(AssignmentOperator operation) {
+    return operation == AssignmentOperator::AddAssignment ||
+           operation == AssignmentOperator::SubtractAssignment ||
+           operation == AssignmentOperator::MultiplyAssignment ||
+           operation == AssignmentOperator::DivideAssignment ||
+           operation == AssignmentOperator::RemainderAssignment;
+}
+
+// 判断复合赋值是否属于位运算类（&=、|=、^=）。
+bool is_bitwise_assignment(AssignmentOperator operation) {
+    return operation == AssignmentOperator::BitwiseAndAssignment ||
+           operation == AssignmentOperator::BitwiseXorAssignment ||
+           operation == AssignmentOperator::BitwiseOrAssignment;
+}
+
+// 判断复合赋值是否属于移位类（<<=、>>=）。
+bool is_shift_assignment(AssignmentOperator operation) {
+    return operation == AssignmentOperator::ShiftLeftAssignment ||
+           operation == AssignmentOperator::ShiftRightAssignment;
+}
+
+} // namespace
+
+// 检查二元表达式：算术、位运算、移位、相等、排序和惰性逻辑。
+// 两侧操作数独立定型，不接收外层期望类型；结果除比较/逻辑为 bool 外，
+// 按运算规则返回对应标量类型，且不产生 place。
+ExpressionResult
+BodyChecker::check_binary(const BinaryExpression &expression) {
+    if (!expression.left || !expression.right)
+        return failed_expression();
+
+    // 二元运算的操作数都独立定型；外层期望类型不向它们传播（CV3）。
+    const ExpressionResult left =
+        check_expression(*expression.left, nullptr);
+    const ExpressionResult right =
+        check_expression(*expression.right, nullptr);
+    if (left.type.is_error() || right.type.is_error())
+        return failed_expression();
+
+    switch (expression.operation) {
+        case BinaryOperator::Add:
+        case BinaryOperator::Subtract:
+        case BinaryOperator::Multiply:
+        case BinaryOperator::Divide:
+        case BinaryOperator::Remainder: {
+            const auto left_base = scalar_operand(left.type);
+            const auto right_base = scalar_operand(right.type);
+            if (!left_base || !right_base ||
+                left_base->kind != SemanticType::Kind::Int ||
+                right_base->kind != SemanticType::Kind::Int ||
+                !left_base->equals(*right_base)) {
+                diagnostics_.error(
+                    expression.span,
+                    "arithmetic operands must have the same integer type");
+                return failed_expression();
+            }
+            return value_expression(*left_base);
+        }
+
+        case BinaryOperator::BitwiseAnd:
+        case BinaryOperator::BitwiseXor:
+        case BinaryOperator::BitwiseOr: {
+            const auto left_base = scalar_operand(left.type);
+            const auto right_base = scalar_operand(right.type);
+            if (!left_base || !right_base ||
+                !is_direct_scalar(*left_base) ||
+                !left_base->equals(*right_base)) {
+                diagnostics_.error(
+                    expression.span,
+                    "bitwise operands must have the same integer or bool type");
+                return failed_expression();
+            }
+            return value_expression(*left_base);
+        }
+
+        case BinaryOperator::ShiftLeft:
+        case BinaryOperator::ShiftRight: {
+            const auto left_base = scalar_operand(left.type);
+            const auto right_base = scalar_operand(right.type);
+            if (!left_base || !right_base ||
+                left_base->kind != SemanticType::Kind::Int ||
+                right_base->kind != SemanticType::Kind::Int) {
+                diagnostics_.error(expression.span,
+                                   "shift operands must be integers");
+                return failed_expression();
+            }
+            return value_expression(*left_base);
+        }
+
+        case BinaryOperator::Equal:
+        case BinaryOperator::NotEqual: {
+            if (!left.type.equals(right.type)) {
+                diagnostics_.error(
+                    expression.span,
+                    "equality operands must have exactly the same type");
+                return failed_expression();
+            }
+            std::set<std::pair<const StructSymbol *, Derive>> visiting;
+            if (!analyzer_.has_trait(left.type, Derive::PartialEq, visiting)) {
+                diagnostics_.error(
+                    expression.span,
+                    "equality requires PartialEq on the operand type");
+                return failed_expression();
+            }
+            return value_expression(SemanticType::bool_());
+        }
+
+        case BinaryOperator::LessThan:
+        case BinaryOperator::LessThanOrEqual:
+        case BinaryOperator::GreaterThan:
+        case BinaryOperator::GreaterThanOrEqual: {
+            const auto left_shape = ordering_shape(left.type);
+            const auto right_shape = ordering_shape(right.type);
+            if (!left_shape || !right_shape ||
+                !left_shape->base.equals(right_shape->base) ||
+                !ordering_layers_match(left_shape->mutable_layers,
+                                       right_shape->mutable_layers)) {
+                diagnostics_.error(
+                    expression.span,
+                    "ordering operands must be matching scalars or references");
+                return failed_expression();
+            }
+            return value_expression(SemanticType::bool_());
+        }
+
+        case BinaryOperator::LogicalAnd:
+        case BinaryOperator::LogicalOr: {
+            if (left.type.kind != SemanticType::Kind::Bool ||
+                right.type.kind != SemanticType::Kind::Bool) {
+                diagnostics_.error(
+                    expression.span,
+                    "logical operators require bool operands");
+                return failed_expression();
+            }
+            return value_expression(SemanticType::bool_());
+        }
+    }
+
+    return failed_expression();
+}
+
+// 检查一元表达式：取负、逻辑非、解引用、共享借用和可变借用。
+// 解引用复用 place 工具并返回 place；借用返回引用值；其余返回标量值。
+ExpressionResult BodyChecker::check_unary(const UnaryExpression &expression) {
+    if (!expression.operand)
+        return failed_expression();
+
+    // 一元运算的操作数独立定型，不吸收外层期望类型。
+    const ExpressionResult operand =
+        check_expression(*expression.operand, nullptr);
+    if (operand.type.is_error())
+        return failed_expression();
+
+    switch (expression.operation) {
+        case UnaryOperator::Negative: {
+            const auto base = scalar_operand(operand.type);
+            if (!base || !is_signed_integer(*base)) {
+                diagnostics_.error(
+                    expression.span,
+                    "unary minus requires a signed integer");
+                return failed_expression();
+            }
+            return value_expression(*base);
+        }
+
+        case UnaryOperator::Not: {
+            const auto base = scalar_operand(operand.type);
+            if (!base || !is_direct_scalar(*base)) {
+                diagnostics_.error(
+                    expression.span,
+                    "logical not requires an integer or bool");
+                return failed_expression();
+            }
+            return value_expression(*base);
+        }
+
+        case UnaryOperator::Dereference:
+            return dereference_place(operand.type, operand.place,
+                                     expression.span);
+
+        case UnaryOperator::Borrow:
+        case UnaryOperator::MutableBorrow: {
+            if (operand.type.is_never()) {
+                diagnostics_.error(expression.span,
+                                   "cannot borrow a diverging expression");
+                return failed_expression();
+            }
+
+            // 值表达式物化为临时 place；已有 place 保持原访问权限。
+            PlaceAccessInformation place = operand.place;
+            if (!place.is_place)
+                place = materialize_place(place);
+
+            const bool mutable_borrow =
+                expression.operation == UnaryOperator::MutableBorrow;
+            if (mutable_borrow &&
+                (!place.is_mutable || place.crossed_shared)) {
+                diagnostics_.error(
+                    expression.span,
+                    "cannot mutably borrow an immutable or shared place");
+                return failed_expression();
+            }
+
+            return value_expression(
+                SemanticType::reference(mutable_borrow, operand.type));
+        }
+    }
+
+    return failed_expression();
+}
+
+// 检查普通赋值和复合赋值。
+// 左值必须是可变 place；普通赋值的右侧接收左值类型期望，
+// 复合赋值右侧独立定型并按对应二元运算规则检查，结果均为 unit。
+ExpressionResult
+BodyChecker::check_assignment(const AssignmentExpression &expression) {
+    if (!expression.left || !expression.right)
+        return failed_expression();
+
+    const ExpressionResult left =
+        check_expression(*expression.left, nullptr);
+    if (left.type.is_error())
+        return failed_expression();
+    if (!left.place.is_place) {
+        diagnostics_.error(expression.left->span,
+                           "assignment target is not a place");
+        return failed_expression();
+    }
+    if (!left.place.is_mutable) {
+        diagnostics_.error(expression.left->span,
+                           "assignment target is not mutable");
+        return failed_expression();
+    }
+
+    if (expression.operation == AssignmentOperator::Assign) {
+        // 普通赋值是固定目标：右侧以左侧类型为期望，再统一做一对一转换。
+        const ExpressionResult right =
+            check_expression(*expression.right, &left.type);
+        if (right.type.is_error())
+            return failed_expression();
+        if (!can_coerce(right.type, right.place, left.type)) {
+            require_coerce(right, left.type, expression.right->span);
+            return failed_expression();
+        }
+        return value_expression(SemanticType::unit());
+    }
+
+    const bool arithmetic = is_arithmetic_assignment(expression.operation);
+    const bool bitwise = is_bitwise_assignment(expression.operation);
+    const bool shift = is_shift_assignment(expression.operation);
+    if (!arithmetic && !bitwise && !shift)
+        return failed_expression();
+
+    // 复合赋值左侧必须是原始标量 place，引用目标不自动解引用（M7）。
+    const SemanticType *left_scalar = &left.type;
+    if (!is_direct_scalar(*left_scalar)) {
+        diagnostics_.error(
+            expression.left->span,
+            "compound assignment target must have scalar type");
+        return failed_expression();
+    }
+    if ((arithmetic || shift) &&
+        left_scalar->kind != SemanticType::Kind::Int) {
+        diagnostics_.error(
+            expression.left->span,
+            "compound assignment requires an integer target");
+        return failed_expression();
+    }
+
+    // 复合赋值右侧不接收左侧类型作为期望类型（CV3/M7）。
+    const ExpressionResult right =
+        check_expression(*expression.right, nullptr);
+    if (right.type.is_error())
+        return failed_expression();
+
+    const auto right_scalar = scalar_operand(right.type);
+    if (!right_scalar) {
+        diagnostics_.error(
+            expression.span,
+            "compound assignment right operand must be a scalar or one shared reference");
+        return failed_expression();
+    }
+
+    if (shift) {
+        if (right_scalar->kind != SemanticType::Kind::Int) {
+            diagnostics_.error(expression.span,
+                               "shift operands must be integers");
+            return failed_expression();
+        }
+    } else if (!left_scalar->equals(*right_scalar)) {
+        diagnostics_.error(
+            expression.span,
+            arithmetic
+                ? "arithmetic operands must have the same integer type"
+                : "bitwise operands must have the same integer or bool type");
+        return failed_expression();
+    }
+
+    return value_expression(SemanticType::unit());
+}
+
+// 检查 as 显式转换：只允许整数→整数和 bool→整数。
+// 目标类型不向操作数传播期望类型，结果为目标整数类型且不是 place。
+ExpressionResult BodyChecker::check_cast(const CastExpression &expression) {
+    if (!expression.operand || !expression.target)
+        return failed_expression();
+
+    const SemanticType target =
+        analyzer_.resolve_type(*expression.target, current_owner_);
+    if (target.is_error())
+        return failed_expression();
+
+    // as 的目标类型不向操作数提供期望类型（CV3/CV8）。
+    const ExpressionResult operand =
+        check_expression(*expression.operand, nullptr);
+    if (operand.type.is_error())
+        return failed_expression();
+
+    if (target.kind != SemanticType::Kind::Int) {
+        diagnostics_.error(expression.span,
+                           "cast target must be an integer type");
+        return failed_expression();
+    }
+    if (operand.type.kind != SemanticType::Kind::Int &&
+        operand.type.kind != SemanticType::Kind::Bool) {
+        diagnostics_.error(
+            expression.span,
+            "casts require an integer or bool operand");
+        return failed_expression();
+    }
+
+    return value_expression(target);
+}
+
+} // namespace rx

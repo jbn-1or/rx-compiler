@@ -1,6 +1,6 @@
 // 声明函数体检查器 BodyChecker，集中管理表达式检查及相关工具的接口。
 // 通过 SemanticAnalyzer 访问全局符号和声明检查服务，共用诊断收集器。
-// 当前包含函数体入口、局部作用域、字面量/路径/块与普通调用检查，
+// 当前包含函数体入口、局部作用域、字面量/路径/块、普通调用与运算符检查，
 // 以及 place、转换工具；其余表达式类别和循环状态由后续步骤补齐。
 
 #pragma once
@@ -67,6 +67,12 @@ private:
     bool check_arguments(
         const std::vector<SemanticType> &parameter_types,
         const std::vector<std::shared_ptr<Expression>> &arguments, Span at);
+
+    // operators.cpp（4.5）：运算、赋值、借用、解引用与 cast。
+    ExpressionResult check_binary(const BinaryExpression &expression);
+    ExpressionResult check_unary(const UnaryExpression &expression);
+    ExpressionResult check_assignment(const AssignmentExpression &expression);
+    ExpressionResult check_cast(const CastExpression &expression);
 
     // place.cpp：place 物化与一次内置解引用。
     PlaceAccessInformation

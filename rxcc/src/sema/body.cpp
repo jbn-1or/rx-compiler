@@ -212,7 +212,9 @@ ExpressionResult BodyChecker::check_block(const BlockExpression &block,
     ExpressionResult result;
     if (tail) {
         // 有最后表达式：块的值就是它的值；外面期望的类型也传给它。
+        // 块产生的是值表达式，不继承尾表达式原有的 place 权限。
         result = check_expression(*tail, expected);
+        result.place = PlaceAccessInformation{};
     } else if (diverges) {
         // 没有最后表达式，但前面的语句不会往下走，所以整个块也不会返回。
         result = ExpressionResult{SemanticType::never(),

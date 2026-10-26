@@ -81,6 +81,7 @@ add_executable(rxcc
   src/sema/call.cpp
   src/sema/builtins.cpp
   src/sema/operators.cpp
+  src/sema/aggregate.cpp
   src/sema/place.cpp
   src/sema/coercion.cpp
   ${GENERATED_SOURCES})

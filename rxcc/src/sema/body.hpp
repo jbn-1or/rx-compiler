@@ -1,7 +1,7 @@
 // 声明函数体检查器 BodyChecker，集中管理表达式检查及相关工具的接口。
 // 通过 SemanticAnalyzer 访问全局符号和声明检查服务，共用诊断收集器。
-// 当前包含函数体入口、局部作用域、字面量/路径/块、普通调用与运算符检查，
-// 以及 place、转换工具；其余表达式类别和循环状态由后续步骤补齐。
+// 当前包含函数体入口、局部作用域、字面量/路径/块、普通调用、运算符与聚合检查，
+// 以及 place、转换工具；控制流由后续步骤补齐。
 
 #pragma once
 
@@ -73,6 +73,14 @@ private:
     ExpressionResult check_unary(const UnaryExpression &expression);
     ExpressionResult check_assignment(const AssignmentExpression &expression);
     ExpressionResult check_cast(const CastExpression &expression);
+
+    // aggregate.cpp（4.6）：结构体、字段、数组和索引。
+    ExpressionResult
+    check_struct_expression(const StructExpression &expression);
+    ExpressionResult check_field(const FieldExpression &expression);
+    ExpressionResult check_array(const ArrayExpression &expression,
+                                 const SemanticType *expected);
+    ExpressionResult check_index(const IndexExpression &expression);
 
     // place.cpp：place 物化与一次内置解引用。
     PlaceAccessInformation

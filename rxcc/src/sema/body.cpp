@@ -22,6 +22,7 @@ void BodyChecker::check_function(const FunctionSymbol &fn) {
     }
 
     scopes_.clear();
+    loop_frames_.clear();
     current_function_ = nullptr;
     current_owner_ = nullptr;
     current_has_self_ = false;
@@ -31,6 +32,7 @@ void BodyChecker::check_function(const FunctionSymbol &fn) {
 // 顶层函数没有 owner；impl 内无接收者的关联函数仍有 owner，供 Self 使用。
 void BodyChecker::enter_function(const FunctionSymbol &fn) {
     scopes_.clear();
+    loop_frames_.clear();
     current_function_ = &fn;
     current_owner_ = fn.owner;
     current_has_self_ = false;

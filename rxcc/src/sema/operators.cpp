@@ -1,6 +1,20 @@
-// 实现函数体中的运算、赋值、借用、解引用和显式转换规则。
-// 操作数默认独立定型，不吸收外层期望类型；只有普通赋值的右侧接收左侧类型。
-// place、转换和 trait 查询复用 4.2/4.4 已有工具，结果按表达式类别返回值或 place。
+// 实现函数体中的二元/一元运算、赋值、借用、解引用和 as 显式转换。
+// 具体检查：
+// - 算术 + - * / %：T 或一层共享引用 &T，两侧同一种整数 T，结果 T。
+// - 位运算 & | ^：T 或 &T，两侧同一种整数或 bool，结果 T。
+// - 移位 << >>：左右都是整数或 &整数，允许宽度不同，结果取左侧类型。
+// - 相等 == !=：两侧源类型完全相同且实现 PartialEq，结果 bool。
+// - 排序 < <= > >=：同种标量，或层数和可变性匹配的引用；只允许最外层
+//   左 &T / 右 &mut T 的调整，结果 bool。
+// - 逻辑 && ||：两侧都必须是直接的 bool，结果 bool。
+// - 一元 -：有符号整数或 &有符号整数；!：整数/bool 或 &整数/&bool。
+// - 解引用 *：只接受 &T、&mut T、Box<T>，返回带权限的 place。
+// - 借用 &/&mut：值物化临时 place，已有 place 保留权限；&mut 要求可写且未跨共享。
+// - 赋值：左值必须是可变 place；普通 = 的右侧按左值类型检查并转换；复合赋值
+//   左侧必须是直接标量且不自动解引用，右侧独立定型后按对应二元运算规则检查；
+//   两者结果都是 ()。左值无效时仍遍历右侧，避免丢失独立诊断。
+// - as：只允许整数→整数和 bool→整数；目标类型不向操作数传播期望，结果为目标整数类型。
+// - 除 * 返回 place 外，其余运算结果都是值；每个操作数只检查一次。
 
 #include "sema/body.hpp"
 #include "sema/sema.hpp"
@@ -305,19 +319,26 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
     if (!expression.left || !expression.right)
         return failed_expression();
 
+    // 左值已经无效时，右侧仍是独立表达式；继续遍历它，避免错误恢复阶段
+    // 漏掉右侧的名字/类型/发散诊断。
+    auto check_right_after_invalid_left = [&]() {
+        check_expression(*expression.right, nullptr);
+        return failed_expression();
+    };
+
     const ExpressionResult left =
         check_expression(*expression.left, nullptr);
     if (left.type.is_error())
-        return failed_expression();
+        return check_right_after_invalid_left();
     if (!left.place.is_place) {
         diagnostics_.error(expression.left->span,
                            "assignment target is not a place");
-        return failed_expression();
+        return check_right_after_invalid_left();
     }
     if (!left.place.is_mutable) {
         diagnostics_.error(expression.left->span,
                            "assignment target is not mutable");
-        return failed_expression();
+        return check_right_after_invalid_left();
     }
 
     if (expression.operation == AssignmentOperator::Assign) {
@@ -337,7 +358,7 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
     const bool bitwise = is_bitwise_assignment(expression.operation);
     const bool shift = is_shift_assignment(expression.operation);
     if (!arithmetic && !bitwise && !shift)
-        return failed_expression();
+        return check_right_after_invalid_left();
 
     // 复合赋值左侧必须是原始标量 place，引用目标不自动解引用（M7）。
     const SemanticType *left_scalar = &left.type;
@@ -345,14 +366,14 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
         diagnostics_.error(
             expression.left->span,
             "compound assignment target must have scalar type");
-        return failed_expression();
+        return check_right_after_invalid_left();
     }
     if ((arithmetic || shift) &&
         left_scalar->kind != SemanticType::Kind::Int) {
         diagnostics_.error(
             expression.left->span,
             "compound assignment requires an integer target");
-        return failed_expression();
+        return check_right_after_invalid_left();
     }
 
     // 复合赋值右侧不接收左侧类型作为期望类型（CV3/M7）。
@@ -395,8 +416,17 @@ ExpressionResult BodyChecker::check_cast(const CastExpression &expression) {
 
     const SemanticType target =
         analyzer_.resolve_type(*expression.target, current_owner_);
-    if (target.is_error())
+    // 目标类型已经出错时，操作数仍要遍历，保留其中独立的名字/类型诊断。
+    if (target.is_error()) {
+        check_expression(*expression.operand, nullptr);
         return failed_expression();
+    }
+
+    const bool target_is_integer = target.kind == SemanticType::Kind::Int;
+    if (!target_is_integer) {
+        diagnostics_.error(expression.span,
+                           "cast target must be an integer type");
+    }
 
     // as 的目标类型不向操作数提供期望类型（CV3/CV8）。
     const ExpressionResult operand =
@@ -404,19 +434,17 @@ ExpressionResult BodyChecker::check_cast(const CastExpression &expression) {
     if (operand.type.is_error())
         return failed_expression();
 
-    if (target.kind != SemanticType::Kind::Int) {
-        diagnostics_.error(expression.span,
-                           "cast target must be an integer type");
-        return failed_expression();
-    }
-    if (operand.type.kind != SemanticType::Kind::Int &&
-        operand.type.kind != SemanticType::Kind::Bool) {
+    const bool operand_is_scalar =
+        operand.type.kind == SemanticType::Kind::Int ||
+        operand.type.kind == SemanticType::Kind::Bool;
+    if (!operand_is_scalar) {
         diagnostics_.error(
             expression.span,
             "casts require an integer or bool operand");
-        return failed_expression();
     }
 
+    if (!target_is_integer || !operand_is_scalar)
+        return failed_expression();
     return value_expression(target);
 }
 

@@ -1,7 +1,7 @@
 // 声明函数体检查器 BodyChecker，集中管理表达式检查及相关工具的接口。
 // 通过 SemanticAnalyzer 访问全局符号和声明检查服务，共用诊断收集器。
-// 当前包含函数体入口、局部作用域、字面量/路径/块、普通调用、运算符与聚合检查，
-// 以及 place、转换工具；控制流由后续步骤补齐。
+// 当前包含函数体入口、局部作用域、字面量/路径/块、普通调用、运算符、聚合与控制流检查，
+// 以及 place、转换工具。
 
 #pragma once
 
@@ -33,6 +33,7 @@ private:
     Diagnostics &diagnostics_;
 
     std::vector<Scope> scopes_;
+    std::vector<LoopFrame> loop_frames_;
     const FunctionSymbol *current_function_ = nullptr;
     StructSymbol *current_owner_ = nullptr;
     bool current_has_self_ = false;
@@ -81,6 +82,23 @@ private:
     ExpressionResult check_array(const ArrayExpression &expression,
                                  const SemanticType *expected);
     ExpressionResult check_index(const IndexExpression &expression);
+
+    // control_flow.cpp（4.7）：if、loop、while 和跳转。
+    ExpressionResult check_if(const IfExpression &expression,
+                              const SemanticType *expected);
+    ExpressionResult check_loop(const LoopExpression &expression,
+                                const SemanticType *expected);
+    ExpressionResult check_while(const WhileExpression &expression);
+    ExpressionResult check_break(const BreakExpression &expression);
+    ExpressionResult check_continue(const ContinueExpression &expression);
+    bool check_bool_condition(const Expression &condition, Span at);
+
+    enum class JumpTargetStatus { Found, BlockedByBarrier, NotFound };
+    struct JumpTargetLookup {
+        JumpTargetStatus status = JumpTargetStatus::NotFound;
+        std::size_t index = 0;
+    };
+    JumpTargetLookup find_jump_target() const;
 
     // place.cpp：place 物化与一次内置解引用。
     PlaceAccessInformation

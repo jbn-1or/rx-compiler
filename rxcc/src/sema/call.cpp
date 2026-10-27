@@ -1,5 +1,5 @@
 // 实现普通函数调用与内置 I/O 的检查。
-// 当前只解析单段路径 callee；多段关联调用留到 Phase 5，先返回 Error 占位。
+// 当前只解析单段 PathExpression callee；多段关联调用和点调用留到 Phase 5。
 // 实参检查集中在 check_arguments，供后续关联调用复用。
 
 #include "sema/body.hpp"

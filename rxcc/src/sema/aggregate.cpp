@@ -1,6 +1,10 @@
-// 检查结构体写法、取字段、数组写法和下标写法。
-// 结构体和数组的写法得到一个新值；取字段和下标得到一块可读、也可能可写的位置。
-// 这里复用前面已经做好的类型转换、位置和共同类型工具，不再另写一套。
+// 检查结构体构造、字段访问、数组列表/重复和下标访问。
+// 具体检查：
+// - 结构体构造 S { ... } / Self { ... }：
+// - 字段访问 base.field：
+// - 数组列表 [a, b, ...]：
+// - 数组重复 [e; N]：
+// - 下标 base[index]：
 
 #include "sema/body.hpp"
 #include "sema/sema.hpp"
@@ -36,15 +40,26 @@ SemanticType usize_type() {
 // 先确认花括号前写的是一个真正的结构体，再逐个核对字段：
 ExpressionResult BodyChecker::check_struct_expression(
     const StructExpression &expression) {
+    // 路径已经出错时，字段值仍要遍历，避免错误恢复阶段丢掉后续名字/类型错误。
+    auto check_fields_without_target = [&]() {
+        for (const StructExpressionField &field : expression.fields) {
+            if (field.value)
+                check_expression(*field.value, nullptr);
+        }
+    };
+
     // 没有写出结构体名字，无法继续。
-    if (!expression.path)
+    if (!expression.path) {
+        check_fields_without_target();
         return failed_expression();
+    }
 
     const std::vector<PathSegment> &segments = expression.path->segments;
     // 这里只接受一段名字，比如 `S` 或 `Self`；多段名字不是结构体写法。
     if (segments.size() != 1) {
         diagnostics_.error(expression.path->span,
                            "struct literal path must name exactly one type");
+        check_fields_without_target();
         return failed_expression();
     }
 
@@ -55,6 +70,7 @@ ExpressionResult BodyChecker::check_struct_expression(
         if (!current_owner_) {
             diagnostics_.error(expression.path->span,
                                "Self is not available outside a struct");
+            check_fields_without_target();
             return failed_expression();
         }
         structure = current_owner_;
@@ -64,6 +80,7 @@ ExpressionResult BodyChecker::check_struct_expression(
         if (found == analyzer_.type_namespace.end()) {
             diagnostics_.error(expression.path->span,
                                "unresolved struct name: " + segment.name);
+            check_fields_without_target();
             return failed_expression();
         }
         structure = found->second;
@@ -73,11 +90,14 @@ ExpressionResult BodyChecker::check_struct_expression(
     if (!segment.generics.empty()) {
         diagnostics_.error(expression.path->span,
                            "structs have no type parameters: " + segment.name);
+        check_fields_without_target();
         return failed_expression();
     }
     // 正常情况下不会走到这里，留作兜底。
-    if (!structure)
+    if (!structure) {
+        check_fields_without_target();
         return failed_expression();
+    }
 
     bool ok = true;
     std::unordered_set<std::string> initialized;
@@ -201,16 +221,31 @@ BodyChecker::check_array(const ArrayExpression &expression,
     uint64_t expected_length = 0;
     bool has_fixed_target = false;
 
+    // 目标类型已经出错时，仍遍历元素/重复值，保留后续名字和类型诊断。
+    auto check_elements_without_target = [&]() {
+        if (expression.repeat_value) {
+            check_expression(*expression.repeat_value, nullptr);
+            return;
+        }
+        for (const auto &element : expression.elements) {
+            if (element)
+                check_expression(*element, nullptr);
+        }
+    };
+
     // 外面可能已经要求这里必须是一个固定数组；只有这种情况才把元素类型和长度往里传。
     if (expected) {
-        // 外面的类型前面已经出错，不再继续检查数组内容。
-        if (expected->is_error())
+        // 外面的类型前面已经出错，不再把元素当作固定目标，但仍检查元素本身。
+        if (expected->is_error()) {
+            check_elements_without_target();
             return failed_expression();
+        }
         if (expected->kind == SemanticType::Kind::Array) {
             // 固定数组必须写清里面装什么元素，否则不知道该怎么检查每个元素。
             if (!expected->inner) {
                 diagnostics_.error(expression.span,
                                    "array target is missing its element type");
+                check_elements_without_target();
                 return failed_expression();
             }
             has_fixed_target = true;
@@ -244,16 +279,21 @@ BodyChecker::check_array(const ArrayExpression &expression,
 
         // 次数必须是能算出来的 usize 常量，不能用普通变量或别的类型。
         const SemanticType usize = usize_type();
+        const std::size_t diagnostics_before = diagnostics_.items.size();
         const EvaluatedConstant count =
             analyzer_.evaluate_constant_value(expression.repeat_count, &usize,
                                               current_owner_);
         bool count_ok = count.ok && !count.type.is_error() &&
                         count.type.equals(usize);
         const auto *count_value = std::get_if<uint64_t>(&count.value);
-        // 次数算不出来，或者算出来的不是非负的 usize。
+        // 次数算不出来，或者算出来的不是非负的 usize。常量求值器已经报过错时
+        // 不再重复追加一条泛化诊断。
         if (!count_ok || !count_value) {
-            diagnostics_.error(expression.repeat_count.span,
-                               "array repeat count must be a usize constant");
+            if (diagnostics_.items.size() == diagnostics_before) {
+                diagnostics_.error(
+                    expression.repeat_count.span,
+                    "array repeat count must be a usize constant");
+            }
             ok = false;
         }
 
@@ -380,10 +420,28 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
     if (!expression.base || !expression.index)
         return failed_expression();
 
-    ExpressionResult base = check_expression(*expression.base, nullptr);
-    // 容器本身已经出错，不再继续查找元素。
-    if (base.type.is_error())
+    // base 已经出错时，下标仍是独立表达式；继续检查它，保证错误恢复阶段
+    // 不会漏掉下标里的名字/类型/发散诊断。
+    auto check_index_after_invalid_base = [&]() {
+        const SemanticType usize = usize_type();
+        const ExpressionResult index =
+            check_expression(*expression.index, &usize);
+        if (index.type.is_error())
+            return failed_expression();
+        if (index.type.is_never()) {
+            diagnostics_.error(expression.index->span,
+                               "a diverging index expression is not supported");
+            return failed_expression();
+        }
+        if (!can_coerce(index.type, index.place, usize))
+            require_coerce(index, usize, expression.index->span);
         return failed_expression();
+    };
+
+    ExpressionResult base = check_expression(*expression.base, nullptr);
+    // 容器本身已经出错；仍检查下标表达式。
+    if (base.type.is_error())
+        return check_index_after_invalid_base();
     // 容器只是一个临时结果，不是变量；先给它一个临时存放位置，后面才能取元素。
     if (!base.place.is_place)
         base.place = materialize_place(base.place);
@@ -393,11 +451,11 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
            base.type.kind == SemanticType::Kind::Box) {
         // 包装层里没有写清里面是什么类型，结构不完整。
         if (!base.type.inner)
-            return failed_expression();
+            return check_index_after_invalid_base();
         base = dereference_place(base.type, base.place, expression.base->span);
         // 这一层打不开，后面的下标访问也就不成立。
         if (base.type.is_error())
-            return failed_expression();
+            return check_index_after_invalid_base();
     }
 
     // 不是固定数组，也不是 Vec，就不能用下标取元素。
@@ -405,11 +463,11 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
         base.type.kind != SemanticType::Kind::Vec) {
         diagnostics_.error(expression.span,
                            "only arrays and Vec values can be indexed");
-        return failed_expression();
+        return check_index_after_invalid_base();
     }
     // 数组或 Vec 没有写清元素类型，结构不完整。
     if (!base.type.inner)
-        return failed_expression();
+        return check_index_after_invalid_base();
 
     // 下标必须能当成 usize 使用。
     const SemanticType usize = usize_type();

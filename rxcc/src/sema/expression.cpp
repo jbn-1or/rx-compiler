@@ -1,6 +1,19 @@
-// 实现表达式检查分派和最小字面量规则。
-// 处理整数/布尔/unit 字面量、路径、块、普通调用、4.5 运算符与 4.6 聚合节点，
-// 并识别 return 的发散类型；其余表达式类别由后续步骤接入。
+// 实现表达式检查分派、字面量规则和 return。
+// 统一返回 ExpressionResult（类型 + place），expected 由具体处理器决定是否使用。
+//
+// 具体检查：
+// - 整数文字：有后缀用后缀；无后缀且期望是整数则取期望；否则 i32。
+//   四种整数都是 32 位；这里只定型，不做数值范围检查。
+// - bool/unit 字面量直接得到 bool/()，都不是 place。
+// - 路径交给 value_path.cpp；普通调用交给 call.cpp；多段调用/点方法留给 Phase 5。
+// - 二元/一元/赋值/cast 交给 operators.cpp；操作数默认不吸收外层期望。
+// - 结构体/字段/数组/下标交给 aggregate.cpp。
+// - if/loop/while/break/continue 交给 control_flow.cpp。
+// - 块交给 body.cpp；块尾期望继续下传，块结果不继承尾表达式的 place。
+// - return 以当前函数返回类型为期望检查值；裸 return 等价于 ()；
+//   return 表达式自身为 !。
+// - 未实现的 MethodCallExpression 和 Phase 5 多段调用返回 Error 占位，
+//   不能把这种 Error 当作对应语义已经检查通过。
 
 #include "sema/body.hpp"
 #include "sema/sema.hpp"
@@ -80,6 +93,22 @@ BodyChecker::check_expression(const Expression &expression,
         return check_array(*array, expected);
     if (const auto *index = dynamic_cast<const IndexExpression *>(&expression))
         return check_index(*index);
+
+    // 4.7 控制流：if/loop/while 是值；break/continue 是发散表达式。
+    if (const auto *if_expression =
+            dynamic_cast<const IfExpression *>(&expression))
+        return check_if(*if_expression, expected);
+    if (const auto *loop = dynamic_cast<const LoopExpression *>(&expression))
+        return check_loop(*loop, expected);
+    if (const auto *while_expression =
+            dynamic_cast<const WhileExpression *>(&expression))
+        return check_while(*while_expression);
+    if (const auto *break_expression =
+            dynamic_cast<const BreakExpression *>(&expression))
+        return check_break(*break_expression);
+    if (const auto *continue_expression =
+            dynamic_cast<const ContinueExpression *>(&expression))
+        return check_continue(*continue_expression);
 
     // 块：检查里面的语句和最后的值；外面希望的类型继续往里传。
     if (const auto *block = dynamic_cast<const BlockExpression *>(&expression))

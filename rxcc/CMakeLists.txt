@@ -80,6 +80,7 @@ add_executable(rxcc
   src/sema/value_path.cpp
   src/sema/call.cpp
   src/sema/builtins.cpp
+  src/sema/method.cpp
   src/sema/operators.cpp
   src/sema/aggregate.cpp
   src/sema/control_flow.cpp

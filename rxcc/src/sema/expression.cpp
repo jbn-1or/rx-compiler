@@ -5,15 +5,15 @@
 // - 整数文字：有后缀用后缀；无后缀且期望是整数则取期望；否则 i32。
 //   四种整数都是 32 位；这里只定型，不做数值范围检查。
 // - bool/unit 字面量直接得到 bool/()，都不是 place。
-// - 路径交给 value_path.cpp；普通调用交给 call.cpp；多段调用/点方法留给 Phase 5。
+// - 路径交给 value_path.cpp；普通调用与多段关联调用交给 call.cpp（5.1 先
+//   选定目标）；点方法调用交给 method.cpp（5.4 先选定目标）。
 // - 二元/一元/赋值/cast 交给 operators.cpp；操作数默认不吸收外层期望。
 // - 结构体/字段/数组/下标交给 aggregate.cpp。
 // - if/loop/while/break/continue 交给 control_flow.cpp。
 // - 块交给 body.cpp；块尾期望继续下传，块结果不继承尾表达式的 place。
 // - return 以当前函数返回类型为期望检查值；裸 return 等价于 ()；
 //   return 表达式自身为 !。
-// - 未实现的 MethodCallExpression 和 Phase 5 多段调用返回 Error 占位，
-//   不能把这种 Error 当作对应语义已经检查通过。
+// - 点方法由 method.cpp 查找目标、调整接收者并检查普通实参。
 
 #include "sema/body.hpp"
 #include "sema/sema.hpp"
@@ -68,9 +68,14 @@ BodyChecker::check_expression(const Expression &expression,
     if (const auto *path = dynamic_cast<const PathExpression *>(&expression))
         return check_value_path(*path);
 
-    // 普通函数调用 / 内置 I/O：4.4 只处理单段路径 callee。
+    // 普通函数调用 / 内置 I/O / 显式关联调用：4.4/5.1–5.3。
     if (const auto *call = dynamic_cast<const CallExpression *>(&expression))
         return check_call(*call);
+
+    // 点方法调用：5.4 先按接收者候选顺序选定目标。
+    if (const auto *method_call =
+            dynamic_cast<const MethodCallExpression *>(&expression))
+        return check_method_call(*method_call);
 
     // 运算、赋值、借用、解引用和 cast：4.5 的节点不吸收外层期望类型。
     if (const auto *binary = dynamic_cast<const BinaryExpression *>(&expression))

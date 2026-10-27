@@ -8,6 +8,7 @@
 #include "ast/ast.hpp"
 #include "diagnostics.hpp"
 #include "sema/body_state.hpp"
+#include "sema/call.hpp"
 #include "sema/expression.hpp"
 #include <optional>
 #include <string>
@@ -63,8 +64,23 @@ private:
                                            const SemanticType *expected);
     ExpressionResult check_value_path(const PathExpression &path);
 
-    // call.cpp（4.4）：普通调用与内置 I/O。
+    // call.cpp（4.4/5.1）：普通调用、内置 I/O 与多段被调用者解析。
     ExpressionResult check_call(const CallExpression &call);
+    // 4.4：单段被调用者——局部绑定优先（N13），再查值名字空间与同名结构体。
+    ExpressionResult check_ordinary_call(const PathExpression &path,
+                                         const CallExpression &call);
+    // 5.1：`Type::member` 形式的两段被调用者目标选择；签名建立留给 5.2/5.3。
+    std::optional<ResolvedCallee>
+    resolve_qualified_callee(const PathExpression &path);
+    // 5.1：在结构体关联项里找成员；找不到时按派生 Clone 回退（5.3）。
+    std::optional<ResolvedCallee> resolve_struct_member(
+        const StructSymbol &structure, const PathSegment &member, Span at);
+    // method.cpp（5.4/5.5）：点调用候选查找、接收者调整与普通实参检查。
+    ExpressionResult check_method_call(const MethodCallExpression &call);
+    std::optional<ResolvedMethod> resolve_method(const SemanticType &receiver_type,
+                                                 const std::string &name);
+    bool check_method_receiver(const ExpressionResult &receiver,
+                               const ResolvedMethod &method, Span at);
     bool check_arguments(
         const std::vector<SemanticType> &parameter_types,
         const std::vector<std::shared_ptr<Expression>> &arguments, Span at);

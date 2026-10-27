@@ -6,11 +6,12 @@
 BUILD = CARGO_PROFILE_RELEASE_LTO=true cargo build --quiet --locked --release \
     --manifest-path crates/rx/Cargo.toml \
     --target-dir target/reference \
-    --target riscv32im-unknown-none-elf && : > {runtime}
+    --target riscv32im-unknown-none-elf && \
+    cmake -S rxcc -B rxcc/build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build rxcc/build -j && : > {runtime}
 
 # Required for semantic tests: exit 0 to accept {source}, 1 to reject it.
-SEMANTIC = RX_SOURCE={source} $(REFERENCE_RUSTC) --cfg rx_semantic \
-    --emit=metadata crates/rx/src/entry.rs -o {output}
+SEMANTIC = ./rxcc/build/rxcc --stage semantic {source}
 
 # Required for IR tests: write RV32 LLVM IR to {output} (.ll).
 IR = RUST_MIN_STACK=16777216 RX_SOURCE={source} $(REFERENCE_RUSTC) --crate-type=staticlib \

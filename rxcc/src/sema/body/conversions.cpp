@@ -15,7 +15,7 @@ PlaceAccessInformation BodyChecker::materialize_place(
     return PlaceAccessInformation{true, true, false};
 }
 
-// 执行一次内置解引用：&T / &mut T / Box<T>。
+// 对引用或 Box 做一次解引用，返回内层类型及权限：&T / &mut T / Box<T>。
 // 值基表达式先物化为临时 place；其他类型报错并返回 Error。
 ExpressionResult BodyChecker::dereference_place(
     const SemanticType &base_type,
@@ -52,8 +52,7 @@ ExpressionResult BodyChecker::dereference_place(
     return ExpressionResult::error();
 }
 
-// 一对一转换判定（CV5/CV6）。转换只做判定，不改变源 ExpressionResult。
-// 调用入口 require_coerce 和 LUB 已处理 Error；这里仅判断正常类型的兼容性。
+// 源类型和 place、目标类型 → 是否兼容，不写诊断。转换只做判定，不改变源 ExpressionResult。
 bool BodyChecker::can_coerce(const SemanticType &from,
                              const PlaceAccessInformation &place,
                              const SemanticType &to) const {
@@ -111,7 +110,7 @@ bool BodyChecker::can_coerce(const SemanticType &from,
     }
 }
 
-// 在固定目标位置统一报告一次不兼容错误；转换本身不改写结果类型。
+// 表达式结果、固定目标、位置 → 是否兼容；不兼容时报诊断；转换本身不改写结果类型。
 bool BodyChecker::require_coerce(const ExpressionResult &from,
                                 const SemanticType &to, Span at) {
     if (from.type.is_error() || to.is_error())

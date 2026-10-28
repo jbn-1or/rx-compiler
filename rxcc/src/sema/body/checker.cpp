@@ -14,6 +14,7 @@ BodyChecker::BodyChecker(SemanticAnalyzer &analyzer)
 void BodyChecker::check_function(const FunctionSymbol &fn) {
     enter_function(fn);
     assert(fn.node && fn.node->body);
+    // 函数体被当作一个块表达式：返回类型作为 expected 传给块，块算完之后再用 require_coerce 核对最终结果
     const auto body = check_block(*fn.node->body, &fn.return_type);
     require_coerce(body, fn.return_type, fn.node->body->span);
 }
@@ -25,16 +26,19 @@ ExpressionResult BodyChecker::check_block(const BlockExpression &block,
     bool has_error = false;
     // 不可达语句仍检查；无尾块用语句摘要区分 !、Error 和 ()。
     for (const auto &statement : block.statements) {
+        // 先检查初始化器，再登记绑定
         const auto result = check_statement(*statement);
+        // 汇总各个语句是否有错误，是否是！
         diverges = diverges || result.diverges;
         has_error = has_error || result.has_error;
     }
     ExpressionResult result;
+    // 有 tail → check_expression(tail, expected)，取其类型作为块结果
     if (block.tail) {
         const auto tail = check_expression(*block.tail, expected);
         // 块产生值，不继承尾表达式的 place 权限。
         result = ExpressionResult::value(tail.type);
-    } else if (diverges) {
+    } else if (diverges) {  // 无 tail → 根据语句摘要得到 Never、Error 或 Unit
         result = ExpressionResult::value(SemanticType::never());
     } else if (has_error) {
         result = ExpressionResult::error();
@@ -46,9 +50,11 @@ ExpressionResult BodyChecker::check_block(const BlockExpression &block,
 }
 
 BodyChecker::StatementResult BodyChecker::check_statement(const Statement &statement) {
+    // let语句
     if (const auto *let = dynamic_cast<const LetStatement *>(&statement)) {
         assert(let->initializer);
         std::optional<SemanticType> annotation;
+        // 有类型注解
         if (let->type_annotation)
             annotation = analyzer_.resolve_type(*let->type_annotation, current_owner_);
         const auto initializer = check_expression(*let->initializer,
@@ -62,6 +68,7 @@ BodyChecker::StatementResult BodyChecker::check_statement(const Statement &state
                                          let->is_mut});
         return {initializer.type.is_never(), !ok};
     }
+    // 表达式语句
     if (const auto *expression =
             dynamic_cast<const ExpressionStatement *>(&statement)) {
         assert(expression->expression);
@@ -79,6 +86,7 @@ BodyChecker::StatementResult BodyChecker::check_statement(const Statement &state
 
 // 先判断表达式是哪一种，再分别算出它的类型和“能不能当存储位置”。
 // expected 是外面希望这里得到的类型，可以为空（表示外面没有要求）。
+// 通过 dynamic_cast 区分节点；每个处理器 负责自己的规则，并可再次调用 check_expression 检查子表达式
 ExpressionResult
 BodyChecker::check_expression(const Expression &expression,
                               const SemanticType *expected) {
@@ -169,7 +177,7 @@ BodyChecker::check_expression(const Expression &expression,
         return ExpressionResult::value(SemanticType::never());
     }
 
-    // 分派遗漏也必须产生诊断，不能只返回 Error 而让程序静默通过。
+    // 分派遗漏也产生诊断
     diagnostics_.error(expression.span,
                        "internal error: unrecognized expression node");
     return ExpressionResult::error();
@@ -178,19 +186,22 @@ BodyChecker::check_expression(const Expression &expression,
 // 建立函数级作用域，登记接收者和普通参数。
 // 顶层函数没有 owner；impl 内无接收者的关联函数仍有 owner，供 Self 使用。
 void BodyChecker::enter_function(const FunctionSymbol &fn) {
+    // 清理旧作用域和循环帧，设置当前函数与 owner
     scopes_.clear();
     loop_frames_.clear();
     current_function_ = &fn;
     current_owner_ = fn.owner;
     current_has_self_ = false;
-
+    // 创建函数级作用域
     push_scope();
     assert(fn.node && fn.parameters.size() == fn.node->parameters.size());
+    // 有接收者
     if (fn.receiver) {
         current_has_self_ = true;
         declare_local("self", Binding{fn.receiver->type,
                                       fn.receiver->binding_is_mut});
     }
+    // 每个普通参数
     for (std::size_t index = 0; index < fn.parameters.size(); ++index) {
         const auto &parameter = fn.parameters[index];
         declare_local(fn.node->parameters[index].name,

@@ -16,10 +16,10 @@ BodyChecker::check_integer_literal(const IntegerLiteral &literal,
     SemanticType type = SemanticType::error();
 
     if (literal.suffix != IntSuffix::None) {
-        // 写明了后缀，就按后缀来，比如 1u32 是 u32。
+        // 写明了后缀，就按后缀来
         type = type_from_suffix(literal.suffix);
     } else if (expected && expected->is_int()) {
-        // 没写后缀，但外面要求一个整数，就跟着外面的要求，
+        // 没写后缀，跟着外面的要求，
         // 比如 let x: usize = 1; 里的 1 按 usize 算。
         type = *expected;
     } else {
@@ -64,7 +64,7 @@ BodyChecker::check_value_path(const PathExpression &path) {
                                "self is not available outside a method");
             return ExpressionResult::error();
         }
-        // self 不能写成 self::...，它不是类型名。
+        // self 不能写成 self::...
         if (path.segments.size() != 1) {
             diagnostics_.error(path.span, "self is not a type name");
             return ExpressionResult::error();
@@ -74,6 +74,7 @@ BodyChecker::check_value_path(const PathExpression &path) {
             diagnostics_.error(path.span, "self has no type parameters");
             return ExpressionResult::error();
         }
+        // 检查当前方法有接收者
         // 取出进入函数时登记好的 self，类型和“能不能改”都从这里来。
         const auto binding = lookup_local("self");
         if (!binding)
@@ -83,6 +84,7 @@ BodyChecker::check_value_path(const PathExpression &path) {
                                                       false});
     }
 
+    // 检查self的type
     if (first.name == "Self" && path.segments.size() == 1) {
         const auto type = analyzer_.resolve_type_segment(first, current_owner_, path.span);
         if (!type.is_error())
@@ -90,11 +92,11 @@ BodyChecker::check_value_path(const PathExpression &path) {
         return ExpressionResult::error();
     }
 
-    // 只有一段的路径：按“局部 → 全局值名 → 类型名 → 不认识”的顺序查。
+    // 只有一段的路径：局部 → 全局值名 → 类型名 → 不认识
     if (path.segments.size() == 1) {
-        // 第一步：局部变量和参数优先，就近的块先找到。
+        // 局部变量和参数优先，就近的块先找到。
         if (const auto binding = lookup_local(first.name)) {
-            // 局部名字不能带类型参数，比如 x::<i32> 不合法。
+            // 局部名字不能带类型参数，比如 x::<i32> 
             if (reject_value_type_arguments(first, "local binding",
                                             diagnostics_, path.span))
                 return ExpressionResult::error();
@@ -104,7 +106,7 @@ BodyChecker::check_value_path(const PathExpression &path) {
                                                           false});
         }
 
-        // 第二步：查全局值名（函数、常量、内置函数）。
+        // 查全局值名（函数、常量、内置函数）。
         const auto value =
             analyzer_.function_constant_namespace.find(first.name);
         if (value != analyzer_.function_constant_namespace.end()) {
@@ -139,7 +141,7 @@ BodyChecker::check_value_path(const PathExpression &path) {
             return ExpressionResult::error();
         }
 
-        // 最后：这个值名确实找不到。
+        // 这个值名找不到。
         diagnostics_.error(path.span,
                            "unresolved value name: " + first.name);
         return ExpressionResult::error();

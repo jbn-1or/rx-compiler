@@ -186,11 +186,9 @@ StructSymbol *SemanticAnalyzer::resolve_impl_target(const Type &t) {
     return it->second;
 }
 
-// 把 impl 的目标类型解析成已登记的结构体。
-// 输入：`impl S { fn get(&self) {} }` 的 AST 节点
-// 效果：成功 → S 的 associated_items["get"] = FunctionSymbol；
-// 目标不是用户结构体 → 报 G7，目标带类型实参 → G1，成员重名 → N6，方法参数重名
-// → N5。 例：两个 impl 都定义 get → 报 N6；`impl i32 {}` → 报 G7。
+// 先调用 resolve_impl_target，要求目标是已登记、无类型实参的用户结构体失败则跳过这个 impl。
+// 随后逐项检查关联项是否重名，函数再调用 check_parameter_names，成功的函数/常量同时进入
+// 目标结构体的 associated_items 和分析器的 functions_ / constants_，owner 指向目标结构体
 void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
     StructSymbol *target = resolve_impl_target(*impl.self_type);
     if (!target)
@@ -237,8 +235,9 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
 }
 
 // 检查填好的 function_constant_namespace；
-// 例：没有 main → E1；`const main: i32 = 1;` → E1；`fn main(x: i32)` → E2；
-//     `fn main<'a>()` → E3；`fn main() {}` → 无诊断。
+// ├─ 找不到 main，或者找到的不是 Function → 记录诊断并返回
+// └─ 取得 FunctionSymbol 和其 AST 节点
+//    └─ 检查普通值参数是否为空，是否存在泛型/生命周期参数
 void SemanticAnalyzer::check_main_declaration() {
     const auto it = function_constant_namespace.find("main");
     const bool has_fn_main = it != function_constant_namespace.end() &&

@@ -47,9 +47,9 @@ ExpressionResult BodyChecker::check_struct_expression(
         check_fields_without_target();
         return ExpressionResult::error();
     }
-
+    // 取出目标的语义类型
     const SemanticType target = analyzer_.resolve_type_segment(
-        segments[0], current_owner_, expression.path->span);
+        segments[0], current_owner_, expression.path->span);   
     if (target.is_error()) {
         check_fields_without_target();
         return ExpressionResult::error();
@@ -61,7 +61,9 @@ ExpressionResult BodyChecker::check_struct_expression(
         return ExpressionResult::error();
     }
     const StructSymbol *structure = target.struct_symbol;
-
+    
+    // 查 StructSymbol::field_types，检查字段是否存在、重复或缺失 
+    // 每个字段值 → check_expression(value, &field_type) → require_coerce
     bool ok = true;
     std::unordered_set<std::string> initialized;
     for (const StructExpressionField &field : expression.fields) {

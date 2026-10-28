@@ -8,8 +8,10 @@
 namespace rx {
 
 // 遍历所有结构体和函数，把 AST 类型节点定型为 SemanticType。
+
 // 单个字段/签名解析失败时保留 Error，不中断其余项。
 void SemanticAnalyzer::resolve_declared_types() {
+    // 对每个structsysymbol
     for (auto &sym : structs_) {
         // 处理 struct 定义中的字段
         for (const auto &field : sym->fields) {
@@ -18,6 +20,7 @@ void SemanticAnalyzer::resolve_declared_types() {
                            : SemanticType::error();
         }
     }
+    // 对每个FunctionSymbol
     for (auto &sym : functions_)
         resolve_function_signature(*sym, sym->owner);
 }
@@ -30,13 +33,15 @@ void SemanticAnalyzer::resolve_function_signature(FunctionSymbol &fn,
     fn.parameters.clear();
     fn.receiver.reset();
     fn.parameters.reserve(fn.node->parameters.size());
+    // 每个普通参数 → resolve_type(param.type, owner) → fn.parameters
     for (const auto &param : fn.node->parameters) {
         assert(param.type);
         fn.parameters.push_back(
             ResolvedParameter{resolve_type(*param.type, owner), param.is_mut});
     }
+    // 返回类型 → resolve_type(return_type, owner) 
     fn.return_type = resolve_type(*fn.node->return_type, owner);
-
+    // 如有 self，结合 owner 和接收者写法 → fn.receiver
     if (!fn.node->self_parameter)
         return;
     const auto kind = fn.node->self_parameter->kind;
@@ -78,7 +83,7 @@ void SemanticAnalyzer::check_inline_layout_cycles() {
         visit_layout(sym.get(), states);
 }
 
-// 三色 DFS：Visiting 表示当前递归栈上存在该结构体，再次遇到即为内联环。
+// dfs检查结构体是否能完善的定义
 void SemanticAnalyzer::visit_layout(const StructSymbol *sym,
                                 LayoutVisitStates &states) {
     if (!sym)
@@ -208,15 +213,15 @@ void SemanticAnalyzer::check_derives() {
     }
 }
 
-// 检查一个 derive：Copy 必须显式带 Clone，Eq 必须显式带 PartialEq；
-// 然后要求每个字段都具备该能力。
+// 检查struct是否能有一个 derive 的能力
 void SemanticAnalyzer::check_one_derive(StructSymbol &sym, Derive trait) {
+    // 检查一个 derive：Copy 必须显式带 Clone，Eq 必须显式带 PartialEq；
     if (trait == Derive::Copy && !sym.derives.count(Derive::Clone))
         diagnostics_.error(sym.span, "Copy requires an explicit Clone derive");
     if (trait == Derive::Eq && !sym.derives.count(Derive::PartialEq))
         diagnostics_.error(
             sym.span, "Eq requires an explicit PartialEq derive");
-
+    // 每个已定型字段 → has_trait
     for (const auto &field : sym.fields) {
         const auto it = sym.field_types.find(field.name);
         if (it == sym.field_types.end())

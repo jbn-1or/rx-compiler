@@ -31,8 +31,10 @@ private:
     SemanticAnalyzer &analyzer_;
     Diagnostics &diagnostics_;
 
-    std::vector<Scope> scopes_;
+    std::vector<Scope> scopes_;  // 每个作用域映射局部名字到 Binding { type, is_mut }
+    // 记录 loop、while 和 while 条件屏障，以及 loop 的 break 结果
     std::vector<LoopFrame> loop_frames_;
+    // 供 return、Self、self 等检查使用
     const FunctionSymbol *current_function_ = nullptr;
     StructSymbol *current_owner_ = nullptr;
     bool current_has_self_ = false;

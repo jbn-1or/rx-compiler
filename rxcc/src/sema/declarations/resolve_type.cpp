@@ -8,6 +8,9 @@
 namespace rx {
 
 // 类型位置、关联路径和结构体构造共享同一套类型名与类型实参规则。
+// Self       → 使用 current 对应的 StructSymbol
+// 基本类型   → basic_type_from_name
+// Box / Vec  → 检查一个类型实参 → 递归 
 SemanticType SemanticAnalyzer::resolve_type_segment(
     const PathSegment &seg, const StructSymbol *current, Span at) {
     if (seg.name == "self") {
@@ -77,13 +80,12 @@ SemanticType SemanticAnalyzer::resolve_type_segment(
 }
 
 // 把基本类型、Unit、引用、数组、Box/Vec、用户结构体和 Self 转换成语义类型；
-// 数组长度在这里按 usize 常量求值；N 为 3 时，[i32; N] 与 [i32; 3] 等价。
 SemanticType SemanticAnalyzer::resolve_type(const Type &type,
                                     const StructSymbol *current) {
     // `()`：函数/控制流结果，也是省略返回类型时的类型。
     if (dynamic_cast<const UnitType *>(&type))
         return SemanticType::unit();
-
+    // PathType → resolve_type_segment(唯一的路径段, current, span)
     if (const auto *pt = dynamic_cast<const PathType *>(&type)) {
         // 类型位置没有 associated type；多段路径（如 S::T）无法解析。
         if (pt->segments.size() != 1) {
@@ -94,7 +96,7 @@ SemanticType SemanticAnalyzer::resolve_type(const Type &type,
         return resolve_type_segment(pt->segments[0], current, type.span);
     }
 
-    // &T / &mut T
+    // &T / &mut T → 递归 resolve_type(内层) → 构造引用类型
     if (const auto *rt = dynamic_cast<const ReferenceType *>(&type)) {
         if (!rt->inner)
             return SemanticType::error();
@@ -104,6 +106,9 @@ SemanticType SemanticAnalyzer::resolve_type(const Type &type,
         return SemanticType::reference(rt->is_mut, inner);
     }
 
+    // ArrayType → 递归 resolve_type(元素)
+    //           → evaluate_constant_value(长度, usize, current)
+    //           → 核对 usize 和值 → 构造数组类型
     // [T; N]：元素递归解析，长度按 usize 常量求值后存成 uint64_t。
     if (const auto *at = dynamic_cast<const ArrayType *>(&type)) {
         if (!at->element)

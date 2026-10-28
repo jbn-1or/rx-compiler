@@ -12,7 +12,7 @@
 
 namespace rx {
 
-// 访问一个 place 时的路径信息：是否真的是 place、能否写、路径上是否经过共享引用。
+// 是否真的是 place、能否写、路径上是否经过共享引用。
 // 例：`let p = &mut x; *p = 1;` 中 `p` 是 place 但绑定本身不可重新赋值，
 //     而 `*p` 是可写 place。
 struct PlaceAccessInformation {

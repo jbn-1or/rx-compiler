@@ -241,6 +241,9 @@ ExpressionResult BodyChecker::check_unary(const UnaryExpression &expression) {
     if (operand.type.is_error())
         return ExpressionResult::error();
 
+    // 解引用 * → dereference_place
+    // 借用 & / &mut → 必要时 materialize_place，检查可变借用权限
+    // 其他一元运算 → scalar_operand / is_signed_integer 等类型判断
     switch (expression.operation) {
         case UnaryOperator::Negative: {
             const auto base = scalar_operand(operand.type);
@@ -311,7 +314,8 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
         check_expression(*expression.right, nullptr);
         return ExpressionResult::error();
     };
-
+    
+    // 检查左运算数
     const ExpressionResult left =
         check_expression(*expression.left, nullptr);
     if (left.type.is_error())
@@ -327,6 +331,7 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
         return check_right_after_invalid_left();
     }
 
+    // // 普通赋值
     if (expression.operation == AssignmentOperator::Assign) {
         // 普通赋值是固定目标：右侧以左侧类型为期望，再统一做一对一转换。
         const ExpressionResult right =
@@ -336,6 +341,7 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
         return ExpressionResult::value(SemanticType::unit());
     }
 
+    // 复合赋值
     const bool arithmetic = is_arithmetic_assignment(expression.operation);
     const bool bitwise = is_bitwise_assignment(expression.operation);
     const bool shift = is_shift_assignment(expression.operation);
@@ -404,6 +410,7 @@ ExpressionResult BodyChecker::check_cast(const CastExpression &expression) {
         return ExpressionResult::error();
     }
 
+    // 检查源和目标类型，返回目标类型的值
     const bool target_is_integer = target.kind == SemanticType::Kind::Int;
     if (!target_is_integer) {
         diagnostics_.error(expression.span,

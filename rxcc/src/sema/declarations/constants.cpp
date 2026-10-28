@@ -1,6 +1,4 @@
 // 实现常量路径解析、递归求值、声明类型检查及求值结果缓存。
-// 通过访问状态检测直接和间接的常量依赖环，支持前向引用与关联常量。
-// 数组长度复用此处的求值服务；名称查找仅使用常量声明，不涉及局部绑定。
 
 #include "sema/sema.hpp"
 #include "sema/type_utils.hpp"
@@ -9,7 +7,7 @@ namespace rx {
 
 namespace {
 
-// 统一构造求值失败哨兵，避免每个失败分支重复写空结果。
+// 求值失败哨兵
 EvaluatedConstant failed_evaluation() {
     return EvaluatedConstant{};
 }
@@ -24,20 +22,17 @@ bool is_signed_int(const SemanticType &type) {
 
 } // namespace
 
-// 驱动所有常量求值：constants_ 同时包含顶层常量和 impl 关联常量。
-// evaluate_constant 内部负责三色环检测、C1 比对与缓存，这里只负责遍历。
-// 没有被其他声明或函数引用的常量也会在这里被求值和检查。
+// 驱动所有常量求值：constants_ 同时包含顶层常量和 impl 关联常量
 void SemanticAnalyzer::evaluate_all_constants() {
     for (auto &sym : constants_)
         evaluate_constant(*sym);
 }
 
-// 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的
-//       结构体；顶层常量为 nullptr）。解析到 ConstantSymbol*
-// 作用：把 `N`、`Type::N`、`Self::N` 解析成常量符号，只查名字不求值；
-//       关联常量只查 associated_items，不进入顶层值名空间（C7）。
-// 例：`N` → 顶层 const N；`Config::N` → Config 的关联常量；
-//     `Self::B` 在 impl S 内 → S::B；`fn_name` 或 `S::method` → C2。
+// 解析常量路径到常量语义值
+// 输入：path（常量路径段列表）、span（报错位置）、current（当前 impl 的结构体）
+// 一段 N：在全局值名字表中查找，要求符号是常量。
+// 两段 S::N / Self::N：
+// 先调用 resolve_type_segment 确定所属结构体，再查它的 associated_items
 ConstantSymbol *
 SemanticAnalyzer::resolve_constant_path(
     const std::vector<PathSegment> &path, Span span,
@@ -93,10 +88,6 @@ SemanticAnalyzer::resolve_constant_path(
 }
 
 // 对常量符号求值并返回缓存结果。
-// 成功时 type/value 为初始化器结果，失败时 type=Error、value=monostate、ok=false。
-// 作用：DFS求值常量并写缓存；求值时使用目标自己的声明类型，引用方的 expected 不传入。
-// 例：`const A: i32 = B; const B: i32 = 3;` 求 A 时递归求 B；
-//     `const A: i32 = A;` → C4 并把 A 缓存为 Error。
 EvaluatedConstant SemanticAnalyzer::evaluate_constant(ConstantSymbol &sym) {
     // 已求过直接取缓存
     if (sym.state == ConstantEvaluationState::Visited)
@@ -107,25 +98,26 @@ EvaluatedConstant SemanticAnalyzer::evaluate_constant(ConstantSymbol &sym) {
         return failed_evaluation();
     }
 
-    // 先置 Visiting，再解析声明类型；这样数组长度里的自引用
-    // （如 `const A: [i32; A]`）也会被 C4 捕获。
+    // 先置 Visiting，再解析声明类型
+    // 这样数组长度里的自引用（如 `const A: [i32; A]`）也会被 C4 捕获。
     sym.state = ConstantEvaluationState::Visiting;
-    // AST 正常情况下由 builder 保证 node/type 非空；这里防御性缓存失败。
+    // AST 正常情况下由 builder 保证 node/type 非空；这里防御性
     if (!sym.node || !sym.node->type) {
         sym.state = ConstantEvaluationState::Visited;
         sym.evaluated = failed_evaluation();
         return sym.evaluated;
     }
 
+    // 把语法类型转为语义类型
     const SemanticType declared = resolve_type(*sym.node->type, sym.owner);
-    // 声明类型解析失败时已经报过 N10/N15/G1/G3/G4/G5 等诊断；
-    // 统一缓存 Error，后续引用直接静默放行。
+
     if (declared.is_error()) {
         sym.state = ConstantEvaluationState::Visited;
         sym.evaluated = failed_evaluation();
         return sym.evaluated;
     }
-
+    
+    // 获得求值结果
     EvaluatedConstant result =
         evaluate_constant_value(sym.node->value, &declared, sym.owner);
     // 再核对结果与声明类型：期望不会穿过路径或负号，可能尚未发现类型不匹配。
@@ -135,17 +127,17 @@ EvaluatedConstant SemanticAnalyzer::evaluate_constant(ConstantSymbol &sym) {
                      "constant initializer does not match declared type");
         result = failed_evaluation();
     }
-    // 只有“求值成功且类型不是 Error”才保留结果；C1/C5 等失败统一缓存 Error。
+    // 求值成功且类型不是 Error，保留结果；C1/C5 等失败统一缓存 Error。
     sym.state = ConstantEvaluationState::Visited;
     sym.evaluated =
         (result.ok && !result.type.is_error()) ? result : failed_evaluation();
     return sym.evaluated;
 }
 
+// 处理整数、布尔、负数和常量路径；路径会递归求值目标常量。
 // 输入：value（常量值 AST）、expected（期望类型，可为 nullptr）、
 //       current（Self 所属结构体，供路径求值使用）。
 // 输出：EvaluatedConstant；成功 = 类型 + 值 + ok，失败 = Error/monostate/false。
-// 处理整数、布尔、负数和常量路径；路径会递归求值目标常量。
 EvaluatedConstant
 SemanticAnalyzer::evaluate_constant_value(const ConstantValue &value,
                                          const SemanticType *expected,

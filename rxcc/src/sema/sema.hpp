@@ -1,6 +1,6 @@
 // 声明语义分析器，持有全局名字表、符号对象及各声明检查阶段的接口。
 // 函数体检查通过 BodyChecker 复用类型解析、常量求值和能力查询等服务。
-// 具体实现按职责分布在同目录的各个 .cpp 文件中。
+// declarations/ 实现声明检查；body/ 实现函数体递归检查。阅读路线见 README.md。
 
 #pragma once
 
@@ -21,7 +21,7 @@ namespace rx {
 class BodyChecker;
 
 // SEMANTIC 阶段分析器。
-// 持有 crate 级符号和声明检查服务；sema.cpp 只编排 Pass。
+// 持有 crate 级符号和声明检查服务；sema.cpp 编排各检查阶段。
 // 函数体上下文和表达式检查由 BodyChecker 负责；错误进入同一诊断收集器。
 // 例：输入 `struct S { x: i32 } fn main() {}`
 //     → type_namespace 里有 "S"，function_constant_namespace 里有 "main"（以及三个内置 I/O 名）。
@@ -48,7 +48,7 @@ private:
     std::unordered_map<std::string, Symbol *> function_constant_namespace;
 
     // —— 所有权：表里只存裸指针，这些容器保证对象在分析期间不被释放 ——
-    // 所有结构体档案，例：每个 struct 一个元素
+    // 已登记的结构体符号；受保护名称或重名的声明不会登记。
     std::vector<std::unique_ptr<StructSymbol>> structs_;
     // 所有函数/方法档案，例：main、S::get 各一个
     std::vector<std::unique_ptr<FunctionSymbol>> functions_;
@@ -57,7 +57,11 @@ private:
     // 内置 I/O 档案，例：get_i32/print_i32/println_i32 三条
     std::vector<std::unique_ptr<Symbol>> builtins_;
 
-    // collect.cpp：声明收集与入口形态。
+    // run 的首尾阶段；中间阶段直接调用下面的定型与验证接口。
+    void collect_declarations(const Crate &crate);
+    void check_function_bodies();
+
+    // declarations/collect.cpp：声明收集与入口形态。
     void initialize_builtins();
     void collect_struct(const Struct &s);
     void collect_const(const Const &c);
@@ -68,14 +72,14 @@ private:
     void collect_impl(const InherentImpl &impl);
     void check_main_declaration();
 
-    // signatures.cpp：字段与函数签名定型。
+    // declarations/validate.cpp：字段与函数签名定型。
     // 把字段、参数、返回类型从 AST 定型为 SemanticType。
     void resolve_declared_types();
     void resolve_function_signature(FunctionSymbol &fn, StructSymbol *owner);
-    // 入口检查的最后一块：main 的返回类型必须是 unit（E4）。
+    // 签名定型后检查 main 的返回类型必须为 unit（E4）。
     void check_main_return_type();
 
-    // layout.cpp：按值内联布局。
+    // declarations/validate.cpp：按值内联布局。
     // 按字段类型检测结构体是否存在按值内联的无限布局环（T5）。
     enum class LayoutVisitState { Unvisited, Visiting, Visited };
     using LayoutVisitStates = std::map<const StructSymbol *, LayoutVisitState>;
@@ -84,16 +88,17 @@ private:
     void visit_layout_type(const SemanticType &type, Span at,
                            LayoutVisitStates &states);
 
-    // traits.cpp：能力查询与 derive 验证。
-    // 判断类型是否具备指定 derive 能力（D6/D7）；visiting 记录递归假设。
-    bool has_trait(
+    // declarations/validate.cpp：能力查询与 derive 验证。
+    // 查询入口隐藏递归状态；visiting 只用于本次查询的递归假设。
+    bool has_trait(const SemanticType &type, Derive trait) const;
+    bool has_trait_impl(
         const SemanticType &type, Derive trait,
         std::set<std::pair<const StructSymbol *, Derive>> &visiting) const;
     // 检查结构体已请求的 derive 是否合法（D2–D5）。
     void check_derives();
     void check_one_derive(StructSymbol &sym, Derive trait);
 
-    // constants.cpp：常量路径、三色求值与缓存。
+    // declarations/constants.cpp：常量路径、三色求值与缓存。
     // 扫一遍所有顶层/关联常量，逐个求值并落缓存。
     void evaluate_all_constants();
     // 按常量上下文规则求值字面量、负数与路径。
@@ -106,10 +111,12 @@ private:
         const StructSymbol *current);
     EvaluatedConstant evaluate_constant(ConstantSymbol &sym);
 
-    // resolve_type.cpp：语法类型归一化。
+    // declarations/resolve_type.cpp：语法类型归一化。
     // 把语法类型归一化为 SemanticType：基本类型/Unit/引用/数组/Box/Vec/Self，
     // 数组长度在这里按 usize 常量求值。
     SemanticType resolve_type(const Type &type, const StructSymbol *current);
+    SemanticType resolve_type_segment(const PathSegment &segment,
+                                      const StructSymbol *current, Span at);
 };
 
 } // namespace rx

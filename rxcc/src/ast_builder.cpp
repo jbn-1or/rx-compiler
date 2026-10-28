@@ -12,7 +12,7 @@ namespace rx {
 namespace {
 
 // 求 span：把一个 token 变成行列号范围（终点列不含）。
-// 例：token "abc" 起于第 1 行第 5 列 → Span{{1,5},{1,8}}。
+// 例：单行 token "abc" 起于第 1 行、零基列号 5 → Span{{1,5},{1,8}}。
 Span span_of(antlr4::Token *token) {
     if (!token)
         return Span{};
@@ -30,7 +30,7 @@ Span span_of(antlr4::tree::TerminalNode *node) {
 }
 
 // 求 span：取子树第一个 token 的起点到最后一个 token 的终点，覆盖整句。
-// 例：`let a: i32 = 1;` 子树 → Span{{1,0},{1,17}}。
+// 例：`let a: i32 = 1;` 子树 → Span{{1,0},{1,15}}。
 Span span_of(antlr4::ParserRuleContext *ctx) {
     if (!ctx || !ctx->getStart() || !ctx->getStop())
         return Span{};
@@ -97,9 +97,9 @@ ParsedInt parse_int_literal(const std::string &raw) {
     try {
         value = std::stoll(digits, nullptr, base);
     } catch (const std::out_of_range &) {
-        value = 0; // 溢出以 raw 为准，语义期复查
+        value = 0; // 超出 int64_t 时保留占位值 0；当前语义检查不复查字面量范围。
     } catch (const std::invalid_argument &) {
-        value = 0; // 防御
+        value = 0; // 文法正常不会产生无效数字文本；转换失败时使用占位值。
     }
     return {value, suffix};
 }
@@ -373,7 +373,7 @@ AstBuilder::dispatch(antlr4::tree::ParseTree *node) {
     }
 }
 
-// ══════ 1. 文件与 item 层（17 条：crate、item、四类定义；use 跳过） ══════
+// ══════ 1. 文件与 item 层：crate、item、四类声明；use 跳过 ══════
 // 自顶向下：整个文件 → 顶层项 → 各类定义；参数/字段/属性片段由这些函数内联处理。
 
 // 入口：把整个文件的解析树变成 AST。
@@ -395,7 +395,7 @@ std::shared_ptr<Crate> AstBuilder::build_crate(RxParser::CrateContext *ctx) {
     return crate;
 }
 
-// 看顶层项是哪种，转给对应函数；use 声明合法但暂时忽略（返回空，不报错）。
+// 按顶层项种类分派；use 不进入 AST，返回空且不报错。
 // 例：`fn f() {}` → build_function_definition；`struct S { … }` → build_struct_definition。
 std::shared_ptr<Item> AstBuilder::build_item(RxParser::ItemContext *ctx) {
     // 若是 use 声明则合法跳过，不报错
@@ -484,7 +484,7 @@ AstBuilder::build_struct_definition(RxParser::StructDefinitionContext *ctx) {
         field.type = std::move(type);
         node->fields.push_back(std::move(field));
     }
-    // genericParams/whereClause 无视。
+    // 生命周期泛型参数和 where 约束不进入结构体 AST。
     return node;
 }
 
@@ -499,7 +499,7 @@ AstBuilder::build_constant_item(RxParser::ConstantItemContext *ctx) {
     if (!type)
         return nullptr;
     node->type = std::move(type);
-    node->value = build_constant_value(ctx->constValue()); // equalsSign 全是 `=`，无视
+    node->value = build_constant_value(ctx->constValue()); // equalsSign 的各分支都表示 =，无需单独保存。
     return node;
 }
 
@@ -522,7 +522,7 @@ AstBuilder::build_inherent_impl(RxParser::InherentImplContext *ctx) {
         if (item)
             node->items.push_back(std::move(item));
     }
-    // genericParams/whereClause 无视。
+    // 生命周期泛型参数和 where 约束不进入 impl AST。
     return node;
 }
 
@@ -543,6 +543,14 @@ AstBuilder::build_block(RxParser::BlockExpressionContext *ctx) {
     }
     if (ctx->statementExpression()) {
         block->tail = dispatch(ctx->statementExpression());
+    }
+    // 文法把裸块类表达式收进 statement；AST 统一把末尾无分号的表达式作为 tail。
+    if (!block->tail && !block->statements.empty()) {
+        auto *last = dynamic_cast<ExpressionStatement *>(block->statements.back().get());
+        if (last && !last->has_semicolon) {
+            block->tail = std::move(last->expression);
+            block->statements.pop_back();
+        }
     }
     return block;
 }
@@ -588,7 +596,7 @@ AstBuilder::build_let(RxParser::LetStatementContext *ctx) {
             return nullptr;
         st->type_annotation = std::move(type);
     }
-    // equalsSign 几种 token 拼装全是 `=`，无视
+    // equalsSign 的各 token 组合都表示 =，无需单独保存。
     auto initializer = dispatch(ctx->expression());
     if (!initializer)
         return nullptr;
@@ -615,9 +623,9 @@ AstBuilder::fold_chain(antlr4::ParserRuleContext *ctx) {
         if (!operand)
             return nullptr;
         if (!acc) {
-            acc = std::move(operand); // 第一个操作数：直接当左值
+            acc = std::move(operand); // 第一个操作数成为当前累计子树。
         } else if (pending_op) {
-            // 左值 + 记下的运算符 + 右操作数：合并成新的左值（左结合）
+            // 累计子树作为左操作数，与新操作数合并成左结合的二元树。
             auto bin = std::make_shared<BinaryExpression>();
             bin->operation = *pending_op;
             bin->span =
@@ -723,7 +731,7 @@ AstBuilder::build_unary_layer(antlr4::ParserRuleContext *ctx) {
             return make_unary(op_ctx, dispatch(children[1]));
         }
     }
-    // 若没有一元运算符，说明还没到一元层，转发
+    // 没有前缀运算符时，当前层直接转发后缀表达式子树。
     if (children.size() == 1)
         return dispatch(children[0]);
     diagnostics_.error(span_of(ctx), "一元层：孩子形状异常（防御分支）");
@@ -832,7 +840,7 @@ AstBuilder::build_non_block_primary(RxParser::NonBlockPrimaryContext *ctx) {
         node->span = span_of(ctx);
         return node;
     }
-    return build_array_expression(ctx->arrayExpression()); // 数组（7.7）
+    return build_array_expression(ctx->arrayExpression()); // 其余文法分支为数组表达式。
 }
 
 // 处理字面量：整数和布尔。
@@ -1041,7 +1049,7 @@ AstBuilder::build_type_reference(RxParser::TypeRefContext *ctx) {
 }
 
 // 处理类型路径：带 :: 的类型名，每段可以带泛型实参。
-// 例：`Vec<Box<i32>>` → PathType{段 [Vec, Box]}，Box 带实参 i32。
+// 例：`Vec<Box<i32>>` 只有一个路径段 Vec，其泛型实参是路径类型 Box<i32>。
 std::shared_ptr<Type>
 AstBuilder::build_type_path(RxParser::TypePathContext *ctx) {
     auto node = std::make_shared<PathType>();

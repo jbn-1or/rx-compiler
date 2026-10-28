@@ -18,6 +18,24 @@ const std::set<std::string> kBuiltinValueNames = {"get_i32", "print_i32",
 
 } // namespace
 
+// 先收齐类型名，再收集值名和 impl，使全局名字查找不受声明顺序影响。
+// 例如 impl S 可以写在 struct S 前面，函数体也可以调用后面声明的函数。
+void SemanticAnalyzer::collect_declarations(const Crate &crate) {
+    initialize_builtins();
+    for (const auto &item : crate.items) {
+        if (auto *s = dynamic_cast<Struct *>(item.get()))
+            collect_struct(*s);
+    }
+    for (const auto &item : crate.items) {
+        if (auto *c = dynamic_cast<Const *>(item.get()))
+            collect_const(*c);
+        else if (auto *f = dynamic_cast<Function *>(item.get()))
+            collect_function(*f);
+        else if (auto *i = dynamic_cast<InherentImpl *>(item.get()))
+            collect_impl(*i);
+    }
+}
+
 // 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin
 // 放进 function_constant_namespace；对象由 builtins_ 持有
 // （function_constant_namespace 里只存指针）。
@@ -55,7 +73,7 @@ void SemanticAnalyzer::collect_struct(const Struct &s) {
             diagnostics_.error(at, "duplicate field: " + f.name);
         }
     }
-    // D1：derive 列表去重后若长度变小，说明同一 trait 被请求了多次。
+    // D1：向集合插入失败表示同一 trait 被请求了多次。
     // AstBuilder 已把多个 #[derive(..)] 合并进 s.derives
     std::set<Derive> derives;
     for (Derive d : s.derives) {
@@ -63,7 +81,7 @@ void SemanticAnalyzer::collect_struct(const Struct &s) {
             diagnostics_.error(
                 s.span, std::string("repeated derive: ") + name(d));
     }
-    // 建档案并登记。字段/derive 有错时仍登记，让后续 Phase 能继续解析。
+    // 字段或 derive 有错时仍登记符号，让后续阶段可以继续解析此结构体。
     auto sym = std::make_unique<StructSymbol>();
     sym->name = s.name;
     sym->span = s.span;
@@ -156,18 +174,18 @@ void SemanticAnalyzer::check_parameter_names(
 // G7；`impl S<i32>` → G1。
 StructSymbol *SemanticAnalyzer::resolve_impl_target(const Type &t) {
     const auto *pt = dynamic_cast<const PathType *>(&t);
-    if (!pt || pt->segments.size() != 1) { // impl对象不唯一
+    if (!pt || pt->segments.size() != 1) { // impl 目标必须是单段类型路径。
         diagnostics_.error(t.span, "impl target must be a user-defined struct");
         return nullptr;
     }
     const PathSegment &seg = pt->segments[0];
     const auto it = type_namespace.find(seg.name);
-    if (it == type_namespace.end()) { // impl对象还未定义或者是自留类名
+    if (it == type_namespace.end()) { // 目标不在已收齐的用户结构体名字表中。
         diagnostics_.error(t.span,
                      "impl target must be a user-defined struct: " + seg.name);
         return nullptr;
     }
-    if (!seg.generics.empty()) { // impl对象带类型实参
+    if (!seg.generics.empty()) { // 用户结构体不接受类型实参。
         diagnostics_.error(
             t.span, "structs have no type parameters: " + seg.name);
         return nullptr;
@@ -186,7 +204,7 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
         return;
 
     for (const auto &item : impl.items) {
-        // impl成员是函数还是常量
+        // 按函数和常量两种成员分别登记。
         if (const auto *fn = dynamic_cast<const Function *>(item.get())) {
             // N6：跨 impl 方法/关联函数/关联常量也不能重名。
             if (target->associated_items.count(fn->name)) {
@@ -196,7 +214,7 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
             }
             // N5：方法参数名必须唯一。
             check_parameter_names(fn->parameters, fn->span);
-            // 创建函数symbol
+            // 保存函数声明和所属结构体，签名留待后续定型。
             auto sym = std::make_unique<FunctionSymbol>();
             sym->kind = Symbol::Kind::Function;
             sym->name = fn->name;
@@ -212,7 +230,7 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
                     c->span, "duplicate associated item: " + c->name);
                 continue;
             }
-            // 创建常量symbol
+            // 保存关联常量声明和所属结构体，值留待常量阶段求出。
             auto sym = std::make_unique<ConstantSymbol>();
             sym->kind = Symbol::Kind::Constant;
             sym->name = c->name;

@@ -68,24 +68,24 @@ add_executable(rxcc
   src/ast/ast.cpp
   src/ast/dump.cpp
   src/ast_builder.cpp
+  # Semantic pipeline entry and crate-level declaration checks.
   src/sema/sema.cpp
-  src/sema/collect.cpp
-  src/sema/constants.cpp
-  src/sema/resolve_type.cpp
-  src/sema/signatures.cpp
-  src/sema/layout.cpp
-  src/sema/traits.cpp
-  src/sema/body.cpp
-  src/sema/expression.cpp
-  src/sema/value_path.cpp
-  src/sema/call.cpp
-  src/sema/builtins.cpp
-  src/sema/method.cpp
-  src/sema/operators.cpp
-  src/sema/aggregate.cpp
-  src/sema/control_flow.cpp
-  src/sema/place.cpp
-  src/sema/coercion.cpp
+  src/sema/type.cpp
+  src/sema/declarations/collect.cpp
+  src/sema/declarations/constants.cpp
+  src/sema/declarations/resolve_type.cpp
+  src/sema/declarations/validate.cpp
+  # Recursive body driver, expression rules and shared conversions.
+  src/sema/body/checker.cpp
+  src/sema/body/values.cpp
+  src/sema/body/operators.cpp
+  src/sema/body/aggregate.cpp
+  src/sema/body/control_flow.cpp
+  src/sema/body/conversions.cpp
+  # Ordinary/qualified calls and dot-method receiver adjustment.
+  src/sema/body/calls/call.cpp
+  src/sema/body/calls/builtins.cpp
+  src/sema/body/calls/method.cpp
   ${GENERATED_SOURCES})
 
 add_dependencies(rxcc rxcc_antlr)

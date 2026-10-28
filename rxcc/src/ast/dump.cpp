@@ -6,7 +6,7 @@ namespace rx {
 
 namespace {
 
-// 一行一节点，depth 控制缩进。对外只暴露 dump
+// 打印节点摘要及参数、字段等辅助行；depth 控制每层两个空格的缩进。
 struct Printer : AstVisitor {
     std::ostream &os;
     int depth = 0;
@@ -58,7 +58,7 @@ struct Printer : AstVisitor {
         os << "Assignment " << name(e.operation) << "\n";
         ++depth;
         walk(e, *this);
-        --depth; // 孩子顺序由 walk 定：right 先（求值顺序）
+        --depth; // walk 对普通赋值和复合赋值都先打印 right，再打印 left。
     }
 
     void visit(CastExpression &e) override {
@@ -80,7 +80,7 @@ struct Printer : AstVisitor {
     void visit(MethodCallExpression &e) override {
         indent();
         os << "MethodCall " << to_string(e.method)
-           << "\n"; // 含 turbofish 泛型
+           << "\n"; // 类型实参统一打印为 <T>，不保留源码中的 turbofish ::。
         ++depth;
         walk(e, *this);
         --depth;
@@ -186,7 +186,7 @@ struct Printer : AstVisitor {
         --depth;
     }
 
-    // Struct
+    // 结构体构造额外打印路径和字段行，并缩进各字段的值表达式。
     void visit(StructExpression &e) override {
         indent();
         os << "Struct\n";

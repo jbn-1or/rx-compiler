@@ -22,7 +22,7 @@ private:
     // 返回空指针表示跳过或已报错。
     std::shared_ptr<Expression> dispatch(antlr4::tree::ParseTree *node);
 
-    // —— 表达式分层：按优先级从高到低，每层只处理自己那一级 ——
+    // —— 表达式构建工具：各层按文法递归处理对应优先级 ——
     //
     // 二元运算链：把一串平铺的孩子折叠成一棵左结合的运算树，
     // 运算符按白名单逐个识别。
@@ -135,7 +135,7 @@ private:
     apply_dot_suffix(std::shared_ptr<Expression> e,
                      RxParser::DotSuffixContext *ctx);
 
-    // 构建 loop 和 while 循环（两者共用这里的逻辑）。
+    // 分别构建 loop 与 while；循环体复用 build_block，while 条件走 dispatch。
     std::shared_ptr<Expression>
     build_loop(antlr4::ParserRuleContext *whole,
                RxParser::BlockExpressionContext *body_ctx);

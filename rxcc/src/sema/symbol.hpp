@@ -7,6 +7,7 @@
 #include "sema/type.hpp"
 #include <cstdint>
 #include <set>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -15,8 +16,8 @@
 namespace rx {
 
 // 一个结构体字段的声明。
-// 存什么：字段名 + 指向 AST 类型节点的指针 + 源码位置；Phase 1 不解析类型。
-// `struct Point { x: i32 }` → {name="x", type=指向 i32 的 PathType, span=该字段区间}
+// 保存字段名、指向 AST 类型节点的非拥有指针和诊断位置；声明收集时不解析类型。
+// `struct Point { x: i32 }` → {name="x", type=指向 i32 的 PathType, span=i32 的区间}
 struct FieldDeclaration {
     std::string name;           // 字段名，"x"
     const Type *type = nullptr; // 字段的语法类型节点（非拥有），`items: Vec<S>` 时指向 Vec<S>
@@ -37,7 +38,7 @@ struct Symbol {
 struct StructSymbol;
 
 // 常量求值结果：类型 + 值（有符号/无符号整数或 bool）+ 是否成功。
-// 失败时 type 为 Error、value 为 monostate、ok 为 false，供上层静默放行。
+// 失败时 type 为 Error、value 为 monostate、ok 为 false，供上层传播失败并抑制连锁诊断。
 // 例：`3u32` → {type=u32, value=uint64_t{3}, ok=true}；`true` → {type=bool, value=true, ok=true}
 struct EvaluatedConstant {
     SemanticType type;
@@ -48,7 +49,6 @@ struct EvaluatedConstant {
 // ConstantSymbol 的三色求值状态
 enum class ConstantEvaluationState { Unvisited, Visiting, Visited };
 
-// ----------------函数括号内的形式参数---------------------
 // 定型后的普通参数：语义类型 + 绑定可变性；对应 AST 的 Parameter。
 // `mut x: i32` → {type=i32, is_mut=true}。
 struct ResolvedParameter {
@@ -56,13 +56,10 @@ struct ResolvedParameter {
     bool is_mut = false;
 };
 
-// 定型后的 self 接收者形态；对应 AST 的 SelfParameter，不保存类型。
-// 接收者的实际类型由 owner 推导，方法查找只需要下面三个标志：
-// present：有无 self | is_mut：有无mut | by_reference：有无引用
+// 接收者在签名阶段定型；类型可变性与绑定可变性分别保存。
 struct ResolvedReceiver {
-    bool present = false;
-    bool by_reference = false;
-    bool is_mut = false;
+    SemanticType type;
+    bool binding_is_mut = false;
 };
 
 // 一个函数或方法的档案（impl 内带/不带 self 的都算）。
@@ -74,7 +71,7 @@ struct FunctionSymbol : Symbol {
     StructSymbol *owner = nullptr;     // 所属结构体；顶层函数为 nullptr，impl S 内方法指向 S
     std::vector<ResolvedParameter> parameters; // 定型后的参数，按声明顺序
     SemanticType return_type; // 返回类型；省略时为 Unit
-    ResolvedReceiver self_parameter; // 接收者形态；普通函数 present=false
+    std::optional<ResolvedReceiver> receiver; // 无 self 时为空。
 };
 
 // 一个常量的档案（顶层 const 或 impl 内的关联 const）。
@@ -98,7 +95,7 @@ struct ConstantSymbol : Symbol {
 struct StructSymbol {
     std::string name;             // 结构体名
     Span span{};
-    const Struct *node = nullptr; 
+    const Struct *node = nullptr;
     std::vector<FieldDeclaration> fields; // 按声明顺序的字段，Point → [{x,i32},{y,i32}]
     std::unordered_map<std::string, SemanticType> field_types; // 字段名 → 定型后的语义类型
     std::set<Derive> derives{};    // 合并去重后的 derive ，`#[derive(Copy, Clone)]` → {Copy, Clone}

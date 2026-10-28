@@ -1,13 +1,58 @@
-// 实现隐式类型转换判定、固定目标的类型检查及多结果的最小上界计算。
-// 转换判定同时考虑类型与访问权限，限制跨共享访问的可变重借用。
-// 保留表达式的原始检查结果，仅判断兼容性并在需要时报告类型不匹配。
+// 函数体检查共用的适配规则：place 物化、单步解引用、隐式转换与公共类型。
+// 表达式处理器返回原始类型和权限，调用方在固定目标处检查兼容性。
 
-#include "sema/body.hpp"
+#include "sema/body/checker.hpp"
 
 namespace rx {
 
+// 值表达式需要存储位置时物化为可写临时 place；已有 place 保留原权限，
+// 不能把不可变 place 变成可变副本。
+PlaceAccessInformation BodyChecker::materialize_place(
+    const PlaceAccessInformation &place) const {
+    if (place.is_place)
+        return place;
+    return PlaceAccessInformation{true, true, false};
+}
+
+// 执行一次内置解引用：&T / &mut T / Box<T>。
+// 值基表达式先物化为临时 place；其他类型报错并返回 Error。
+ExpressionResult BodyChecker::dereference_place(
+    const SemanticType &base_type,
+    const PlaceAccessInformation &base_place, Span at) {
+    if (base_type.is_error())
+        return ExpressionResult::error();
+
+    const PlaceAccessInformation place = materialize_place(base_place);
+
+    if (base_type.kind == SemanticType::Kind::Reference) {
+        if (!base_type.inner)
+            return ExpressionResult::error();
+        // 解引用共享引用会设置 crossed_shared；后续即使遇到 &mut，也不能恢复写权限。
+        // x: &&mut i32 时 **x 不可写；x: &mut &mut i32 且未跨共享访问时可以写。
+        PlaceAccessInformation dereferenced{true, false, true};
+        if (base_type.is_mut) {
+            dereferenced.is_mutable = !place.crossed_shared;
+            dereferenced.crossed_shared = place.crossed_shared;
+        }
+        return ExpressionResult::from_place(*base_type.inner, dereferenced);
+    }
+    // 解引用 Box 保留原 place 的可写性和共享访问限制。
+    if (base_type.kind == SemanticType::Kind::Box) {
+        if (!base_type.inner)
+            return ExpressionResult::error();
+        return ExpressionResult::from_place(
+            *base_type.inner,
+            PlaceAccessInformation{true, place.is_mutable,
+                                   place.crossed_shared});
+    }
+
+    diagnostics_.error(at, "type " + base_type.toString() +
+                               " cannot be dereferenced");
+    return ExpressionResult::error();
+}
+
 // 一对一转换判定（CV5/CV6）。转换只做判定，不改变源 ExpressionResult。
-// true：可以转换。同类不需转换或合法隐式转换，false：不能转换为目标类
+// true 表示类型相同、允许隐式转换或属于错误恢复；false 表示不兼容。
 bool BodyChecker::can_coerce(const SemanticType &from,
                              const PlaceAccessInformation &place,
                              const SemanticType &to) const {
@@ -23,7 +68,7 @@ bool BodyChecker::can_coerce(const SemanticType &from,
         return false;
 
     // 同类型直接保持；&mut T → &T 也在此后按引用解引用规则处理。
-    if (from.equals(to))
+    if (from.same_type(to))
         return true;
 
     // 只有引用到引用才可能发生强制转换。
@@ -39,7 +84,7 @@ bool BodyChecker::can_coerce(const SemanticType &from,
     // 从源引用的内部类型开始逐层内置解引用，直到与目标内部类型完全相等。
     const SemanticType *current = from.inner.get();
     while (current) {
-        if (current->equals(*to.inner))
+        if (current->same_type(*to.inner))
             return true;
 
         if (current->kind == SemanticType::Kind::Reference) {
@@ -66,17 +111,20 @@ bool BodyChecker::can_coerce(const SemanticType &from,
 }
 
 // 在固定目标位置统一报告一次不兼容错误；转换本身不改写结果类型。
-void BodyChecker::require_coerce(const ExpressionResult &from,
+bool BodyChecker::require_coerce(const ExpressionResult &from,
                                 const SemanticType &to, Span at) {
+    if (from.type.is_error() || to.is_error())
+        return false;
     if (can_coerce(from.type, from.place, to))
-        return;
+        return true;
     diagnostics_.error(at, "type mismatch: expected " + to.toString() +
                                ", found " + from.type.toString());
+    return false;
 }
 
 // 无期望类型时，为一组表达式结果寻找公共类型
 // 调用方必须先用 nullptr 期望独立检查每个结果，不能把 LUB 目标反过来
-// 作为后续字面量的期望类型。失败属未定义行为：不追加诊断，返回 Error。
+// 作为后续字面量的期望类型。找不到公共类型时只返回 Error，具体诊断由调用方决定。
 SemanticType BodyChecker::compute_least_upper_bound(
     const std::vector<ExpressionResult> &results) const {
     // 任一结果已经出错时不再连锁诊断。

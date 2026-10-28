@@ -31,7 +31,8 @@ std::string to_string(const std::vector<PathSegment> &segs) {
 
 namespace {
 
-// 按规范求值顺序把孩子的 accept 交给外部 visitor。
+// 将直接子节点交给外部 visitor。visitor 可再次调用 walk 来递归遍历。
+// 此处定义静态访问顺序，不模拟条件选择、循环次数或短路求值。
 struct ChildWalker : AstVisitor {
     AstVisitor &out;
     explicit ChildWalker(AstVisitor &out) : out(out) {}
@@ -52,7 +53,7 @@ struct ChildWalker : AstVisitor {
     void visit(AssignmentExpression &e) override {
         e.right->accept(out);
         e.left->accept(
-            out); // walk 顺序 = 求值顺序，赋值不是"从左到右"的普通操作数
+            out); // 普通赋值与复合赋值在此都按 right、left 的顺序遍历。
     }
 
     void visit(CastExpression &e) override {
@@ -82,7 +83,7 @@ struct ChildWalker : AstVisitor {
         for (auto &s : e.statements)
             s->accept(out); // 语句按源码顺序
         if (e.tail)
-            e.tail->accept(out); // 尾表达式最后（设计 2.2）
+            e.tail->accept(out); // 先遍历语句，最后访问尾表达式。
     }
 
     void visit(LetStatement &e) override {
@@ -101,7 +102,7 @@ struct ChildWalker : AstVisitor {
     void visit(LoopExpression &e) override { e.body->accept(out); }
 
     void visit(WhileExpression &e) override {
-        e.condition->accept(out); // 条件在前：每次迭代先重求值它
+        e.condition->accept(out); // 静态遍历先访问条件，再访问循环体，各一次。
         e.body->accept(out);
     }
 
@@ -119,7 +120,7 @@ struct ChildWalker : AstVisitor {
 
     void visit(ArrayExpression &e) override {
         if (e.repeat_value) {
-            e.repeat_value->accept(out); // 重复形：elem 只求值一次
+            e.repeat_value->accept(out); // 重复形只访问元素表达式一次，不按重复次数展开。
         } else {
             for (auto &el : e.elements)
                 el->accept(out); // 列表形从左到右
@@ -127,7 +128,7 @@ struct ChildWalker : AstVisitor {
     }
 
     void visit(StructExpression &e) override {
-        e.path->accept(out); // 路径先（resolution 槽位所在）
+        e.path->accept(out); // 先访问结构体路径，再按源码顺序访问字段值。
         for (auto &f : e.fields)
             f.value->accept(out); // 字段值按源代码顺序
     }
@@ -137,7 +138,7 @@ struct ChildWalker : AstVisitor {
     void visit(Struct &) override {
     } // 字段类型是 Type、derives 是枚举——都不下钻
 
-    void visit(Const &) override {} // value 是 ConstantValue 纯值——声明不"执行"
+    void visit(Const &) override {} // 类型和 ConstantValue 都不是 Node，不交给此 visitor。
 
     void visit(InherentImpl &e) override {
         for (auto &i : e.items)

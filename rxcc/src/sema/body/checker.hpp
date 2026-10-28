@@ -1,15 +1,14 @@
 // 声明函数体检查器 BodyChecker，集中管理表达式检查及相关工具的接口。
 // 通过 SemanticAnalyzer 访问全局符号和声明检查服务，共用诊断收集器。
-// 当前包含函数体入口、局部作用域、字面量/路径/块、普通调用、运算符、聚合与控制流检查，
-// 以及 place、转换工具。
+// checker.cpp 集中函数 → 块 → 语句 → 表达式分派；具体表达式处理器按类别实现。
+// context.hpp 定义共享结果与状态，calls/ 集中各种调用检查。
 
 #pragma once
 
 #include "ast/ast.hpp"
 #include "diagnostics.hpp"
-#include "sema/body_state.hpp"
-#include "sema/call.hpp"
-#include "sema/expression.hpp"
+#include "sema/body/context.hpp"
+#include "sema/body/calls/call.hpp"
 #include <optional>
 #include <string>
 #include <vector>
@@ -20,8 +19,7 @@ class SemanticAnalyzer;
 struct FunctionSymbol;
 
 // 单个函数的检查上下文；符号和定型服务由 SemanticAnalyzer 持有。
-// 4.3 起保存局部作用域与当前函数/结构体，4.7 再增加循环栈。
-// 各类表达式的成员定义分散在对应 .cpp，见实现计划 B.0.1。
+// 保存局部作用域、当前函数/结构体和循环栈；全局信息通过 analyzer_ 访问。
 class BodyChecker {
 public:
     explicit BodyChecker(SemanticAnalyzer &analyzer);
@@ -49,8 +47,8 @@ private:
     // 函数入口、语句、作用域和局部名字。
     // 一条非尾语句的检查摘要，供 check_block 决定无尾块的类型。
     struct StatementResult {
-        bool diverges = false;  // 语句类型为 !（如 return），块也应为 !
-        bool has_error = false; // 含 Error 恢复结果，避免再用 () 触发连锁错误
+        bool diverges = false;  // 语句中的表达式结果为 !，用于判断无尾块是否发散。
+        bool has_error = false; // 表达式失败或固定目标不兼容；不汇总嵌套的全部诊断。
     };
     void enter_function(const FunctionSymbol &fn);
     StatementResult check_statement(const Statement &statement);
@@ -59,24 +57,26 @@ private:
     void declare_local(const std::string &name, const Binding &binding);
     std::optional<Binding> lookup_local(const std::string &name) const;
 
-    // expression.cpp（4.3）：字面量分派与值路径。
+    // values.cpp：字面量和值路径；统一分派在 checker.cpp。
     ExpressionResult check_integer_literal(const IntegerLiteral &literal,
                                            const SemanticType *expected);
     ExpressionResult check_value_path(const PathExpression &path);
 
-    // call.cpp（4.4/5.1）：普通调用、内置 I/O 与多段被调用者解析。
+    // calls/call.cpp：普通调用、内置 I/O 与多段被调用者解析。
     ExpressionResult check_call(const CallExpression &call);
-    // 4.4：单段被调用者——局部绑定优先（N13），再查值名字空间与同名结构体。
+    // 单段被调用者——局部绑定优先（N13），再查值名字空间与同名结构体。
     ExpressionResult check_ordinary_call(const PathExpression &path,
                                          const CallExpression &call);
-    // 5.1：`Type::member` 形式的两段被调用者目标选择；签名建立留给 5.2/5.3。
-    std::optional<ResolvedCallee>
+    // `Type::member` 形式的两段被调用者解析，返回统一的调用签名。
+    std::optional<CallableSignature>
     resolve_qualified_callee(const PathExpression &path);
-    // 5.1：在结构体关联项里找成员；找不到时按派生 Clone 回退（5.3）。
-    std::optional<ResolvedCallee> resolve_struct_member(
+    // 在结构体关联项里找签名；找不到时按派生 Clone 回退。
+    std::optional<CallableSignature> resolve_struct_member(
         const StructSymbol &structure, const PathSegment &member, Span at);
-    // method.cpp（5.4/5.5）：点调用候选查找、接收者调整与普通实参检查。
+    // calls/method.cpp：点调用候选查找、接收者调整与普通实参检查。
     ExpressionResult check_method_call(const MethodCallExpression &call);
+    std::optional<CallableSignature> lookup_method_signature(
+        const SemanticType &candidate, const std::string &name);
     std::optional<ResolvedMethod> resolve_method(const SemanticType &receiver_type,
                                                  const std::string &name);
     bool check_method_receiver(const ExpressionResult &receiver,
@@ -85,13 +85,13 @@ private:
         const std::vector<SemanticType> &parameter_types,
         const std::vector<std::shared_ptr<Expression>> &arguments, Span at);
 
-    // operators.cpp（4.5）：运算、赋值、借用、解引用与 cast。
+    // operators.cpp：运算、赋值、借用、解引用与 cast。
     ExpressionResult check_binary(const BinaryExpression &expression);
     ExpressionResult check_unary(const UnaryExpression &expression);
     ExpressionResult check_assignment(const AssignmentExpression &expression);
     ExpressionResult check_cast(const CastExpression &expression);
 
-    // aggregate.cpp（4.6）：结构体、字段、数组和索引。
+    // aggregate.cpp：结构体、字段、数组和索引。
     ExpressionResult
     check_struct_expression(const StructExpression &expression);
     ExpressionResult check_field(const FieldExpression &expression);
@@ -99,7 +99,7 @@ private:
                                  const SemanticType *expected);
     ExpressionResult check_index(const IndexExpression &expression);
 
-    // control_flow.cpp（4.7）：if、loop、while 和跳转。
+    // control_flow.cpp：if、loop、while 和跳转。
     ExpressionResult check_if(const IfExpression &expression,
                               const SemanticType *expected);
     ExpressionResult check_loop(const LoopExpression &expression,
@@ -116,18 +116,19 @@ private:
     };
     JumpTargetLookup find_jump_target() const;
 
-    // place.cpp：place 物化与一次内置解引用。
+    // conversions.cpp：place 物化与一次内置解引用。
     PlaceAccessInformation
     materialize_place(const PlaceAccessInformation &place) const;
     ExpressionResult dereference_place(const SemanticType &base_type,
                                        const PlaceAccessInformation &base_place,
                                        Span at);
 
-    // coercion.cpp：一对一强制转换、固定目标报错与多分支 LUB。
+    // conversions.cpp：一对一强制转换、固定目标报错与多分支 LUB。
     bool can_coerce(const SemanticType &from,
                     const PlaceAccessInformation &place,
                     const SemanticType &to) const;
-    void require_coerce(const ExpressionResult &from, const SemanticType &to,
+    // 已有 Error 时静默失败；不兼容时报错；不改写表达式本身的类型。
+    bool require_coerce(const ExpressionResult &from, const SemanticType &to,
                         Span at);
     SemanticType compute_least_upper_bound(
         const std::vector<ExpressionResult> &results) const;

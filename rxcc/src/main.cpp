@@ -1,15 +1,15 @@
-// 读源文件 → ANTLR 词法 + 语法分析 → 诊断收集 → 退出码。
+// 读源文件 → ANTLR 词法/语法分析 → AST 构建 → 可选语义检查。
 //   --stage parse    语法分析为止（0 接受 / 1 拒绝）
 //   --stage ast      AST 构建并 dump（默认）
 //   --stage semantic AST 构建后做静态语义检查，不 dump（0 接受 / 1 拒绝）
 //   --dump-tree      打印 ANTLR parse tree
-// 退出码契约：0 = 接受；1 = 拒绝（语法或语义错误）；
-// 2 = 用法错误或 IO 失败。
+// 退出码：0 = 当前阶段接受或显示帮助；1 = 词法、语法、AST 构建或语义错误；
+// 2 = 命令行用法错误或源文件无法打开。
 
 // 读文件 → ANTLRInputStream → RxLexer → CommonTokenStream → RxParser::crate。
-// 有任何语法错误就不进构建
+// 词法或语法检查报错后，不再构建 AST。
 
-// python3 tests/custom/run_semantic.py   # official semantic：--stage semantic，当前 70/236
+// python3 tests/custom/run_semantic.py    # 运行官方语义测试，按退出码判定接受/拒绝
 // ./rxcc/build/rxcc path                  # 默认 --stage ast：构建并 dump AST
 // ./rxcc/build/rxcc --stage parse path    # 只做语法分析
 // ./rxcc/build/rxcc --stage semantic path # AST 之上做语义检查（不 dump）
@@ -55,9 +55,8 @@ std::string read_file(const std::string &path, bool &ok) {
     return buffer.str();
 }
 
-// 把 ANTLR 的 syntaxError 回调收进 Diagnostics（Lexer.g4/Parser.g4
-// 的错误监听契约）。 lexer 与 parser 各挂一个实例；先 removeErrorListeners
-// 摘掉默认控制台监听器。
+// lexer 和 parser 共用此监听器，将 syntaxError 回调写入 Diagnostics。
+// 注册前移除各自的默认监听器，避免诊断同时直接输出到控制台。
 class CollectErrors : public antlr4::BaseErrorListener {
 public:
     explicit CollectErrors(rx::Diagnostics &diags) : diagnostics_(diags) {}
@@ -66,7 +65,7 @@ public:
                      antlr4::Token * /*offendingSymbol*/, size_t line,
                      size_t charPositionInLine, const std::string &msg,
                      std::exception_ptr /*e*/) override {
-        // 词法错误无 token 可指：报点位上的零宽 span（列 +1 成最小区间）。
+        // 统一将回调位置记为一列宽的 [start, end) 区间，不依赖错误 token。
         const rx::Position at{static_cast<int>(line),
                               static_cast<int>(charPositionInLine)};
         diagnostics_.error(
@@ -89,7 +88,7 @@ void print_diagnostics(const rx::Diagnostics &diags, const std::string &path,
 } // namespace
 
 int main(int argc, char **argv) {
-    std::string stage = "ast"; // 设计 §10：--stage 默认 ast
+    std::string stage = "ast"; // 未指定 --stage 时，构建并打印 AST。
     std::string source_path;
     bool dump_tree = false;
 
@@ -152,7 +151,7 @@ int main(int argc, char **argv) {
         std::cout << antlr4::tree::Trees::toStringTree(tree, &parser) << "\n";
     }
 
-    // 有任何语法错误就不进构建：打印诊断，退出 1。
+    // 词法或语法检查报错：打印诊断，跳过 AST 构建并退出 1。
     if (!diags.ok()) {
         print_diagnostics(diags, source_path, std::cerr);
         return 1;
@@ -162,7 +161,7 @@ int main(int argc, char **argv) {
         return 0; // --stage parse：到此为止
     }
 
-    // 语法干净 → AST 构建器构建。
+    // 词法、语法检查成功后，递归构建 AST。
     // 构建失败（builder 返回空 / 诊断非空）→ 打印诊断，退出 1。
     rx::AstBuilder builder(diags);
     std::shared_ptr<rx::Crate> crate =

@@ -1,4 +1,4 @@
-// Bare-metal runtime supplied by REIMU.
+// Rust allocator and panic hooks backed by REIMU's simulated C runtime.
 use ::core::alloc::{GlobalAlloc, Layout};
 
 struct ReimuAllocator;
@@ -10,7 +10,8 @@ unsafe extern "C" {
 
 unsafe impl GlobalAlloc for ReimuAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // REIMU's malloc guarantees 16-byte alignment.
+        // The supported REIMU host build aligns malloc results to 16 bytes;
+        // this adapter rejects layouts that require stronger alignment.
         if layout.align() > 16 {
             return ::core::ptr::null_mut();
         }

@@ -8,7 +8,7 @@
 
 namespace rx {
 
-// 单条诊断：定位 + 消息。span 是出错点的最小区间（end 不含）。
+// 单条诊断：源码区间 [start, end) 与错误消息；区间大小由报错处决定。
 struct Diagnostic {
     Span span;
     std::string message;
@@ -22,7 +22,7 @@ struct Diagnostics {
         items.push_back(Diagnostic{std::move(span), std::move(message)});
     }
 
-    // true = 没有任何错误，可以进入下一阶段（构建 AST）。
+    // true 表示尚未记录错误；调用方据此决定是否继续下一阶段或接受程序。
     bool ok() const { return items.empty(); }
 };
 

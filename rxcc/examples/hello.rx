@@ -1,4 +1,4 @@
-// Minimal Rx program for the stage-1 parse-tree milestone.
+// Small example for parse-tree output, AST dumping and semantic checking.
 fn main() {
     let a: i32 = 1 + 2;
     println_i32(a);

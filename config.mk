@@ -1,7 +1,8 @@
-# Fill in these five commands. See README-EN.md or README-ZH.md for details.
+# Test commands: C++ rxcc checks semantics; Rust supplies reference IR/assembly.
+# See README-EN.md or README-ZH.md for command placeholders and stage contracts.
 
 # Optional: build your compiler once before testing. Leave empty if prebuilt.
-# {runtime} will be linked into every program.
+# {runtime} supplies shared assembly to each IR/codegen/optimization execution.
 # Write shared runtime assembly there if your IR/CODEGEN output references it.
 BUILD = CARGO_PROFILE_RELEASE_LTO=true cargo build --quiet --locked --release \
     --manifest-path crates/rx/Cargo.toml \
@@ -28,7 +29,7 @@ CODEGEN = RUST_MIN_STACK=16777216 RX_SOURCE={source} $(REFERENCE_RUSTC) --crate-
 RUN = xmake run -P vendor/REIMU reimu --memory=256M --stack=1M \
     -f {output},{runtime} -o {stdout} -p {profile} 1>&2
 
-# Rust reference helper; remove once your commands no longer use it.
+# Shared rustc options for the IR and CODEGEN reference commands above.
 # v0 symbols avoid quoted section names that REIMU does not recognize.
 REFERENCE_RUSTC = rustc \
     --edition=2021 \

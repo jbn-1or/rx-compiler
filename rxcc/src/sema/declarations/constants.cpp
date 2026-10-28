@@ -26,7 +26,7 @@ bool is_signed_int(const SemanticType &type) {
 
 // 驱动所有常量求值：constants_ 同时包含顶层常量和 impl 关联常量。
 // evaluate_constant 内部负责三色环检测、C1 比对与缓存，这里只负责遍历。
-// 无引用者、只声明不求值的常量也会在这里被检查。
+// 没有被其他声明或函数引用的常量也会在这里被求值和检查。
 void SemanticAnalyzer::evaluate_all_constants() {
     for (auto &sym : constants_)
         evaluate_constant(*sym);
@@ -66,44 +66,14 @@ SemanticAnalyzer::resolve_constant_path(
         return static_cast<ConstantSymbol *>(it->second);
     }
 
-    // 2 段：先解析前缀结构体，再查 associated const。
-    const StructSymbol *owner = nullptr;
-    if (first.name == "Self") {
-        // N10：Self 只在结构体/impl 的上下文中有目标。
-        if (!current) {
-            diagnostics_.error(span,
-                         "Self is not available outside a struct or impl");
-            return nullptr;
-        }
-        if (!first.generics.empty()) {
-            // G1：Self不接受类型实参。
-            diagnostics_.error(span, "structs have no type parameters: Self");
-            return nullptr;
-        }
-        owner = current;
-    } else {  // 前缀不是 `Self`
-        // 已登记的用户结构体才能有 associated const。
-        const auto it = type_namespace.find(first.name);
-        if (it != type_namespace.end()) {  // 在 type_namespace 中找到
-            if (!first.generics.empty()) {
-                // G1：用户结构体不接受类型实参。
-                diagnostics_.error(span,
-                             "structs have no type parameters: " + first.name);
-                return nullptr;
-            }
-            owner = it->second;
-        } else {
-            // 带类型实参的基本类型（如 i32<bool>::X）是 G3；
-            if (!first.generics.empty() &&
-                !basic_type_from_name(first.name).is_error()) {
-                diagnostics_.error(span, "primitives take no type parameters: " +
-                                       first.name);
-            } else { // Box/Vec 或其他非结构体前缀没有 associated const， C2。
-                diagnostics_.error(span, "constant path must resolve to a constant");
-            }
-            return nullptr;
-        }
+    const SemanticType owner_type = resolve_type_segment(first, current, span);
+    if (owner_type.is_error())
+        return nullptr;
+    if (owner_type.kind != SemanticType::Kind::Struct) {
+        diagnostics_.error(span, "constant path must resolve to a constant");
+        return nullptr;
     }
+    const StructSymbol *owner = owner_type.struct_symbol;
 
     // associated constant 本身不接受类型实参。
     const PathSegment &second = path[1];
@@ -122,8 +92,8 @@ SemanticAnalyzer::resolve_constant_path(
     return static_cast<ConstantSymbol *>(it->second);
 }
 
-// 根据ConstantSymbol输出EvaluatedConstant
-// 成功时 type/value 为初始化器结果，失败时type=Error、value=monostate、ok=false。
+// 对常量符号求值并返回缓存结果。
+// 成功时 type/value 为初始化器结果，失败时 type=Error、value=monostate、ok=false。
 // 作用：DFS求值常量并写缓存；求值时使用目标自己的声明类型，引用方的 expected 不传入。
 // 例：`const A: i32 = B; const B: i32 = 3;` 求 A 时递归求 B；
 //     `const A: i32 = A;` → C4 并把 A 缓存为 Error。
@@ -158,10 +128,9 @@ EvaluatedConstant SemanticAnalyzer::evaluate_constant(ConstantSymbol &sym) {
 
     EvaluatedConstant result =
         evaluate_constant_value(sym.node->value, &declared, sym.owner);
-    // 求值器没报错但结果类型与声明不一致（例如去掉路径期望传播后的
-    // `const N: isize = -1;`）时，在单个常量内部补 C1，避免把错误结果
-    // 发布给后续引用者。
-    if (result.ok && !result.type.is_error() && !result.type.equals(declared)) {
+    // 再核对结果与声明类型：期望不会穿过路径或负号，可能尚未发现类型不匹配。
+    // 例如 `const N: isize = -1;` 中操作数 1 默认是 i32，此处补报 C1。
+    if (result.ok && !result.type.is_error() && !result.type.same_type(declared)) {
         diagnostics_.error(sym.node->value.span,
                      "constant initializer does not match declared type");
         result = failed_evaluation();
@@ -176,7 +145,7 @@ EvaluatedConstant SemanticAnalyzer::evaluate_constant(ConstantSymbol &sym) {
 // 输入：value（常量值 AST）、expected（期望类型，可为 nullptr）、
 //       current（Self 所属结构体，供路径求值使用）。
 // 输出：EvaluatedConstant；成功 = 类型 + 值 + ok，失败 = Error/monostate/false。
-// 求不依赖名字的常量值（整数、布尔、负数）；
+// 处理整数、布尔、负数和常量路径；路径会递归求值目标常量。
 EvaluatedConstant
 SemanticAnalyzer::evaluate_constant_value(const ConstantValue &value,
                                          const SemanticType *expected,
@@ -191,7 +160,7 @@ SemanticAnalyzer::evaluate_constant_value(const ConstantValue &value,
             if (value.suffix != IntSuffix::None) {
                 // 有后缀时后缀优先；若与声明/上下文期望的类型不同 → C1。
                 type = type_from_suffix(value.suffix);
-                if (expected && !expected->equals(type)) {
+                if (expected && !expected->same_type(type)) {
                     diagnostics_.error(value.span,
                                  "integer literal suffix does not match the "
                                  "expected type");

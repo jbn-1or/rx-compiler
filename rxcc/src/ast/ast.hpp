@@ -8,14 +8,14 @@ namespace rx {
 
 // 源码位置：由 ANTLR token 的 getLine() / getCharPositionInLine() 转换而来。
 // 行从 1 开始，列从 0 开始
-// 例：源码 `1 + 2` 中 `2` 的起点（第 1 行第 5 列）→ {line=1, column=5}
+// 例：源码 `1 + 2` 中 `2` 的起点为 {line=1, column=4}，即第 1 行、零基列号 4。
 struct Position {
     int line;   // 行号，从 1 起，例：1
     int column; // 列号，从 0 起，例：5
 };
 
 // 一个节点源码区间 [start, end)，用于报错定位。
-// 例：`1 + 2` 的整体 → start={1,0}, end={1,5}（不含空格后的字符）
+// 例：`1 + 2` 的整体 → start={1,0}, end={1,5}（终点位于最后一个字符之后）。
 struct Span {
     Position start; // 区间起点（含）
     Position end;   // 区间终点（不含）
@@ -37,9 +37,9 @@ struct Type;
 
 // 表达式分类层
 // 例：`1 + 2` → BinaryExpression : Expression；`x` → PathExpression；
-//     有值的树节点都是表达式
+//     也包括 return、break 等发散表达式
 struct Expression : Node {
-    Type *type = nullptr; // 语义阶段回填，例：`1 + 2` 回填 i32
+    Type *type = nullptr; // 预留槽位，当前未使用；语义检查通过 ExpressionResult 返回类型。
 };
 
 // 语句分类层
@@ -86,7 +86,7 @@ enum class UnaryOperator {
     MutableBorrow, // &mut
 };
 
-// 名称解析槽位取值
+// 预留的名称解析槽位取值；当前语义检查直接查询符号，不写回此槽位。
 enum class Resolution {
     Unresolved,       // 尚未解析
     Local,            // 局部变量
@@ -149,8 +149,8 @@ struct Type {
     virtual bool equals(const Type &other) const = 0;
 };
 
-// () ；函数省略返回类型时
-// 例：`fn f() {}` 的返回类型；`let u = ();` 的初始化器
+// 语法类型 ()；也用于补齐函数省略的返回类型。
+// 例：`fn f() {}` 的返回类型、`let u: () = ();` 的类型标注。
 struct UnitType : Type {
     std::string name() const override { return "()"; }
     bool equals(const Type &other) const override;
@@ -323,11 +323,12 @@ struct UnaryExpression : Expression {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// 赋值：left 是 place，右结合—— a = b = c 的树是 Assign(a, Assign(b, c))。
+// 赋值按右结合构树：a = b = c → Assign(a, Assign(b, c))。
+// 语义检查另行验证 left 是可写 place；AST 也保留不满足此条件的语法结构。
 // 例：`a = 1` → operation=Assign, left=Path(a), right=IntegerLiteral(1)；`x += 2` → operation=AddAssignment
 struct AssignmentExpression : Expression {
     AssignmentOperator operation;                     // 例：`a = 1` 时 = Assign
-    std::shared_ptr<Expression> left; // 目标 place，例：Path(a)
+    std::shared_ptr<Expression> left; // 待验证的赋值目标，例：Path(a)
     std::shared_ptr<Expression> right; // 右侧值，例：IntegerLiteral(1)
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
@@ -340,7 +341,8 @@ struct CastExpression : Expression {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// 调用：callee 是任意表达式（f、f(1)、Type::method多段路径……），不退化为字符串。
+// 调用的 callee 保留为表达式节点，可表示路径或调用链等语法结构。
+// 当前语义检查只接受路径 callee；能构建 AST 不代表调用合法。
 // 例：`f(1, 2)` → callee=Path(f), arguments={IntegerLiteral(1), IntegerLiteral(2)}
 //     `S::new()` → callee=Path(S::new), arguments={}
 struct CallExpression : Expression {
@@ -352,7 +354,7 @@ struct CallExpression : Expression {
 // 方法调用：x.m(...)。method 是路径段：名字 + 可选 turbofish（DOT
 // pathExprSegment）。
 // 例：`x.get()` → receiver=Path(x), method="get", arguments={}
-//     `v.push::<i32>(1)` → method={name="push", generics={i32}}
+//     `v.push::<i32>(1)` 的语法结构 → method={name="push", generics={i32}}；语义检查会拒绝方法类型实参。
 struct MethodCallExpression : Expression {
     std::shared_ptr<Expression> receiver;          // 例：Path(x)
     PathSegment method;                            // 例："get"
@@ -377,8 +379,8 @@ struct IndexExpression : Expression {
 };
 
 // 块表达式：语句序列 + 可选尾表达式。
-// 块的值 = tail 的值；无 tail 类型为 unit
-// tail 是独立字段，statement* statementExpression?
+// 有 tail 时通常由它决定块结果；无 tail 时，语义检查按语句结果区分 ()、! 和 Error。
+// 构建器把文法中的末尾无分号块类表达式也归一化为 tail。
 // 例：`{ let a = 1; a + 2 }` → statements={LetStatement(a)}, tail=Binary(Add)
 //     `{ }` → statements={}, tail=nullptr（值为 ()）
 struct BlockExpression : Expression {
@@ -398,7 +400,7 @@ struct LetStatement : Statement {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// 表达式语句：分号不进 AST
+// 表达式语句：不保存分号 token，但用 has_semicolon 保留有无分号的信息。
 // 包住任意表达式，含省略分号的块类表达式
 // 例：`f();` → expression=Call(f)；`if x { 1 };` → expression=IfExpression
 struct ExpressionStatement : Statement {
@@ -426,7 +428,7 @@ struct LoopExpression : Expression {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// while：条件每次迭代前重新求值（规范 1964）——walk 顺序 condition 在前。
+// while：运行时每次迭代前检查条件；静态 walk 按条件、循环体的顺序各访问一次。
 // 例：`while x < 10 { x += 1; }` → condition=Binary(LessThan), body=Block{ Assignment(+=) }
 struct WhileExpression : Expression {
     std::shared_ptr<Expression> condition; // 例：Binary(x < 10)
@@ -434,8 +436,7 @@ struct WhileExpression : Expression {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// break：value 可空（break; → unit；带值 break 决定 loop 结果类型，规范
-// 1968）。
+// break 自身为发散表达式；value 可空，裸 break 为目标 loop 提供 ()，带值时提供该值。
 // 例：`break;` → value=nullptr；`break 5;` → value=IntegerLiteral(5)
 struct BreakExpression : Expression {
     std::shared_ptr<Expression> value; // 可空，例：IntegerLiteral(5)
@@ -448,7 +449,7 @@ struct ContinueExpression : Expression {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// return：value 可空；类型是 never（规范 1337），语义阶段回填。
+// return 的 value 可空；语义检查核对返回值后得到 !，不回填 AST 的 type 槽位。
 // 例：`return;` → value=nullptr；`return x + 1;` → value=Binary(Add)
 struct ReturnExpression : Expression {
     std::shared_ptr<Expression> value; // 可空，例：Binary(x + 1)
@@ -456,7 +457,7 @@ struct ReturnExpression : Expression {
 };
 
 // 数组表达式：两形——列表 [a, b]（含空 []）与重复 [x; N]。
-// 靠 repeat_value 是否为空区分；重复形 element 只求值一次（规范 1825）。
+// 靠 repeat_value 是否为空区分；重复形的元素表达式只求值一次。
 // 例：`[1, 2]` → elements={IntegerLiteral(1), IntegerLiteral(2)}, repeat_value=nullptr
 //     `[0; 4]` → elements={}, repeat_value=IntegerLiteral(0), repeat_count=Int(4)
 struct ArrayExpression : Expression {
@@ -466,7 +467,7 @@ struct ArrayExpression : Expression {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// 结构体字段的"名字+值"对（纯值，对齐产生式 structExprField）。 
+// 结构体字段的“名字 + 值表达式”记录，自身不继承 Node。
 // 例：`S { x: 1, y: 2 }` 中 `x: 1`（name="x", value=IntegerLiteral(1)）。
 struct StructExpressionField {
     std::string name;                     // 例："x"
@@ -482,7 +483,8 @@ struct StructExpression : Expression {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// 路径表达式：多段合法（a::b::c）。resolution 是名称解析槽位，构建时 Unresolved。
+// 路径表达式在语法上允许多段（a::b::c），具体含义和合法性由使用位置决定。
+// resolution 是预留槽位，构建后为 Unresolved，当前语义检查不修改它。
 // 例：`x`（segments={x}）、`S::new`（segments={S, new}）、`Box::<i32>::new`（段带泛型）。
 struct PathExpression : Expression {
     std::vector<PathSegment> segments; // 至少一段，例：{S, new}
@@ -509,7 +511,7 @@ struct Function : Item {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// 结构体定义：derives + 字段表（名字+类型都是纯值）。
+// 结构体定义：derive 列表和字段记录；字段类型使用独立的 Type 层次。
 // 例：`#[derive(Copy, Clone)] struct S { x: i32, y: bool }`
 //     → name="S", fields={x:i32, y:bool}, derives={Copy, Clone}。
 struct Struct : Item {
@@ -538,13 +540,14 @@ struct InherentImpl : Item {
     void accept(AstVisitor &v) override { v.visit(*this); }
 };
 
-// crate：AST 的根。装节点
+// crate：AST 根容器，按源码顺序保存已构建的顶层声明；use 项不进入此列表。
 // 例：整个 .rx 文件 → items={Function(main), Struct(S), InherentImpl(impl S), ...}
 struct Crate {
     std::vector<std::shared_ptr<Item>> items; // 例：{Function(main), Struct(S)}
 };
 
-// 按规范求值顺序遍历 node 的子节点
+// 将 node 的直接 Node 子节点交给 visitor；不自动递归，也不遍历 Type 或 ConstantValue。
+// 顺序由 ChildWalker 定义，所有分支均会访问，循环体只访问一次；这是静态遍历。
 void walk(Node &node, AstVisitor &visitor);
 
 } // namespace rx

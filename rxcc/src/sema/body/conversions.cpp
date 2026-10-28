@@ -2,6 +2,7 @@
 // 表达式处理器返回原始类型和权限，调用方在固定目标处检查兼容性。
 
 #include "sema/body/checker.hpp"
+#include <cassert>
 
 namespace rx {
 
@@ -52,12 +53,13 @@ ExpressionResult BodyChecker::dereference_place(
 }
 
 // 一对一转换判定（CV5/CV6）。转换只做判定，不改变源 ExpressionResult。
-// true 表示类型相同、允许隐式转换或属于错误恢复；false 表示不兼容。
+// 调用入口 require_coerce 和 LUB 已处理 Error；这里仅判断正常类型的兼容性。
 bool BodyChecker::can_coerce(const SemanticType &from,
                              const PlaceAccessInformation &place,
                              const SemanticType &to) const {
-    // 错误恢复与发散：Error 静默放行，Never 可转任意目标。
-    if (from.is_error() || to.is_error() || from.is_never())
+    assert(!from.is_error() && !to.is_error());
+    // Never 路径不产生值，可以转换到任意目标。
+    if (from.is_never())
         return true;
 
     const bool target_is_mutable_reference =
@@ -83,7 +85,7 @@ bool BodyChecker::can_coerce(const SemanticType &from,
 
     // 从源引用的内部类型开始逐层内置解引用，直到与目标内部类型完全相等。
     const SemanticType *current = from.inner.get();
-    while (current) {
+    for (;;) {
         if (current->same_type(*to.inner))
             return true;
 
@@ -107,7 +109,6 @@ bool BodyChecker::can_coerce(const SemanticType &from,
         // Vec、数组、整数、结构体等都不产生隐式解引用/切片转换。
         return false;
     }
-    return false;
 }
 
 // 在固定目标位置统一报告一次不兼容错误；转换本身不改写结果类型。

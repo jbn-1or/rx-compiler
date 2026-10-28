@@ -109,7 +109,12 @@ ExpressionResult BodyChecker::check_ordinary_call(const PathExpression &path,
         diagnostics_.error(path.span, "unknown built-in function: " + segment.name);
         return ExpressionResult::error();
     }
-    if (!check_arguments(signature->explicit_parameters(), call.arguments, call.span))
+    // 正常的顶层函数和内置 I/O 没有接收者，直接使用原参数表。
+    // 收集阶段已诊断的非法顶层接收者仍沿用显式参数表做错误恢复。
+    const bool arguments_ok = signature->receiver
+        ? check_arguments(signature->explicit_parameters(), call.arguments, call.span)
+        : check_arguments(signature->parameters, call.arguments, call.span);
+    if (!arguments_ok)
         return ExpressionResult::error();
     return ExpressionResult::value(signature->return_type);
 }

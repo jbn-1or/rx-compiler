@@ -98,6 +98,8 @@ private:
     ExpressionResult check_array(const ArrayExpression &expression,
                                  const SemanticType *expected);
     ExpressionResult check_index(const IndexExpression &expression);
+    // 正常路径和错误恢复共用；每条路径只检查一次下标表达式。
+    bool check_index_operand(const Expression &expression);
 
     // control_flow.cpp：if、loop、while 和跳转。
     ExpressionResult check_if(const IfExpression &expression,
@@ -124,6 +126,7 @@ private:
                                        Span at);
 
     // conversions.cpp：一对一强制转换、固定目标报错与多分支 LUB。
+    // 纯兼容性查询，输入不得为 Error；错误恢复由 require_coerce / LUB 处理。
     bool can_coerce(const SemanticType &from,
                     const PlaceAccessInformation &place,
                     const SemanticType &to) const;

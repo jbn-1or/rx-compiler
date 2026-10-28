@@ -154,7 +154,6 @@ BodyChecker::check_binary(const BinaryExpression &expression) {
             const auto left_base = scalar_operand(left.type);
             const auto right_base = scalar_operand(right.type);
             if (!left_base || !right_base ||
-                !is_direct_scalar(*left_base) ||
                 !left_base->same_type(*right_base)) {
                 diagnostics_.error(
                     expression.span,
@@ -256,7 +255,7 @@ ExpressionResult BodyChecker::check_unary(const UnaryExpression &expression) {
 
         case UnaryOperator::Not: {
             const auto base = scalar_operand(operand.type);
-            if (!base || !is_direct_scalar(*base)) {
+            if (!base) {
                 diagnostics_.error(
                     expression.span,
                     "logical not requires an integer or bool");
@@ -278,9 +277,7 @@ ExpressionResult BodyChecker::check_unary(const UnaryExpression &expression) {
             }
 
             // 值表达式物化为临时 place；已有 place 保持原访问权限。
-            PlaceAccessInformation place = operand.place;
-            if (!place.is_place)
-                place = materialize_place(place);
+            const auto place = materialize_place(operand.place);
 
             const bool mutable_borrow =
                 expression.operation == UnaryOperator::MutableBorrow;

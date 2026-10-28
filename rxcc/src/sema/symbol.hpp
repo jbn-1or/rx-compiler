@@ -95,7 +95,7 @@ struct ConstantSymbol : Symbol {
 struct StructSymbol {
     std::string name;             // 结构体名
     Span span{};
-    const Struct *node = nullptr;
+    const Struct *node = nullptr; // 保留声明节点，供后续语义结果和 IR 映射使用。
     std::vector<FieldDeclaration> fields; // 按声明顺序的字段，Point → [{x,i32},{y,i32}]
     std::unordered_map<std::string, SemanticType> field_types; // 字段名 → 定型后的语义类型
     std::set<Derive> derives{};    // 合并去重后的 derive ，`#[derive(Copy, Clone)]` → {Copy, Clone}

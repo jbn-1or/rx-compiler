@@ -16,12 +16,6 @@ void BodyChecker::check_function(const FunctionSymbol &fn) {
     assert(fn.node && fn.node->body);
     const auto body = check_block(*fn.node->body, &fn.return_type);
     require_coerce(body, fn.return_type, fn.node->body->span);
-
-    scopes_.clear();
-    loop_frames_.clear();
-    current_function_ = nullptr;
-    current_owner_ = nullptr;
-    current_has_self_ = false;
 }
 
 ExpressionResult BodyChecker::check_block(const BlockExpression &block,

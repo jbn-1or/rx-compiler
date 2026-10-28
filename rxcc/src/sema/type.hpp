@@ -169,8 +169,4 @@ private:
 
 };
 
-inline bool same_type(const SemanticType &a, const SemanticType &b) {
-    return a.same_type(b);
-}
-
 } // namespace rx

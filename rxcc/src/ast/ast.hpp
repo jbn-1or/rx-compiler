@@ -139,21 +139,19 @@ std::string to_string(const ConstantValue &v);        // 打印与报错
 std::string to_string(const PathSegment &s);       // 打印与报错
 std::string to_string(const std::vector<PathSegment> &segs); // 同上，段间 ::
 
-// Type
+// 语法类型保留源码结构；类型身份由定型后的 SemanticType 判断。
 // 例：`i32` → PathType、`&mut S` → ReferenceType、`[i32; 3]` → ArrayType、`()` → UnitType
 struct Type {
     Span span;
 
     virtual ~Type() = default;
     virtual std::string name() const = 0; // 打印与报错，例："i32"
-    virtual bool equals(const Type &other) const = 0;
 };
 
 // 语法类型 ()；也用于补齐函数省略的返回类型。
 // 例：`fn f() {}` 的返回类型、`let u: () = ();` 的类型标注。
 struct UnitType : Type {
     std::string name() const override { return "()"; }
-    bool equals(const Type &other) const override;
 };
 
 // 路径类型：基本类型/结构体/Box/Vec/Self。
@@ -161,7 +159,6 @@ struct UnitType : Type {
 struct PathType : Type {
     std::vector<PathSegment> segments; // 例：`Box<i32>` 时 = {Box<i32>}
     std::string name() const override;
-    bool equals(const Type &other) const override;
 };
 
 // 引用类型：&T / &mut T。&&T 是两层嵌套
@@ -170,7 +167,6 @@ struct ReferenceType : Type {
     bool is_mut = false; // 例：`&mut S` 时 = true，`&S` 时 = false
     std::shared_ptr<Type> inner; // 例：`&mut S` 时 = S
     std::string name() const override;
-    bool equals(const Type &other) const override;
 };
 
 // 数组类型：[T; N]。N 复用 ConstantValue。
@@ -179,7 +175,6 @@ struct ArrayType : Type {
     std::shared_ptr<Type> element; // 例：`[i32; 3]` 时 = i32
     ConstantValue length;             // 例：`[i32; 3]` 时 = Int(3)
     std::string name() const override;
-    bool equals(const Type &other) const override;
 };
 
 const char *name(BinaryOperator operation);

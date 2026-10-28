@@ -282,62 +282,9 @@ const char *name(SelfParameter::Kind k) {
     return "";
 }
 
-// —— Type 层次的 equals/name 实现 ——
-namespace {
-
-bool type_pointer_equals(const std::shared_ptr<Type> &a,
-                         const std::shared_ptr<Type> &b) {
-    assert(a && b);
-    return a->equals(*b);
-}
-
-bool segments_equal(const std::vector<PathSegment> &a,
-                    const std::vector<PathSegment> &b) {
-    if (a.size() != b.size())
-        return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (a[i].name != b[i].name)
-            return false;
-        if (a[i].generics.size() != b[i].generics.size())
-            return false;
-        for (size_t j = 0; j < a[i].generics.size(); ++j) {
-            if (!type_pointer_equals(a[i].generics[j], b[i].generics[j]))
-                return false;
-        }
-    }
-    return true;
-}
-
-bool constant_value_equals(const ConstantValue &a, const ConstantValue &b) {
-    if (a.kind != b.kind)
-        return false;
-    switch (a.kind) {
-        case ConstantValue::Kind::Int:
-            return a.int_value == b.int_value;
-        case ConstantValue::Kind::Bool:
-            return a.bool_value == b.bool_value;
-        case ConstantValue::Kind::Path:
-            return segments_equal(a.path, b.path);
-        case ConstantValue::Kind::Negative:
-            assert(a.operand && b.operand);
-            return constant_value_equals(*a.operand, *b.operand);
-    }
-    return false;
-}
-
-} // namespace
-
-bool UnitType::equals(const Type &other) const {
-    return dynamic_cast<const UnitType *>(&other) != nullptr;
-}
-
+// 语法类型名称供 AST dump 和诊断使用。
 std::string PathType::name() const {
     return to_string(segments);
-}
-
-bool PathType::equals(const Type &other) const {
-    auto p = dynamic_cast<const PathType *>(&other);
-    return p && segments_equal(segments, p->segments);
 }
 
 std::string ReferenceType::name() const {
@@ -345,20 +292,9 @@ std::string ReferenceType::name() const {
     return is_mut ? "&mut " + inner->name() : "&" + inner->name();
 }
 
-bool ReferenceType::equals(const Type &other) const {
-    auto r = dynamic_cast<const ReferenceType *>(&other);
-    return r && is_mut == r->is_mut && type_pointer_equals(inner, r->inner);
-}
-
 std::string ArrayType::name() const {
     assert(element);
     return "[" + element->name() + "; " + to_string(length) + "]";
-}
-
-bool ArrayType::equals(const Type &other) const {
-    auto a = dynamic_cast<const ArrayType *>(&other);
-    return a && type_pointer_equals(element, a->element) &&
-           constant_value_equals(length, a->length);
 }
 
 } // namespace rx

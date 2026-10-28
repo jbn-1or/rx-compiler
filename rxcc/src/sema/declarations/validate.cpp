@@ -87,10 +87,8 @@ void SemanticAnalyzer::visit_layout(const StructSymbol *sym,
     LayoutVisitState &state = states[sym];
     if (state == LayoutVisitState::Visited)
         return;
-    if (state == LayoutVisitState::Visiting) {
-        diagnostics_.error(sym->span, "infinite inline layout cycle");
-        return;
-    }
+    // 递归边在 visit_layout_type 中检测环，并用字段 span 报错。
+    assert(state != LayoutVisitState::Visiting);
 
     state = LayoutVisitState::Visiting;
     // 检查结构体内的所有字段

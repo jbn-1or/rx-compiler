@@ -36,9 +36,9 @@ void SemanticAnalyzer::collect_declarations(const Crate &crate) {
     }
 }
 
-// 把内置 I/O 名 get_i32/print_i32/println_i32 以 Kind::Builtin
-// 放进 function_constant_namespace；对象由 builtins_ 持有
-// （function_constant_namespace 里只存指针）。
+// 为 get_i32、print_i32、println_i32 创建 Builtin符号，放入值名字表；
+// 这些符号由 builtins_ 持有。这里登记名字，调用时使用的参数和返回类型
+// 由 body/calls/builtins.cpp 中的 builtin_signature 提供。
 void SemanticAnalyzer::initialize_builtins() {
     for (const char *n : {"get_i32", "print_i32", "println_i32"}) {
         auto sym = std::make_unique<Symbol>();
@@ -49,9 +49,8 @@ void SemanticAnalyzer::initialize_builtins() {
     }
 }
 
-// 输入：`struct Point { x: i32 }` 的 AST 节点
-// 成功 → type_namespace["Point"] = 新 StructSymbol；名字非法 →
-// 追加诊断，不登记。
+// 检查受保护类型名、结构体重名、字段重名和重复 derive；然后创建 StructSymbol，
+// 保存字段的 AST 类型节点和 derive 集合，并登记到 type_namespace、 structs_。
 void SemanticAnalyzer::collect_struct(const Struct &s) {
     // N17：结构体名不能占用语言自带的类型名。报错后不登记，避免污染
     // type_namespace。
@@ -78,8 +77,8 @@ void SemanticAnalyzer::collect_struct(const Struct &s) {
     std::set<Derive> derives;
     for (Derive d : s.derives) {
         if (!derives.insert(d).second)
-            diagnostics_.error(
-                s.span, std::string("repeated derive: ") + name(d));
+            diagnostics_.error(s.span,
+                               std::string("repeated derive: ") + name(d));
     }
     // 字段或 derive 有错时仍登记符号，让后续阶段可以继续解析此结构体。
     auto sym = std::make_unique<StructSymbol>();
@@ -87,18 +86,16 @@ void SemanticAnalyzer::collect_struct(const Struct &s) {
     sym->span = s.span;
     sym->node = &s;
     for (const auto &f : s.fields) {
-        sym->fields.push_back(FieldDeclaration{
-            f.name, f.type.get(), f.type ? f.type->span : s.span});
+        sym->fields.push_back(FieldDeclaration{f.name, f.type.get(),
+                                               f.type ? f.type->span : s.span});
     }
     sym->derives = std::move(derives);
     type_namespace[sym->name] = sym.get();
     structs_.push_back(std::move(sym));
 }
 
-// 输入：`const MAX: i32 = 10;` 的 AST 节点
-// 效果：成功 → function_constant_namespace["MAX"] = 新 ConstantSymbol；名字非法 →
-// 只追加诊断，不登记。 例：第二个 `const MAX` → 报 N1；`const get_i32` → 报
-// N18。
+// 检查受保护值名和顶层值名冲突，创建 ConstantSymbol，
+// 登记到 function_constant_namespace 和 constants_；这里不求值。
 void SemanticAnalyzer::collect_const(const Const &c) {
     // N18：内置 I/O 名是受保护值名，用户常量不能占用。
     // 必须先于 N1 检查：这三个名字已经预登记在 function_constant_namespace 中。
@@ -122,10 +119,8 @@ void SemanticAnalyzer::collect_const(const Const &c) {
     constants_.push_back(std::move(sym));
 }
 
-// 输入：`fn f(a: i32) {}` 的 AST 节点
-// 效果：成功 → function_constant_namespace["f"] = 新 FunctionSymbol；名字非法 →
-// 只追加诊断，不登记。 例：`fn f(a: i32, a: i32)` → 报 N5；顶层 `fn f(&self)` →
-// 报 N8；
+// 检查受保护值名、顶层值名冲突，调用 check_parameter_names 检查普通参数重名
+// 并检查顶层函数不能带 self。然后创建 FunctionSymbol 并登记；
 void SemanticAnalyzer::collect_function(const Function &f) {
     // N18：内置 I/O 名是受保护值名，用户函数不能占用。
     if (kBuiltinValueNames.count(f.name)) {
@@ -141,8 +136,8 @@ void SemanticAnalyzer::collect_function(const Function &f) {
     check_parameter_names(f.parameters, f.span);
     // N8：顶层函数不能带接收者（self 只允许出现在 impl 方法里）。
     if (f.self_parameter)
-        diagnostics_.error(f.span,
-                     "top-level function cannot have a receiver: " + f.name);
+        diagnostics_.error(
+            f.span, "top-level function cannot have a receiver: " + f.name);
 
     // 参数/接收者有错也登记，避免后续按名字找不到函数而连锁报错。
     auto sym = std::make_unique<FunctionSymbol>();
@@ -169,9 +164,7 @@ void SemanticAnalyzer::check_parameter_names(
 }
 
 // 输入：`impl S` 的 self_type 节点
-// 输出：S 对应的 StructSymbol；不是用户结构体或带类型实参时追加诊断并返回
-// nullptr。 例：`impl S` → S；`impl Box<i32>``impl [i32; 2]``impl &S` →
-// G7；`impl S<i32>` → G1。
+// 输出：S 对应的 StructSymbol；不是用户结构体或带类型实参时追加诊断并返回nullptr。
 StructSymbol *SemanticAnalyzer::resolve_impl_target(const Type &t) {
     const auto *pt = dynamic_cast<const PathType *>(&t);
     if (!pt || pt->segments.size() != 1) { // impl 目标必须是单段类型路径。
@@ -181,13 +174,13 @@ StructSymbol *SemanticAnalyzer::resolve_impl_target(const Type &t) {
     const PathSegment &seg = pt->segments[0];
     const auto it = type_namespace.find(seg.name);
     if (it == type_namespace.end()) { // 目标不在已收齐的用户结构体名字表中。
-        diagnostics_.error(t.span,
-                     "impl target must be a user-defined struct: " + seg.name);
+        diagnostics_.error(
+            t.span, "impl target must be a user-defined struct: " + seg.name);
         return nullptr;
     }
     if (!seg.generics.empty()) { // 用户结构体不接受类型实参。
-        diagnostics_.error(
-            t.span, "structs have no type parameters: " + seg.name);
+        diagnostics_.error(t.span,
+                           "structs have no type parameters: " + seg.name);
         return nullptr;
     }
     return it->second;
@@ -209,7 +202,7 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
             // N6：跨 impl 方法/关联函数/关联常量也不能重名。
             if (target->associated_items.count(fn->name)) {
                 diagnostics_.error(fn->span,
-                             "duplicate associated item: " + fn->name);
+                                   "duplicate associated item: " + fn->name);
                 continue; // 保留先登记的那个
             }
             // N5：方法参数名必须唯一。
@@ -226,8 +219,8 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
         } else if (const auto *c = dynamic_cast<const Const *>(item.get())) {
             // N6：关联常量与同名方法/关联函数冲突。
             if (target->associated_items.count(c->name)) {
-                diagnostics_.error(
-                    c->span, "duplicate associated item: " + c->name);
+                diagnostics_.error(c->span,
+                                   "duplicate associated item: " + c->name);
                 continue;
             }
             // 保存关联常量声明和所属结构体，值留待常量阶段求出。

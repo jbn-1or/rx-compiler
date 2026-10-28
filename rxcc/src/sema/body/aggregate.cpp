@@ -127,8 +127,7 @@ ExpressionResult BodyChecker::check_field(const FieldExpression &expression) {
     if (base.type.is_error())
         return ExpressionResult::error();
     // 值表达式物化为临时 place；已有 place 保留原权限，再据此确定字段权限。
-    if (!base.place.is_place)
-        base.place = materialize_place(base.place);
+    base.place = materialize_place(base.place);
 
     // 引用和 Box 都只是包在结构体外面的一层，逐层打开，直到看到结构体。
     while (base.type.kind == SemanticType::Kind::Reference ||
@@ -211,12 +210,9 @@ BodyChecker::check_array(const ArrayExpression &expression,
 
     // `[值; 次数]`：值本身是普通表达式，只有“次数”按常量来处理。
     if (expression.repeat_value) {
-        bool ok = true;
-        ExpressionResult element =
+        const auto element =
             check_expression(*expression.repeat_value, expected_element);
-        // 重复的那个值本身就出错了。
-        if (element.type.is_error())
-            ok = false;
+        bool ok = !element.type.is_error();
 
         if (has_fixed_target &&
             !require_coerce(element, *expected_element, expression.repeat_value->span))
@@ -238,7 +234,7 @@ BodyChecker::check_array(const ArrayExpression &expression,
             ok = false;
         }
 
-        if (count_ok && count_value) {
+        if (count_ok) {
             // 外面指定了数组长度时，重复次数必须和它一样。
             if (has_fixed_target && *count_value != expected_length) {
                 diagnostics_.error(expression.span,
@@ -267,13 +263,11 @@ BodyChecker::check_array(const ArrayExpression &expression,
         }
 
         // 前面任何一步失败，这次数组写法都没有正常结果。
-        if (!ok || !count_ok || !count_value)
+        if (!ok)
             return ExpressionResult::error();
         // 有固定目标时，结果就是外面要求的那个数组类型。
         if (has_fixed_target)
             return ExpressionResult::value(*expected);
-        if (element.type.is_error())
-            return ExpressionResult::error();
         // 没有固定目标时，元素类型就是重复值本身的类型。
         return ExpressionResult::value(
             SemanticType::array(element.type, *count_value));
@@ -343,6 +337,18 @@ BodyChecker::check_array(const ArrayExpression &expression,
         SemanticType::array(element_type, elements.size()));
 }
 
+// 下标具有 usize 期望；Never 下标不在规范要求支持的执行范围内。
+bool BodyChecker::check_index_operand(const Expression &expression) {
+    const auto usize = usize_type();
+    const auto index = check_expression(expression, &usize);
+    if (index.type.is_never()) {
+        diagnostics_.error(expression.span,
+                           "a diverging index expression is not supported");
+        return false;
+    }
+    return require_coerce(index, usize, expression.span);
+}
+
 // 检查 `容器[下标]`
 // 取出的元素保留容器的读写状态：
 // 固定数组里，容器原来能写元素就能写，原来只能读元素也只能读；
@@ -355,17 +361,7 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
     // base 已经出错时，下标仍是独立表达式；继续检查它，保证错误恢复阶段
     // 不会漏掉下标里的名字/类型/发散诊断。
     auto check_index_after_invalid_base = [&]() {
-        const SemanticType usize = usize_type();
-        const ExpressionResult index =
-            check_expression(*expression.index, &usize);
-        if (index.type.is_error())
-            return ExpressionResult::error();
-        if (index.type.is_never()) {
-            diagnostics_.error(expression.index->span,
-                               "a diverging index expression is not supported");
-            return ExpressionResult::error();
-        }
-        require_coerce(index, usize, expression.index->span);
+        check_index_operand(*expression.index);
         return ExpressionResult::error();
     };
 
@@ -374,8 +370,7 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
     if (base.type.is_error())
         return check_index_after_invalid_base();
     // 值容器物化为临时 place；已有 place 保留原权限，再据此确定元素权限。
-    if (!base.place.is_place)
-        base.place = materialize_place(base.place);
+    base.place = materialize_place(base.place);
 
     // 引用和 Box 只是包在容器外面的一层，逐层打开，直到看到数组或 Vec。
     while (base.type.kind == SemanticType::Kind::Reference ||
@@ -400,21 +395,7 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
     if (!base.type.inner)
         return check_index_after_invalid_base();
 
-    // 下标必须能当成 usize 使用。
-    const SemanticType usize = usize_type();
-    const ExpressionResult index =
-        check_expression(*expression.index, &usize);
-    // 下标本身已经出错。
-    if (index.type.is_error())
-        return ExpressionResult::error();
-    // 下标永远算不出来（例如里面直接 return），不能当作正常下标使用。
-    if (index.type.is_never()) {
-        diagnostics_.error(expression.index->span,
-                           "a diverging index expression is not supported");
-        return ExpressionResult::error();
-    }
-    // 下标类型不是 usize，或者放不进 usize。
-    if (!require_coerce(index, usize, expression.index->span))
+    if (!check_index_operand(*expression.index))
         return ExpressionResult::error();
 
     PlaceAccessInformation element_place;

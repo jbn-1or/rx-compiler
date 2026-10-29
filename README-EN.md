@@ -19,6 +19,25 @@ Initialize the testcases and [REIMU](https://github.com/wanoful/REIMU) submodule
 git submodule update --init --recursive
 ```
 
+This fork uses the C++20 `rxcc` compiler for semantic checking. The default `BUILD`
+only builds it; official semantic tests need CMake, a C++20 compiler, and Python 3:
+
+```sh
+make test FILTER=official:semantic
+```
+
+Select **C / C++** and **Semantic** when submitting to the OJ. Generated parser
+sources and the matching ANTLR 4.13.2 runtime sources are committed, so builds need
+no network, Cargo, Java, or local `dev/antlr` installation. After editing
+`grammar/*.g4`, run `sh rxcc/scripts/gen_antlr.sh` with ANTLR 4.13.2 and commit
+`rxcc/gen/*.cpp` and `rxcc/gen/*.h` together with the grammar changes. The script
+accepts `ANTLR4_JAVA` and `ANTLR4_JAR` to locate the local generation tools.
+
+IR / codegen / optimization commands still use the template's Rust reference
+compiler. After installing the Rust, REIMU, and Clang tools described below, use
+`make test BUILD_REFERENCE=true` to build the Rust reference library and run
+these local tests.
+
 Python 3, [xmake](https://xmake.io/) and any C++23 compiler is needed to build REIMU. Build REIMU separately from the project root before running tests:
 
 ```sh

@@ -4,8 +4,8 @@
 #   cmake --build rxcc/build -j
 #   ./rxcc/build/rxcc --dump-tree rxcc/examples/hello.rx
 #
-# The local ANTLR toolchain is expected at <repo>/dev/antlr (see
-# dev/antlr/README.md). Override with -DANTLR_HOME=/path/to/antlr.
+# Generated parser sources and the matching ANTLR runtime are committed so normal
+# builds work offline, without Java or the local dev/antlr toolchain.
 cmake_minimum_required(VERSION 3.16)
 project(rxcc LANGUAGES CXX)
 
@@ -17,27 +17,13 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# --- Locate the local (rootless) ANTLR 4.13.2 toolchain ----------------------
-if(NOT ANTLR_HOME)
-  get_filename_component(ANTLR_HOME "${CMAKE_CURRENT_SOURCE_DIR}/../dev/antlr" ABSOLUTE)
-endif()
-
-set(ANTLR4_JAVA     "${ANTLR_HOME}/jre/bin/java")
-set(ANTLR4_JAR      "${ANTLR_HOME}/antlr-4.13.2-complete.jar")
-set(ANTLR4_INC      "${ANTLR_HOME}/cpp-runtime/include/antlr4-runtime")
-set(ANTLR4_LIB      "${ANTLR_HOME}/cpp-runtime/lib/libantlr4-runtime.a")
-
 find_package(Threads REQUIRED)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor/antlr4-runtime"
+                 "${CMAKE_CURRENT_BINARY_DIR}/antlr4-runtime")
 
-if(NOT EXISTS "${ANTLR4_JAR}" OR NOT EXISTS "${ANTLR4_LIB}")
-  message(FATAL_ERROR
-    "ANTLR toolchain not found under ${ANTLR_HOME}.\n"
-    "Install it first (see dev/antlr/README.md) or pass -DANTLR_HOME=<dir>.")
-endif()
-
-# --- Generate the parser from the official grammars --------------------------
-get_filename_component(GRAMMAR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../grammar" ABSOLUTE)
-set(GEN_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_antlr.sh")
+# --- Pre-generated parser from the official grammars -------------------------
+# After editing grammar/*.g4, run scripts/gen_antlr.sh with ANTLR 4.13.2 and
+# commit the updated gen/*.cpp and gen/*.h files alongside the grammar changes.
 set(GEN_DIR    "${CMAKE_CURRENT_SOURCE_DIR}/gen")
 
 set(GENERATED_SOURCES
@@ -45,22 +31,6 @@ set(GENERATED_SOURCES
   "${GEN_DIR}/RxParser.cpp"
   "${GEN_DIR}/RxParserBaseVisitor.cpp"
   "${GEN_DIR}/RxParserVisitor.cpp")
-
-add_custom_command(
-  OUTPUT ${GENERATED_SOURCES}
-         "${GEN_DIR}/RxLexer.h" "${GEN_DIR}/RxParser.h"
-         "${GEN_DIR}/RxParserBaseVisitor.h" "${GEN_DIR}/RxParserVisitor.h"
-  COMMAND "${CMAKE_COMMAND}" -E env
-          "ANTLR4_JAVA=${ANTLR4_JAVA}"
-          "ANTLR4_JAR=${ANTLR4_JAR}"
-          "GRAMMAR_DIR=${GRAMMAR_DIR}"
-          "GEN_DIR=${GEN_DIR}"
-          sh "${GEN_SCRIPT}"
-  DEPENDS "${GRAMMAR_DIR}/Lexer.g4" "${GRAMMAR_DIR}/Parser.g4" "${GEN_SCRIPT}"
-  COMMENT "Generating ANTLR C++ parser (RxLexer/RxParser) into gen/"
-  VERBATIM)
-
-add_custom_target(rxcc_antlr DEPENDS ${GENERATED_SOURCES})
 
 # --- rxcc executable ---------------------------------------------------------
 add_executable(rxcc
@@ -88,13 +58,10 @@ add_executable(rxcc
   src/sema/body/calls/method.cpp
   ${GENERATED_SOURCES})
 
-add_dependencies(rxcc rxcc_antlr)
-
 # ANTLR 运行时头按 SYSTEM 引入：第三方头不按本项目告警纪律维护，
 # -Wall -Wextra 只约束本项目源码。
 target_include_directories(rxcc PRIVATE "${GEN_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_include_directories(rxcc SYSTEM PRIVATE "${ANTLR4_INC}")
-target_link_libraries(rxcc PRIVATE "${ANTLR4_LIB}" Threads::Threads)
+target_link_libraries(rxcc PRIVATE rxcc_antlr_runtime Threads::Threads)
 
 # 本项目源码按 -Wall -Wextra 纪律维护；ANTLR 生成代码不在此列，关掉告警。
 target_compile_options(rxcc PRIVATE -Wall -Wextra)

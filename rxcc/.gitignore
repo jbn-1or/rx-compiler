@@ -1,4 +1,6 @@
 # rxcc build artifacts (regenerable).
 /build/
-/gen/
+/gen/*
+!/gen/*.cpp
+!/gen/*.h
 /src/sema/README.md

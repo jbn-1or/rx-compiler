@@ -19,6 +19,23 @@
 git submodule update --init --recursive
 ```
 
+本 Fork 的语义检查器是 C++20 实现的 `rxcc`。默认 `BUILD` 只构建它；
+运行官方语义测试仅需 CMake、C++20 编译器和 Python 3：
+
+```sh
+make test FILTER=official:semantic
+```
+
+向 OJ 提交时选择 **C / C++** 和 **Semantic**。解析器的生成源码及匹配的
+ANTLR 4.13.2 运行库源码已提交，构建过程无需联网、Cargo、Java 或本地 `dev/antlr`。
+修改 `grammar/*.g4` 后，使用 ANTLR 4.13.2 运行 `sh rxcc/scripts/gen_antlr.sh`，
+并一并提交 `rxcc/gen/*.cpp` 和 `rxcc/gen/*.h`；脚本支持通过
+`ANTLR4_JAVA`、`ANTLR4_JAR` 指定本地生成工具。
+
+IR / codegen / optimization 命令目前仍使用模板的 Rust 参考编译器。
+在安装下述 Rust、REIMU 和 Clang 工具后，使用 `make test BUILD_REFERENCE=true`
+显式构建 Rust 参考库并运行这些本地测试。
+
 编译 REIMU 需要 Python 3、[xmake](https://xmake.io/) 以及支持 C++23 的编译器。在运行测试前，请在项目根目录下单独编译 REIMU：
 
 ```sh

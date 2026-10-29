@@ -1,15 +1,23 @@
-# Test commands: C++ rxcc checks semantics; Rust supplies reference IR/assembly.
+# Test commands: C++ rxcc checks semantics; Rust supplies local reference IR/assembly.
 # See README-EN.md or README-ZH.md for command placeholders and stage contracts.
 
 # Optional: build your compiler once before testing. Leave empty if prebuilt.
 # {runtime} supplies shared assembly to each IR/codegen/optimization execution.
 # Write shared runtime assembly there if your IR/CODEGEN output references it.
-BUILD = CARGO_PROFILE_RELEASE_LTO=true cargo build --quiet --locked --release \
+BUILD = cmake -S rxcc -B rxcc/build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build rxcc/build -j2 && : > {runtime}
+
+# Only local IR/codegen/optimization reference tests need the Rust helper library.
+# Keep the C/C++ judge's default BUILD independent of cargo and rustc.
+# Example: make test BUILD_REFERENCE=true
+BUILD_REFERENCE ?= false
+ifeq ($(BUILD_REFERENCE),true)
+BUILD := CARGO_PROFILE_RELEASE_LTO=true cargo build --quiet --locked --release \
     --manifest-path crates/rx/Cargo.toml \
     --target-dir target/reference \
     --target riscv32im-unknown-none-elf && \
-    cmake -S rxcc -B rxcc/build -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build rxcc/build -j && : > {runtime}
+    $(BUILD)
+endif
 
 # Required for semantic tests: exit 0 to accept {source}, 1 to reject it.
 SEMANTIC = ./rxcc/build/rxcc --stage semantic {source}

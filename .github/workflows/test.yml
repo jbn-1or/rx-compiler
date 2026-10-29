@@ -17,7 +17,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential
+          sudo apt-get install -y build-essential cmake
 
       - name: Install Clang 22 for LLVM IR tests
         run: |
@@ -42,4 +42,4 @@ jobs:
           rustup default 1.95.0
 
       - name: Run tests
-        run: make test
+        run: make test BUILD_REFERENCE=true

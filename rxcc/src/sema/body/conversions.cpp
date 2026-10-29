@@ -18,12 +18,12 @@ PlaceAccessInformation BodyChecker::materialize_place(
 // 对引用或 Box 做一次解引用，返回内层类型及权限：&T / &mut T / Box<T>。
 // 值基表达式先物化为临时 place；其他类型报错并返回 Error。
 ExpressionResult BodyChecker::dereference_place(
-    const SemanticType &base_type,
-    const PlaceAccessInformation &base_place, Span at) {
+    const ExpressionResult &base, Span at) {
+    const auto &base_type = base.type;
     if (base_type.is_error())
         return ExpressionResult::error();
 
-    const PlaceAccessInformation place = materialize_place(base_place);
+    const PlaceAccessInformation place = materialize_place(base.place);
 
     if (base_type.kind == SemanticType::Kind::Reference) {
         if (!base_type.inner)
@@ -35,7 +35,8 @@ ExpressionResult BodyChecker::dereference_place(
             dereferenced.is_mutable = !place.crossed_shared;
             dereferenced.crossed_shared = place.crossed_shared;
         }
-        return ExpressionResult::from_place(*base_type.inner, dereferenced);
+        return ExpressionResult::from_place(*base_type.inner, dereferenced,
+                                             base.diverges);
     }
     // 解引用 Box 保留原 place 的可写性和共享访问限制。
     if (base_type.kind == SemanticType::Kind::Box) {
@@ -44,7 +45,7 @@ ExpressionResult BodyChecker::dereference_place(
         return ExpressionResult::from_place(
             *base_type.inner,
             PlaceAccessInformation{true, place.is_mutable,
-                                   place.crossed_shared});
+                                   place.crossed_shared}, base.diverges);
     }
 
     diagnostics_.error(at, "type " + base_type.toString() +

@@ -21,25 +21,29 @@ BodyChecker::JumpTargetLookup BodyChecker::find_jump_target() const {
 }
 
 // 检查 if/while 的条件：以 bool 为期望类型定型条件表达式，
-// 再在固定目标处核对能否转换成 bool；返回值表示条件是否合法。
-bool BodyChecker::check_bool_condition(const Expression &condition, Span at) {
+// 再在固定目标处核对能否转换成 bool，同时保留条件的发散状态。
+ExpressionResult BodyChecker::check_bool_condition(const Expression &condition,
+                                                    Span at) {
     const auto boolean = SemanticType::bool_();
     const auto result = check_expression(condition, &boolean);
-    return require_coerce(result, boolean, at);
+    if (!require_coerce(result, boolean, at))
+        return ExpressionResult::error();
+    return result;
 }
 
 // 检查 if 表达式：条件必须是 bool；无 else 时整个 if 固定为 ()。
 // 有 else 且外层有期望类型时，两支都按该类型检查并逐支核对；
 // 没有期望类型时两支独立定型，再求公共类型作为 if 的结果。
-// 两支都发散（!）时 if 也不会正常返回，结果仍为 !。
+// 类型与发散分别汇总；条件发散或两支均发散时，整个 if 发散。
 ExpressionResult BodyChecker::check_if(const IfExpression &expression,
                                        const SemanticType *expected) {
     // 缺少条件或 then 分支属于语法/内部错误，直接失败。
     if (!expression.condition || !expression.then)
         return ExpressionResult::error();
     // 条件错误不阻断分支检查，避免漏掉两支里的独立诊断。
-    const bool condition_ok =
+    const auto condition =
         check_bool_condition(*expression.condition, expression.condition->span);
+    const bool condition_ok = !condition.type.is_error();
     if (!expression.else_) {
         // 没有 else：if 的结果只能是 ()，then 分支按 () 期望检查。
         const auto unit = SemanticType::unit();
@@ -47,11 +51,13 @@ ExpressionResult BodyChecker::check_if(const IfExpression &expression,
         const bool then_ok = require_coerce(then_result, unit, expression.then->span);
         if (!condition_ok || !then_ok)
             return ExpressionResult::error();
-        return ExpressionResult::value(unit);
+        return ExpressionResult::value(unit, condition.diverges);
     }
     // 有 else：外层期望类型同时传给两支，固定目标才能逐支核对。
     const auto then_result = check_expression(*expression.then, expected);
     const auto else_result = check_expression(*expression.else_, expected);
+    const bool diverges = condition.diverges ||
+                          (then_result.diverges && else_result.diverges);
     if (expected) {
         // 两支分别检查，不能用短路逻辑跳过后一支的诊断。
         const bool then_ok =
@@ -60,10 +66,10 @@ ExpressionResult BodyChecker::check_if(const IfExpression &expression,
             require_coerce(else_result, *expected, expression.else_->span);
         if (!condition_ok || !then_ok || !else_ok)
             return ExpressionResult::error();
-        // 两支都发散时 if 也不会返回，结果取 ! 而不是期望类型。
+        // 两支类型均为 ! 时，结果仍取 ! 而不是期望类型。
         if (then_result.type.is_never() && else_result.type.is_never())
             return ExpressionResult::value(SemanticType::never());
-        return ExpressionResult::value(*expected);
+        return ExpressionResult::value(*expected, diverges);
     }
     if (!condition_ok || then_result.type.is_error() || else_result.type.is_error())
         return ExpressionResult::error();
@@ -73,7 +79,7 @@ ExpressionResult BodyChecker::check_if(const IfExpression &expression,
         diagnostics_.error(expression.span, "if branches do not have a common type");
         return ExpressionResult::error();
     }
-    return ExpressionResult::value(common);
+    return ExpressionResult::value(common, diverges);
 }
 
 // 检查 while 表达式。条件先放入屏障帧，禁止 break/continue 越过条件
@@ -83,7 +89,7 @@ ExpressionResult BodyChecker::check_while(const WhileExpression &expression) {
         return ExpressionResult::error();
     // 条件里的跳转只能看到屏障帧：即使外层是 loop 也不能从条件跳出去。
     loop_frames_.push_back({LoopFrame::Kind::WhileConditionBarrier, std::nullopt, {}});
-    const bool condition_ok =
+    const auto condition =
         check_bool_condition(*expression.condition, expression.condition->span);
     loop_frames_.pop_back();
 
@@ -95,15 +101,15 @@ ExpressionResult BodyChecker::check_while(const WhileExpression &expression) {
     // 循环体是块，非尾语句后必须能收敛到 ()。
     const bool body_ok = require_coerce(body, unit, expression.body->span);
     // 条件或循环体任一不合法，整体记为 Error。
-    if (!condition_ok || !body_ok)
+    if (condition.type.is_error() || !body_ok)
         return ExpressionResult::error();
     // 即使条件恒为 true，while 的静态类型也固定为 ()。
-    return ExpressionResult::value(unit);
+    return ExpressionResult::value(unit, condition.diverges);
 }
 
 // 检查 loop 表达式。帧里记录外层期望类型（如有），循环体固定按 () 检查；
 // 所有 break 的值先收集到帧里，循环结束后再按固定目标或公共类型定型。
-// 没有 break，或全部 break 值都发散时，loop 本身是发散表达式 !。
+// 无 break 或全部 break 值类型为 ! 时，loop 类型为 !；发散状态单独汇总。
 ExpressionResult BodyChecker::check_loop(const LoopExpression &expression,
                                          const SemanticType *expected) {
     if (!expression.body)
@@ -128,9 +134,13 @@ ExpressionResult BodyChecker::check_loop(const LoopExpression &expression,
     if (std::all_of(frame.break_values.begin(), frame.break_values.end(),
                     [](const auto &value) { return value.type.is_never(); }))
         return ExpressionResult::value(SemanticType::never());
+    // break 操作数也可能有具体类型但发散；循环类型仍按 break 值定型。
+    const bool diverges = std::all_of(
+        frame.break_values.begin(), frame.break_values.end(),
+        [](const auto &value) { return value.diverges; });
     // 有外层固定目标时，break 值已在 check_break 中逐一核对。
     if (frame.expected)
-        return ExpressionResult::value(*frame.expected);
+        return ExpressionResult::value(*frame.expected, diverges);
     // 没有外层期望：用所有 break 值的公共类型给 loop 定型。
     const auto common = compute_least_upper_bound(frame.break_values);
     if (common.is_error()) {
@@ -138,7 +148,7 @@ ExpressionResult BodyChecker::check_loop(const LoopExpression &expression,
             expression.span, "loop break values do not have a common type");
         return ExpressionResult::error();
     }
-    return ExpressionResult::value(common);
+    return ExpressionResult::value(common, diverges);
 }
 
 // 检查 break。先找最近可跳转的循环：不在循环里或被 while 条件屏障挡住

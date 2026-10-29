@@ -1,0 +1,5 @@
+fn wrong() -> i32 {
+    { loop {}; 42 };
+    missing();
+}
+fn main() {}

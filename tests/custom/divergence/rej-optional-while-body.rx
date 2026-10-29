@@ -1,0 +1,4 @@
+fn wrong(flag: bool) -> i32 {
+    while flag { loop {}; };
+}
+fn main() {}

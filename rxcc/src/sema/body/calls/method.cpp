@@ -79,7 +79,7 @@ bool BodyChecker::check_method_receiver(const ExpressionResult &receiver,
     ExpressionResult reached = receiver;
     // 沿保存的路径逐层解引用；任何一层失败都终止权限检查。
     for (std::size_t step = 0; step < method.receiver.dereferences; ++step) {
-        reached = dereference_place(reached.type, reached.place, at);
+        reached = dereference_place(reached, at);
         if (reached.type.is_error())
             return false;
     }
@@ -92,7 +92,7 @@ bool BodyChecker::check_method_receiver(const ExpressionResult &receiver,
                                   declared.is_mut;
     if (reborrow_mutable) {
         // 已有的 &mut U 也要验证重借用；保存引用的绑定本身不必可赋值。
-        reached = dereference_place(reached.type, reached.place, at);
+        reached = dereference_place(reached, at);
         if (reached.type.is_error())
             return false;
     }
@@ -135,11 +135,13 @@ ExpressionResult BodyChecker::check_method_call(const MethodCallExpression &call
     // 接收者和实参都检查，不因前者失败跳过后者，避免丢失诊断。
     const bool receiver_ok =
         check_method_receiver(receiver, *method, call.receiver->span);
-    const bool arguments_ok =
-        check_arguments(method->signature.parameters, call.arguments, call.span);
+    bool arguments_diverge = false;
+    const bool arguments_ok = check_arguments(
+        method->signature.parameters, call.arguments, call.span, arguments_diverge);
     if (!receiver_ok || !arguments_ok)
         return ExpressionResult::error();
-    return ExpressionResult::value(method->signature.return_type);
+    return ExpressionResult::value(method->signature.return_type,
+                                   receiver.diverges || arguments_diverge);
 }
 
 } // namespace rx

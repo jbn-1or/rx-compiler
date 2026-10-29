@@ -1,0 +1,97 @@
+use rx::core::*;
+
+struct S { value: i32 }
+impl S {
+    fn consume(&self, value: i32) {}
+}
+fn consume(value: i32) {}
+
+fn nested_block() -> i32 {
+    { loop {}; 42 };
+}
+fn initializer() -> i32 {
+    let value: i32 = { loop {}; 42 };
+}
+fn unary_operand() -> i32 {
+    -{ loop {}; 42 };
+}
+fn binary_operand() -> i32 {
+    1 + { loop {}; 42 };
+}
+fn cast_operand() -> i32 {
+    ({ loop {}; true }) as i32;
+}
+fn borrowed_operand() -> i32 {
+    &{ loop {}; 42 };
+}
+fn dereferenced_operand() -> i32 {
+    let value = 42;
+    *{ loop {}; &value };
+}
+fn assignment() -> i32 {
+    let mut value = 0;
+    value = { loop {}; 42 };
+}
+fn compound_assignment() -> i32 {
+    let mut value = 0;
+    value += { loop {}; 42 };
+}
+fn call_argument() -> i32 {
+    consume({ loop {}; 42 });
+}
+fn method_argument() -> i32 {
+    let value = S { value: 1 };
+    value.consume({ loop {}; 42 });
+}
+fn method_receiver() -> i32 {
+    { loop {}; S { value: 42 } }.consume(1);
+}
+fn qualified_argument() -> i32 {
+    let value = S { value: 1 };
+    S::consume(&value, { loop {}; 42 });
+}
+fn struct_field() -> i32 {
+    S { value: { loop {}; 42 } };
+}
+fn projected_field() -> i32 {
+    { loop {}; S { value: 42 } }.value;
+}
+fn autodereferenced_field() -> i32 {
+    let value = S { value: 42 };
+    { loop {}; &value }.value;
+}
+fn inferred_array() -> i32 {
+    [{ loop {}; 42 }];
+}
+fn annotated_array() -> i32 {
+    let value: [i32; 1] = [{ loop {}; 42 }];
+}
+fn repeated_array() -> i32 {
+    [{ loop {}; 42 }; 1];
+}
+fn annotated_repeated_array() -> i32 {
+    let value: [i32; 1] = [{ loop {}; 42 }; 1];
+}
+fn indexed_base() -> i32 {
+    ({ loop {}; [42] })[0];
+}
+fn indexed_operand() -> i32 {
+    let value = [42];
+    value[{ loop {}; 0usize }];
+}
+fn both_if_branches(flag: bool) -> i32 {
+    if flag { loop {}; 42 } else { loop {}; 43 };
+}
+fn if_condition() -> i32 {
+    if { loop {}; true } {};
+}
+fn while_condition() -> i32 {
+    while { loop {}; false } {};
+}
+fn loop_break_operand() -> i32 {
+    loop { break { loop {}; 42 }; };
+}
+fn required_logical_operand() -> i32 {
+    ({ loop {}; true }) && false;
+}
+fn main() {}

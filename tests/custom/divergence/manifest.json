@@ -1,0 +1,56 @@
+[
+  {
+    "source": "acc-typed-diverging-subexpressions.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "Typed divergent blocks propagate through required subexpressions without changing their tail types."
+  },
+  {
+    "source": "rej-unreachable-tail-type.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "An unreachable tail still determines the block type and must match its expected type."
+  },
+  {
+    "source": "rej-unreachable-name.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "Divergence does not skip name resolution in unreachable statements."
+  },
+  {
+    "source": "rej-optional-logical-operand.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "A divergent right operand of a short-circuit operator is not required on every path."
+  },
+  {
+    "source": "rej-optional-if-branch.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "A single divergent if branch does not make an if statement diverge."
+  },
+  {
+    "source": "rej-optional-while-body.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "A while body may not run, even when the body itself diverges."
+  },
+  {
+    "source": "rej-unreachable-break.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "Even an unreachable break with a normal operand prevents loop divergence under the syntactic rule."
+  },
+  {
+    "source": "rej-interprocedural-divergence.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "A function call keeps its declared result type; divergence is determined locally in each body."
+  },
+  {
+    "source": "rej-unreachable-loop-tail.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "A loop body must have a unit-compatible tail even when that tail is unreachable."
+  }
+]

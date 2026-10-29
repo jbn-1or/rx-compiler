@@ -31,9 +31,12 @@ CallableSignature function_signature(const FunctionSymbol &function) {
 // 按参数表检查实参：先核对数量，再逐个以对应参数类型为期望定型并转换。
 // 数量不符时仍检查已有实参，保留其中独立的名字/类型诊断；
 // 多出的实参没有对应参数类型，只独立定型。
+// 实参都是必经子表达式，另行汇总它们的发散状态。
 bool BodyChecker::check_arguments(
     const std::vector<SemanticType> &parameter_types,
-    const std::vector<std::shared_ptr<Expression>> &arguments, Span at) {
+    const std::vector<std::shared_ptr<Expression>> &arguments, Span at,
+    bool &diverges) {
+    diverges = false;
     bool ok = parameter_types.size() == arguments.size();
     // 数量不匹配只报一次，但后续仍逐项检查实参。
     if (!ok) {
@@ -54,6 +57,7 @@ bool BodyChecker::check_arguments(
         const SemanticType *expected = index < parameter_types.size()
                                            ? &parameter_types[index] : nullptr;
         const auto argument = check_expression(*arguments[index], expected);
+        diverges = diverges || argument.diverges;
         // 有对应参数时按固定目标核对；多出的实参只要求自身无错。
         const bool argument_ok = expected
                                      ? require_coerce(argument, *expected,
@@ -86,10 +90,12 @@ ExpressionResult BodyChecker::check_call(const CallExpression &call) {
         return check_ordinary_call(*path, call);
     // 多段路径：先解析 S::method 的签名，再按显式参数表检查实参。
     const auto signature = resolve_qualified_callee(*path);
+    bool diverges = false;
     if (!signature ||
-        !check_arguments(signature->explicit_parameters(), call.arguments, call.span))
+        !check_arguments(signature->explicit_parameters(), call.arguments, call.span,
+                         diverges))
         return ExpressionResult::error();
-    return ExpressionResult::value(signature->return_type);
+    return ExpressionResult::value(signature->return_type, diverges);
 }
 
 // 检查单段调用：名字只能指向普通函数或内置函数。
@@ -136,12 +142,14 @@ ExpressionResult BodyChecker::check_ordinary_call(const PathExpression &path,
     }
     // 正常的顶层函数和内置 I/O 没有接收者，直接使用原参数表。
     // 收集阶段已诊断的非法顶层接收者仍沿用显式参数表做错误恢复。
+    bool diverges = false;
     const bool arguments_ok = signature->receiver
-        ? check_arguments(signature->explicit_parameters(), call.arguments, call.span)
-        : check_arguments(signature->parameters, call.arguments, call.span);
+        ? check_arguments(signature->explicit_parameters(), call.arguments, call.span,
+                          diverges)
+        : check_arguments(signature->parameters, call.arguments, call.span, diverges);
     if (!arguments_ok)
         return ExpressionResult::error();
-    return ExpressionResult::value(signature->return_type);
+    return ExpressionResult::value(signature->return_type, diverges);
 }
 
 // 解析 S::method 这类显式关联调用的签名。路径必须恰好两段：

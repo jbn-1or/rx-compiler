@@ -40,7 +40,7 @@ private:
     bool current_has_self_ = false;
 
     // 函数体检查的统一入口。expected == nullptr 表示没有期望类型；
-    // 返回表达式按自身规则得到的类型与 place，不在这里做外层强制转换。
+    // 返回表达式按自身规则得到的类型、place 和发散状态，不做外层强制转换。
     ExpressionResult check_expression(const Expression &expression,
                                       const SemanticType *expected);
     ExpressionResult check_block(const BlockExpression &block,
@@ -49,7 +49,7 @@ private:
     // 函数入口、语句、作用域和局部名字。
     // 一条非尾语句的检查摘要，供 check_block 决定无尾块的类型。
     struct StatementResult {
-        bool diverges = false;  // 语句中的表达式结果为 !，用于判断无尾块是否发散。
+        bool diverges = false;  // 表达式或初始化器发散，用于判断无尾块是否发散。
         bool has_error = false; // 表达式失败或固定目标不兼容；不汇总嵌套的全部诊断。
     };
     void enter_function(const FunctionSymbol &fn);
@@ -85,7 +85,8 @@ private:
                                const ResolvedMethod &method, Span at);
     bool check_arguments(
         const std::vector<SemanticType> &parameter_types,
-        const std::vector<std::shared_ptr<Expression>> &arguments, Span at);
+        const std::vector<std::shared_ptr<Expression>> &arguments, Span at,
+        bool &diverges);
 
     // operators.cpp：运算、赋值、借用、解引用与 cast。
     ExpressionResult check_binary(const BinaryExpression &expression);
@@ -101,7 +102,7 @@ private:
                                  const SemanticType *expected);
     ExpressionResult check_index(const IndexExpression &expression);
     // 正常路径和错误恢复共用；每条路径只检查一次下标表达式。
-    bool check_index_operand(const Expression &expression);
+    ExpressionResult check_index_operand(const Expression &expression);
 
     // control_flow.cpp：if、loop、while 和跳转。
     ExpressionResult check_if(const IfExpression &expression,
@@ -111,7 +112,7 @@ private:
     ExpressionResult check_while(const WhileExpression &expression);
     ExpressionResult check_break(const BreakExpression &expression);
     ExpressionResult check_continue(const ContinueExpression &expression);
-    bool check_bool_condition(const Expression &condition, Span at);
+    ExpressionResult check_bool_condition(const Expression &condition, Span at);
 
     enum class JumpTargetStatus { Found, BlockedByBarrier, NotFound };
     struct JumpTargetLookup {
@@ -123,9 +124,7 @@ private:
     // conversions.cpp：place 物化与一次内置解引用。
     PlaceAccessInformation
     materialize_place(const PlaceAccessInformation &place) const;
-    ExpressionResult dereference_place(const SemanticType &base_type,
-                                       const PlaceAccessInformation &base_place,
-                                       Span at);
+    ExpressionResult dereference_place(const ExpressionResult &base, Span at);
 
     // conversions.cpp：一对一强制转换、固定目标报错与多分支 LUB。
     // 纯兼容性查询，输入不得为 Error；错误恢复由 require_coerce / LUB 处理。

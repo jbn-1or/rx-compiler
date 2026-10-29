@@ -28,7 +28,7 @@ ExpressionResult BodyChecker::check_block(const BlockExpression &block,
     for (const auto &statement : block.statements) {
         // 先检查初始化器，再登记绑定
         const auto result = check_statement(*statement);
-        // 汇总各个语句是否有错误，是否是！
+        // 汇总语句的错误与发散状态，发散语句不一定具有 ! 类型。
         diverges = diverges || result.diverges;
         has_error = has_error || result.has_error;
     }
@@ -37,7 +37,7 @@ ExpressionResult BodyChecker::check_block(const BlockExpression &block,
     if (block.tail) {
         const auto tail = check_expression(*block.tail, expected);
         // 块产生值，不继承尾表达式的 place 权限。
-        result = ExpressionResult::value(tail.type);
+        result = ExpressionResult::value(tail.type, diverges || tail.diverges);
     } else if (diverges) {  // 无 tail → 根据语句摘要得到 Never、Error 或 Unit
         result = ExpressionResult::value(SemanticType::never());
     } else if (has_error) {
@@ -66,7 +66,7 @@ BodyChecker::StatementResult BodyChecker::check_statement(const Statement &state
         // 初始化器先查旧绑定，再登记新绑定，允许 let x = x 式遮蔽。
         declare_local(let->name, Binding{annotation ? *annotation : initializer.type,
                                          let->is_mut});
-        return {initializer.type.is_never(), !ok};
+        return {initializer.diverges, !ok};
     }
     // 表达式语句
     if (const auto *expression =
@@ -78,7 +78,7 @@ BodyChecker::StatementResult BodyChecker::check_statement(const Statement &state
                             ? !value.type.is_error()
                             : require_coerce(value, SemanticType::unit(),
                                              expression->expression->span);
-        return {value.type.is_never(), !ok};
+        return {value.diverges, !ok};
     }
     diagnostics_.error(statement.span, "internal error: unrecognized statement node");
     return {false, true};

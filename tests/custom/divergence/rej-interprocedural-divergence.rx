@@ -1,0 +1,5 @@
+fn forever() -> i32 { loop {} }
+fn wrong() -> i32 {
+    forever();
+}
+fn main() {}

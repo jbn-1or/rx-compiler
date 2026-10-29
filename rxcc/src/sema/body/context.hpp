@@ -20,23 +20,28 @@ struct PlaceAccessInformation {
     bool crossed_shared = false; // 访问路径是否经过共享引用或不可变 Vec 索引
 };
 
-// 一次表达式检查的结果：表达式类型 + place 访问信息。
+// 一次表达式检查的结果：表达式类型、place 访问信息及是否发散。
 // 例：`p`（p: &mut i32）→ {type=&mut i32, place={true,false,false}}；
 //     `*p` → {type=i32, place={true,true,false}}。
 struct ExpressionResult {
     SemanticType type;
     PlaceAccessInformation place;
+    // 发散不等于类型为 !：{ loop {}; 42 } 的类型为 i32，但不会正常完成。
+    bool diverges = false;
 
-    static ExpressionResult value(SemanticType type) {
-        return {std::move(type), {}};
+    static ExpressionResult value(SemanticType type, bool diverges = false) {
+        diverges = diverges || type.is_never();
+        return {std::move(type), {}, diverges};
     }
     // 只传播已经记录的错误；发现新问题的检查器必须先记录诊断。
     static ExpressionResult error() {
         return value(SemanticType::error());
     }
     static ExpressionResult from_place(SemanticType type,
-                                       PlaceAccessInformation access) {
-        return {std::move(type), access};
+                                       PlaceAccessInformation access,
+                                       bool diverges = false) {
+        diverges = diverges || type.is_never();
+        return {std::move(type), access, diverges};
     }
 };
 

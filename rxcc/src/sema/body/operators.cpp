@@ -145,7 +145,8 @@ BodyChecker::check_binary(const BinaryExpression &expression) {
                     "arithmetic operands must have the same integer type");
                 return ExpressionResult::error();
             }
-            return ExpressionResult::value(*left_base);
+            return ExpressionResult::value(
+                *left_base, left.diverges || right.diverges);
         }
 
         case BinaryOperator::BitwiseAnd:
@@ -160,7 +161,8 @@ BodyChecker::check_binary(const BinaryExpression &expression) {
                     "bitwise operands must have the same integer or bool type");
                 return ExpressionResult::error();
             }
-            return ExpressionResult::value(*left_base);
+            return ExpressionResult::value(
+                *left_base, left.diverges || right.diverges);
         }
 
         case BinaryOperator::ShiftLeft:
@@ -174,7 +176,8 @@ BodyChecker::check_binary(const BinaryExpression &expression) {
                                    "shift operands must be integers");
                 return ExpressionResult::error();
             }
-            return ExpressionResult::value(*left_base);
+            return ExpressionResult::value(
+                *left_base, left.diverges || right.diverges);
         }
 
         case BinaryOperator::Equal:
@@ -192,7 +195,8 @@ BodyChecker::check_binary(const BinaryExpression &expression) {
                     "equality requires PartialEq on the operand type");
                 return ExpressionResult::error();
             }
-            return ExpressionResult::value(SemanticType::bool_());
+            return ExpressionResult::value(SemanticType::bool_(),
+                                           left.diverges || right.diverges);
         }
 
         case BinaryOperator::LessThan:
@@ -210,7 +214,8 @@ BodyChecker::check_binary(const BinaryExpression &expression) {
                     "ordering operands must be matching scalars or references");
                 return ExpressionResult::error();
             }
-            return ExpressionResult::value(SemanticType::bool_());
+            return ExpressionResult::value(SemanticType::bool_(),
+                                           left.diverges || right.diverges);
         }
 
         case BinaryOperator::LogicalAnd:
@@ -222,7 +227,8 @@ BodyChecker::check_binary(const BinaryExpression &expression) {
                     "logical operators require bool operands");
                 return ExpressionResult::error();
             }
-            return ExpressionResult::value(SemanticType::bool_());
+            // 右侧按短路规则求值，不是每条路径上的必经操作数。
+            return ExpressionResult::value(SemanticType::bool_(), left.diverges);
         }
     }
 
@@ -253,7 +259,7 @@ ExpressionResult BodyChecker::check_unary(const UnaryExpression &expression) {
                     "unary minus requires a signed integer");
                 return ExpressionResult::error();
             }
-            return ExpressionResult::value(*base);
+            return ExpressionResult::value(*base, operand.diverges);
         }
 
         case UnaryOperator::Not: {
@@ -264,12 +270,11 @@ ExpressionResult BodyChecker::check_unary(const UnaryExpression &expression) {
                     "logical not requires an integer or bool");
                 return ExpressionResult::error();
             }
-            return ExpressionResult::value(*base);
+            return ExpressionResult::value(*base, operand.diverges);
         }
 
         case UnaryOperator::Dereference:
-            return dereference_place(operand.type, operand.place,
-                                     expression.span);
+            return dereference_place(operand, expression.span);
 
         case UnaryOperator::Borrow:
         case UnaryOperator::MutableBorrow: {
@@ -293,7 +298,7 @@ ExpressionResult BodyChecker::check_unary(const UnaryExpression &expression) {
             }
 
             return ExpressionResult::value(
-                SemanticType::reference(mutable_borrow, operand.type));
+                SemanticType::reference(mutable_borrow, operand.type), operand.diverges);
         }
     }
 
@@ -338,7 +343,8 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
             check_expression(*expression.right, &left.type);
         if (!require_coerce(right, left.type, expression.right->span))
             return ExpressionResult::error();
-        return ExpressionResult::value(SemanticType::unit());
+        return ExpressionResult::value(SemanticType::unit(),
+                                        left.diverges || right.diverges);
     }
 
     // 复合赋值
@@ -393,7 +399,8 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
         return ExpressionResult::error();
     }
 
-    return ExpressionResult::value(SemanticType::unit());
+    return ExpressionResult::value(SemanticType::unit(),
+                                   left.diverges || right.diverges);
 }
 
 // 检查 as 显式转换：只允许整数→整数和 bool→整数。
@@ -434,7 +441,7 @@ ExpressionResult BodyChecker::check_cast(const CastExpression &expression) {
 
     if (!target_is_integer || !operand_is_scalar)
         return ExpressionResult::error();
-    return ExpressionResult::value(target);
+    return ExpressionResult::value(target, operand.diverges);
 }
 
 } // namespace rx

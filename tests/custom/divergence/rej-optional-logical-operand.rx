@@ -1,0 +1,4 @@
+fn wrong(flag: bool) -> i32 {
+    flag && { loop {}; true };
+}
+fn main() {}

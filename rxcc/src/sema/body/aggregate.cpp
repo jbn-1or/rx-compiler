@@ -65,6 +65,7 @@ ExpressionResult BodyChecker::check_struct_expression(
     // 查 StructSymbol::field_types，检查字段是否存在、重复或缺失 
     // 每个字段值 → check_expression(value, &field_type) → require_coerce
     bool ok = true;
+    bool diverges = false;
     std::unordered_set<std::string> initialized;
     for (const StructExpressionField &field : expression.fields) {
         const auto type = structure->field_types.find(field.name);
@@ -96,6 +97,7 @@ ExpressionResult BodyChecker::check_struct_expression(
 
         const ExpressionResult value =
             check_expression(*field.value, &type->second);
+        diverges = diverges || value.diverges;
         if (!require_coerce(value, type->second, field.value->span))
             ok = false;
     }
@@ -113,7 +115,7 @@ ExpressionResult BodyChecker::check_struct_expression(
     // 有任何一个字段不对，这次结构体写法就没有正常结果。
     if (!ok)
         return ExpressionResult::error();
-    return ExpressionResult::value(SemanticType::struct_(structure));
+    return ExpressionResult::value(SemanticType::struct_(structure), diverges);
 }
 
 // 检查 `对象.字段`
@@ -137,7 +139,7 @@ ExpressionResult BodyChecker::check_field(const FieldExpression &expression) {
         // 包装层里没有写清里面是什么类型，结构不完整。
         if (!base.type.inner)
             return ExpressionResult::error();
-        base = dereference_place(base.type, base.place, expression.base->span);
+        base = dereference_place(base, expression.base->span);
         // 这一层打不开，后面的字段也就不存在了。
         if (base.type.is_error())
             return ExpressionResult::error();
@@ -163,7 +165,7 @@ ExpressionResult BodyChecker::check_field(const FieldExpression &expression) {
     if (field->second.is_error())
         return ExpressionResult::error();
 
-    return ExpressionResult::from_place(field->second, base.place);
+    return ExpressionResult::from_place(field->second, base.place, base.diverges);
 }
 
 // 检查 `[a, b, c]`和 `[值; 次数]`
@@ -269,15 +271,16 @@ BodyChecker::check_array(const ArrayExpression &expression,
             return ExpressionResult::error();
         // 有固定目标时，结果就是外面要求的那个数组类型。
         if (has_fixed_target)
-            return ExpressionResult::value(*expected);
+            return ExpressionResult::value(*expected, element.diverges);
         // 没有固定目标时，元素类型就是重复值本身的类型。
         return ExpressionResult::value(
-            SemanticType::array(element.type, *count_value));
+            SemanticType::array(element.type, *count_value), element.diverges);
     }
 
     // 外面要求固定数组：每个元素都按同一个元素类型检查，最后核对数量。
     if (has_fixed_target) {
         bool ok = true;
+        bool diverges = false;
         // 元素类型本身已经出错，后面不再重复报错。
         if (expected_element->is_error())
             ok = false;
@@ -291,6 +294,7 @@ BodyChecker::check_array(const ArrayExpression &expression,
             }
             const ExpressionResult value =
                 check_expression(*element, expected_element);
+            diverges = diverges || value.diverges;
             if (!require_coerce(value, *expected_element, element->span))
                 ok = false;
         }
@@ -303,13 +307,14 @@ BodyChecker::check_array(const ArrayExpression &expression,
         }
         if (!ok)
             return ExpressionResult::error();
-        return ExpressionResult::value(*expected);
+        return ExpressionResult::value(*expected, diverges);
     }
 
     // 外面没有要求数组类型：每个元素先各看各的，再看它们能不能用同一个类型装下。
     std::vector<ExpressionResult> elements;
     elements.reserve(expression.elements.size());
     bool ok = true;
+    bool diverges = false;
     for (const auto &element : expression.elements) {
         // 数组里少了一个元素表达式。
         if (!element) {
@@ -319,6 +324,7 @@ BodyChecker::check_array(const ArrayExpression &expression,
             continue;
         }
         const ExpressionResult value = check_expression(*element, nullptr);
+        diverges = diverges || value.diverges;
         // 这个元素本身已经出错。
         if (value.type.is_error())
             ok = false;
@@ -336,19 +342,21 @@ BodyChecker::check_array(const ArrayExpression &expression,
         return ExpressionResult::error();
     }
     return ExpressionResult::value(
-        SemanticType::array(element_type, elements.size()));
+        SemanticType::array(element_type, elements.size()), diverges);
 }
 
 // 下标具有 usize 期望；Never 下标不在规范要求支持的执行范围内。
-bool BodyChecker::check_index_operand(const Expression &expression) {
+ExpressionResult BodyChecker::check_index_operand(const Expression &expression) {
     const auto usize = usize_type();
     const auto index = check_expression(expression, &usize);
     if (index.type.is_never()) {
         diagnostics_.error(expression.span,
                            "a diverging index expression is not supported");
-        return false;
+        return ExpressionResult::error();
     }
-    return require_coerce(index, usize, expression.span);
+    if (!require_coerce(index, usize, expression.span))
+        return ExpressionResult::error();
+    return index;
 }
 
 // 检查 `容器[下标]`
@@ -380,7 +388,7 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
         // 包装层里没有写清里面是什么类型，结构不完整。
         if (!base.type.inner)
             return check_index_after_invalid_base();
-        base = dereference_place(base.type, base.place, expression.base->span);
+        base = dereference_place(base, expression.base->span);
         // 这一层打不开，后面的下标访问也就不成立。
         if (base.type.is_error())
             return check_index_after_invalid_base();
@@ -397,7 +405,8 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
     if (!base.type.inner)
         return check_index_after_invalid_base();
 
-    if (!check_index_operand(*expression.index))
+    const auto index = check_index_operand(*expression.index);
+    if (index.type.is_error())
         return ExpressionResult::error();
 
     PlaceAccessInformation element_place;
@@ -412,7 +421,8 @@ ExpressionResult BodyChecker::check_index(const IndexExpression &expression) {
         element_place = PlaceAccessInformation{true, false, true};
     }
 
-    return ExpressionResult::from_place(*base.type.inner, element_place);
+    return ExpressionResult::from_place(*base.type.inner, element_place,
+                                        base.diverges || index.diverges);
 }
 
 } // namespace rx

@@ -1,4 +1,4 @@
-// 先解析调用签名，再按签名检查实参；调用位置的期望不参与签名选择。
+// 普通调用与显式 S::method(...) 调用，负责解析签名、检查实参
 #include "sema/body/checker.hpp"
 #include "sema/sema.hpp"
 

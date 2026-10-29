@@ -1,4 +1,5 @@
 // 实现常量路径解析、递归求值、声明类型检查及求值结果缓存。
+// 主要用于evaluate_all_constants
 
 #include "sema/sema.hpp"
 #include "sema/type_utils.hpp"

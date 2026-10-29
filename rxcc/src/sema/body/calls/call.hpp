@@ -1,4 +1,3 @@
-// 调用签名是普通、关联和点方法调用共享的规则来源。
 #pragma once
 
 #include "sema/type.hpp"

@@ -1,4 +1,4 @@
-// 候选选择只看类型和声明顺序；选中后再沿保存的路径检查接收者权限。
+// 点方法调用，按 T/&T/&mut T 候选顺序选方法并检查接收者权限（check_method_call）
 #include "sema/body/checker.hpp"
 #include "sema/sema.hpp"
 #include <array>

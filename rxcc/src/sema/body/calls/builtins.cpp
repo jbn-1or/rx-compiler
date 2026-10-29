@@ -1,4 +1,4 @@
-// 内置签名不执行名称解析或表达式检查，显式调用与点调用共用这里的规则。
+// 内置函数、Box::new/Vec::new 构造器和内置方法的签名。
 #include "sema/body/calls/call.hpp"
 
 namespace rx {

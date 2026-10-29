@@ -1,6 +1,7 @@
 // 全局声明定型与验证：字段/函数签名 → main 返回类型 → 布局 → derive。
 // run 按这个顺序调用；常量求值和语法类型解析分别见同目录的专用文件。
 // has_trait 同时作为函数体中运算、数组重复和 Clone 查找的共享查询。
+// 主要用于resolve_declared_types，check_main_return_type，check_inline_layout_cycles，check_derives
 
 #include "sema/sema.hpp"
 #include <cassert>

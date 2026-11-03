@@ -1,5 +1,5 @@
 // 全局声明定型与验证：字段/函数签名 → main 返回类型 → 布局 → derive。
-// run 按这个顺序调用；常量求值和语法类型解析分别见同目录的专用文件。
+// analyze 按这个顺序调用；常量求值和语法类型解析分别见同目录的专用文件。
 // has_trait 同时作为函数体中运算、数组重复和 Clone 查找的共享查询。
 // 主要用于resolve_declared_types，check_main_return_type，check_inline_layout_cycles，check_derives
 
@@ -13,7 +13,7 @@ namespace rx {
 // 单个字段/签名解析失败时保留 Error，不中断其余项。
 void SemanticAnalyzer::resolve_declared_types() {
     // 对每个structsysymbol
-    for (auto &sym : structs_) {
+    for (auto &sym : result_.structs) {
         // 处理 struct 定义中的字段
         for (const auto &field : sym->fields) {
             sym->field_types[field.name] =
@@ -22,7 +22,7 @@ void SemanticAnalyzer::resolve_declared_types() {
         }
     }
     // 对每个FunctionSymbol
-    for (auto &sym : functions_)
+    for (auto &sym : result_.functions)
         resolve_function_signature(*sym, sym->owner);
 }
 
@@ -80,7 +80,7 @@ void SemanticAnalyzer::check_main_return_type() {
 // 从每个结构体出发做三色 DFS，共享同一张颜色表。
 void SemanticAnalyzer::check_inline_layout_cycles() {
     LayoutVisitStates states;
-    for (const auto &sym : structs_)
+    for (const auto &sym : result_.structs)
         visit_layout(sym.get(), states);
 }
 
@@ -208,7 +208,7 @@ bool SemanticAnalyzer::has_trait_impl(
 
 // 逐个结构体、逐个显式 derive 检查配套要求和字段能力。
 void SemanticAnalyzer::check_derives() {
-    for (auto &sym : structs_) {
+    for (auto &sym : result_.structs) {
         for (Derive trait : sym->derives)
             check_one_derive(*sym, trait);
     }

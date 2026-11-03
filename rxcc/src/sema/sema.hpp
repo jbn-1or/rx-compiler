@@ -1,4 +1,4 @@
-// 声明语义分析器，持有全局名字表、符号对象及各声明检查阶段的接口。
+// 声明语义分析器，构建语义结果并持有分析期间的全局名字表。
 // 函数体检查通过 BodyChecker 复用类型解析、常量求值和能力查询等服务。
 // declarations/ 实现声明检查；body/ 实现函数体递归检查。阅读路线见 README.md。
 
@@ -6,10 +6,12 @@
 
 #include "ast/ast.hpp"
 #include "diagnostics.hpp"
+#include "sema/result.hpp"
 #include "sema/symbol.hpp"
 #include "sema/type.hpp"
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -21,7 +23,7 @@ namespace rx {
 class BodyChecker;
 
 // SEMANTIC 阶段分析器。
-// 持有 crate 级符号和声明检查服务；sema.cpp 编排各检查阶段。
+// 构建拥有 crate 级符号的 SemanticResult；sema.cpp 编排各检查阶段。
 // 函数体上下文和表达式检查由 BodyChecker 负责；错误进入同一诊断收集器。
 // 例：输入 `struct S { x: i32 } fn main() {}`
 //     → type_namespace 里有 "S"，function_constant_namespace 里有 "main"（以及三个内置 I/O 名）。
@@ -32,8 +34,9 @@ public:
     explicit SemanticAnalyzer(Diagnostics &diagnostics)
         : diagnostics_(diagnostics) {}
 
-    // 对整个 crate 做语义检查。
-    void run(const Crate &crate);
+    // 对整个 crate 做语义检查；有诊断时不交付不完整结果。
+    // 返回结果不依赖分析器，但其中借用的 AST 节点要求 crate 继续存活。
+    [[nodiscard]] std::optional<SemanticResult> analyze(const Crate &crate);
 
 private:
     // 函数体检查复用本分析器的名字表、类型解析和 trait 查询。
@@ -47,17 +50,10 @@ private:
     // 值名 → 档案，例："main" → FunctionSymbol；"MAX" → ConstantSymbol；"get_i32" → Builtin Symbol
     std::unordered_map<std::string, Symbol *> function_constant_namespace;
 
-    // —— 所有权：表里只存裸指针，这些容器保证对象在分析期间不被释放 ——
-    // 已登记的结构体符号；受保护名称或重名的声明不会登记。
-    std::vector<std::unique_ptr<StructSymbol>> structs_;
-    // 所有函数/方法档案，例：main、S::get 各一个
-    std::vector<std::unique_ptr<FunctionSymbol>> functions_;
-    // 所有常量/关联常量档案，例：MAX、S::K 各一个
-    std::vector<std::unique_ptr<ConstantSymbol>> constants_;
-    // 内置 I/O 档案，例：get_i32/print_i32/println_i32 三条
-    std::vector<std::unique_ptr<Symbol>> builtins_;
+    // 名字表只借用符号；成功后将拥有符号的结果整体移交调用方。
+    SemanticResult result_;
 
-    // run 的首尾阶段；中间阶段直接调用下面的定型与验证接口。
+    // analyze 的首尾阶段；中间阶段直接调用下面的定型与验证接口。
     void collect_declarations(const Crate &crate);
     void check_function_bodies();
 

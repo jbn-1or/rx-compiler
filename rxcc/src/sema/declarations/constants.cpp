@@ -23,9 +23,9 @@ bool is_signed_int(const SemanticType &type) {
 
 } // namespace
 
-// 驱动所有常量求值：constants_ 同时包含顶层常量和 impl 关联常量
+// 驱动所有常量求值：结果同时持有顶层常量和 impl 关联常量
 void SemanticAnalyzer::evaluate_all_constants() {
-    for (auto &sym : constants_)
+    for (auto &sym : result_.constants)
         evaluate_constant(*sym);
 }
 

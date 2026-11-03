@@ -23,11 +23,15 @@ dev/
 documents/
 .kilo/
 chats/
+/AGENTS.md
 
 # Local source backups
 /rxcc/backup/
 
 rxcc/tests/*
+!/rxcc/tests/semantic_invariants.cpp
+!/rxcc/tests/ir/
+!/rxcc/tests/run_ir.py
 /tests
 
 .clang-format

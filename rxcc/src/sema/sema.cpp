@@ -1,11 +1,14 @@
-// 语义检查总入口。先读 run 的阶段顺序，再进入 declarations/ 和 body/。
+// 语义检查总入口。先读 analyze 的阶段顺序，再进入 declarations/ 和 body/。
 
 #include "sema/body/checker.hpp"
 #include "sema/sema.hpp"
 
 namespace rx {
 
-void SemanticAnalyzer::run(const Crate &crate) {
+std::optional<SemanticResult> SemanticAnalyzer::analyze(const Crate &crate) {
+    type_namespace.clear();
+    function_constant_namespace.clear();
+    result_ = SemanticResult{};
     // 预登记内置 I/O；先收集全部结构体，再收集常量、函数与 impl；
     // 建立全局名字表和关联项索引
     collect_declarations(crate);
@@ -23,12 +26,15 @@ void SemanticAnalyzer::run(const Crate &crate) {
     check_derives();
     // 遍历全部已登记函数，为每个函数创建独立的 BodyChecker
     check_function_bodies();
+    if (!diagnostics_.ok())
+        return std::nullopt;
+    return std::move(result_);
 }
 
 void SemanticAnalyzer::check_function_bodies() {
     // 每个函数使用独立的 BodyChecker：局部作用域和循环状态不跨函数共享。
-    // 未调用、方法和关联函数也在 functions_ 中，一并检查。
-    for (const auto &fn : functions_) {
+    // 未调用、方法和关联函数也在结果的 functions 中，一并检查。
+    for (const auto &fn : result_.functions) {
         BodyChecker checker(*this);
         checker.check_function(*fn);
     }

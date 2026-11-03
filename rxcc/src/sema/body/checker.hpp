@@ -18,7 +18,7 @@ namespace rx {
 class SemanticAnalyzer;
 struct FunctionSymbol;
 
-// 单个函数的检查上下文；符号和定型服务由 SemanticAnalyzer 持有。
+// 单个函数的检查上下文；通过 SemanticAnalyzer 访问结果中的符号和定型服务。
 // 保存局部作用域、当前函数/结构体和循环栈；全局信息通过 analyzer_ 访问。
 class BodyChecker {
 public:

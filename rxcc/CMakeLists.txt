@@ -32,9 +32,8 @@ set(GENERATED_SOURCES
   "${GEN_DIR}/RxParserBaseVisitor.cpp"
   "${GEN_DIR}/RxParserVisitor.cpp")
 
-# --- rxcc executable ---------------------------------------------------------
-add_executable(rxcc
-  src/main.cpp
+# --- Frontend shared by the driver and semantic invariant tests ---------------
+add_library(rxcc_frontend STATIC
   src/ast/ast.cpp
   src/ast/dump.cpp
   src/ast_builder.cpp
@@ -60,9 +59,21 @@ add_executable(rxcc
 
 # ANTLR 运行时头按 SYSTEM 引入：第三方头不按本项目告警纪律维护，
 # -Wall -Wextra 只约束本项目源码。
-target_include_directories(rxcc PRIVATE "${GEN_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(rxcc PRIVATE rxcc_antlr_runtime Threads::Threads)
+target_include_directories(rxcc_frontend PUBLIC "${GEN_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(rxcc_frontend PUBLIC rxcc_antlr_runtime Threads::Threads)
 
 # 本项目源码按 -Wall -Wextra 纪律维护；ANTLR 生成代码不在此列，关掉告警。
-target_compile_options(rxcc PRIVATE -Wall -Wextra)
+target_compile_options(rxcc_frontend PRIVATE -Wall -Wextra)
 set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
+
+add_executable(rxcc src/main.cpp)
+target_link_libraries(rxcc PRIVATE rxcc_frontend)
+target_compile_options(rxcc PRIVATE -Wall -Wextra)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(semantic_invariants tests/semantic_invariants.cpp)
+  target_link_libraries(semantic_invariants PRIVATE rxcc_frontend)
+  target_compile_options(semantic_invariants PRIVATE -Wall -Wextra)
+  add_test(NAME semantic_invariants COMMAND semantic_invariants)
+endif()

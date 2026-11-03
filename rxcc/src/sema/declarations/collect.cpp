@@ -38,7 +38,7 @@ void SemanticAnalyzer::collect_declarations(const Crate &crate) {
 }
 
 // 为 get_i32、print_i32、println_i32 创建 Builtin符号，放入值名字表；
-// 这些符号由 builtins_ 持有。这里登记名字，调用时使用的参数和返回类型
+// 这些符号由 result_.builtins 持有。这里登记名字，调用时使用的参数和返回类型
 // 由 body/calls/builtins.cpp 中的 builtin_signature 提供。
 void SemanticAnalyzer::initialize_builtins() {
     for (const char *n : {"get_i32", "print_i32", "println_i32"}) {
@@ -46,12 +46,12 @@ void SemanticAnalyzer::initialize_builtins() {
         sym->kind = Symbol::Kind::Builtin;
         sym->name = n;
         function_constant_namespace[n] = sym.get();
-        builtins_.push_back(std::move(sym));
+        result_.builtins.push_back(std::move(sym));
     }
 }
 
 // 检查受保护类型名、结构体重名、字段重名和重复 derive；然后创建 StructSymbol，
-// 保存字段的 AST 类型节点和 derive 集合，并登记到 type_namespace、 structs_。
+// 保存字段的 AST 类型节点和 derive 集合，并登记到 type_namespace、result_.structs。
 void SemanticAnalyzer::collect_struct(const Struct &s) {
     // N17：结构体名不能占用语言自带的类型名。报错后不登记，避免污染
     // type_namespace。
@@ -92,11 +92,11 @@ void SemanticAnalyzer::collect_struct(const Struct &s) {
     }
     sym->derives = std::move(derives);
     type_namespace[sym->name] = sym.get();
-    structs_.push_back(std::move(sym));
+    result_.structs.push_back(std::move(sym));
 }
 
 // 检查受保护值名和顶层值名冲突，创建 ConstantSymbol，
-// 登记到 function_constant_namespace 和 constants_；这里不求值。
+// 登记到 function_constant_namespace 和 result_.constants；这里不求值。
 void SemanticAnalyzer::collect_const(const Const &c) {
     // N18：内置 I/O 名是受保护值名，用户常量不能占用。
     // 必须先于 N1 检查：这三个名字已经预登记在 function_constant_namespace 中。
@@ -117,7 +117,7 @@ void SemanticAnalyzer::collect_const(const Const &c) {
     sym->node = &c;
     sym->owner = nullptr;
     function_constant_namespace[sym->name] = sym.get();
-    constants_.push_back(std::move(sym));
+    result_.constants.push_back(std::move(sym));
 }
 
 // 检查受保护值名、顶层值名冲突，调用 check_parameter_names 检查普通参数重名
@@ -148,7 +148,7 @@ void SemanticAnalyzer::collect_function(const Function &f) {
     sym->node = &f;
     sym->owner = nullptr;
     function_constant_namespace[sym->name] = sym.get();
-    functions_.push_back(std::move(sym));
+    result_.functions.push_back(std::move(sym));
 }
 
 // 输入：函数参数列表 + 出错时回退的位置
@@ -189,7 +189,7 @@ StructSymbol *SemanticAnalyzer::resolve_impl_target(const Type &t) {
 
 // 先调用 resolve_impl_target，要求目标是已登记、无类型实参的用户结构体失败则跳过这个 impl。
 // 随后逐项检查关联项是否重名，函数再调用 check_parameter_names，成功的函数/常量同时进入
-// 目标结构体的 associated_items 和分析器的 functions_ / constants_，owner 指向目标结构体
+// 目标结构体的 associated_items 和结果的 functions / constants，owner 指向目标结构体
 void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
     StructSymbol *target = resolve_impl_target(*impl.self_type);
     if (!target)
@@ -214,7 +214,7 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
             sym->node = fn;
             sym->owner = target;
             target->associated_items[fn->name] = sym.get();
-            functions_.push_back(std::move(sym));
+            result_.functions.push_back(std::move(sym));
         } else if (const auto *c = dynamic_cast<const Const *>(item.get())) {
             // N6：关联常量与同名方法/关联函数冲突。
             if (target->associated_items.count(c->name)) {
@@ -230,7 +230,7 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
             sym->node = c;
             sym->owner = target;
             target->associated_items[c->name] = sym.get();
-            constants_.push_back(std::move(sym));
+            result_.constants.push_back(std::move(sym));
         }
     }
 }

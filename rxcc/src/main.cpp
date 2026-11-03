@@ -173,9 +173,9 @@ int main(int argc, char **argv) {
 
     if (stage == "semantic") {
         // --stage semantic：在 AST 上做静态语义检查，不 dump。
-        rx::SemanticAnalyzer analyzer(diags);
-        analyzer.run(*crate);
-        if (!diags.ok()) {
+        // 临时分析器在本句结束时析构；驱动持有结果，crate 比结果更晚析构。
+        auto semantic_result = rx::SemanticAnalyzer(diags).analyze(*crate);
+        if (!semantic_result) {
             print_diagnostics(diags, source_path, std::cerr);
             return 1;
         }

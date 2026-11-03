@@ -386,17 +386,42 @@ void check_expression_queries() {
         fn forever() -> i32 { loop {} }
         fn main() {}
     )");
-    const auto result = analyze_fixture(*crate);
+    auto result = analyze_fixture(*crate);
     const auto &function = checked_ast<rx::Function>(crate->items.at(0));
     const auto &body = *function.body;
     const auto i32 = rx::SemanticType::int_(rx::SemanticType::IntKind::I32);
     const auto &shared = checked_ast<rx::LetStatement>(body.statements.at(0));
     const auto &borrow = checked_ast<rx::UnaryExpression>(shared.initializer);
-    const auto &original = result.expressions.at(&borrow);
+    const auto original = result.expressions.at(&borrow);
     check(original.type.same_type(rx::SemanticType::reference(true, i32)) &&
               result.locals.at(result.let_bindings.at(&shared).index).type.same_type(
                   rx::SemanticType::reference(false, i32)) && !original.place.is_place,
           "fixed-target reference coercion must not overwrite the original &mut fact");
+    // 当前阶段不推导具体调整；在测试中写入记录，验证与原始表达式结果分开。
+    check(result.use_adjustments.empty(), "semantic analysis must not invent adjustments");
+    const rx::UseSite initializer{&shared, rx::UseKind::Initializer, 0};
+    const rx::UseSite second{&shared, rx::UseKind::Argument, 0};
+    const rx::UseSite third{&shared, rx::UseKind::Argument, 1};
+    const rx::UseSite other_parent{&borrow, rx::UseKind::Initializer, 0};
+    result.use_adjustments.emplace(initializer,
+                                   rx::UseAdjustment{rx::SemanticType::reference(false, i32)});
+    result.use_adjustments.emplace(second, rx::UseAdjustment{i32});
+    result.use_adjustments.emplace(third, rx::UseAdjustment{rx::SemanticType::bool_()});
+    result.use_adjustments.emplace(other_parent, rx::UseAdjustment{i32});
+    check(result.use_adjustments.size() == 4 &&
+              result.use_adjustments.at(initializer).target_type.same_type(
+                  rx::SemanticType::reference(false, i32)) &&
+              result.use_adjustments.at(second).target_type.same_type(i32) &&
+              result.use_adjustments.at(third).target_type.same_type(rx::SemanticType::bool_()) &&
+              result.use_adjustments.at(other_parent).target_type.same_type(i32) &&
+              result.expressions.at(&borrow).type.same_type(
+                  rx::SemanticType::reference(true, i32)),
+          "use positions must stay distinct and not overwrite expression facts");
+    result.expressions.at(&borrow) = rx::ExpressionResult::value(i32);
+    check(result.use_adjustments.at(initializer).target_type.same_type(
+              rx::SemanticType::reference(false, i32)),
+          "changing expression facts must not overwrite use adjustments");
+    result.expressions.at(&borrow) = original;
     const auto &x = result.expressions.at(borrow.operand.get());
     const auto &read = checked_ast<rx::LetStatement>(body.statements.at(1));
     const auto &dereference = checked_ast<rx::UnaryExpression>(read.initializer);

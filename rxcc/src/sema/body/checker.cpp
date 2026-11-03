@@ -46,6 +46,8 @@ ExpressionResult BodyChecker::check_block(const BlockExpression &block,
         result = ExpressionResult::value(SemanticType::unit());
     }
     pop_scope();
+    // 函数体也会直接进入这里，不一定经过 check_expression，故在此保存块的结果。
+    analyzer_.result_.expressions.insert_or_assign(&block, result);
     return result;
 }
 
@@ -64,8 +66,10 @@ BodyChecker::StatementResult BodyChecker::check_statement(const Statement &state
                                              let->initializer->span)
                             : !initializer.type.is_error();
         // 初始化器先查旧绑定，再登记新绑定，允许 let x = x 式遮蔽。
-        declare_local(let->name, Binding{annotation ? *annotation : initializer.type,
-                                         let->is_mut});
+        const auto id = declare_local(
+            let->name, Binding{annotation ? *annotation : initializer.type,
+                               let->is_mut, {}});
+        analyzer_.result_.let_bindings.emplace(let, id);
         return {initializer.diverges, !ok};
     }
     // 表达式语句
@@ -90,6 +94,14 @@ BodyChecker::StatementResult BodyChecker::check_statement(const Statement &state
 ExpressionResult
 BodyChecker::check_expression(const Expression &expression,
                               const SemanticType *expected) {
+    const auto result = check_expression_impl(expression, expected);
+    analyzer_.result_.expressions.insert_or_assign(&expression, result);
+    return result;
+}
+
+ExpressionResult
+BodyChecker::check_expression_impl(const Expression &expression,
+                                  const SemanticType *expected) {
     // 数字：有后缀就按后缀；没后缀但外面要整数就跟着外面；否则按 i32。
     if (const auto *literal = dynamic_cast<const IntegerLiteral *>(&expression))
         return check_integer_literal(*literal, expected);
@@ -195,17 +207,20 @@ void BodyChecker::enter_function(const FunctionSymbol &fn) {
     // 创建函数级作用域
     push_scope();
     assert(fn.node && fn.parameters.size() == fn.node->parameters.size());
+    auto &locals = analyzer_.result_.function_locals[fn.id];
+    locals = FunctionLocals{};
     // 有接收者
     if (fn.receiver) {
         current_has_self_ = true;
-        declare_local("self", Binding{fn.receiver->type,
-                                      fn.receiver->binding_is_mut});
+        locals.self = declare_local(
+            "self", Binding{fn.receiver->type, fn.receiver->binding_is_mut, {}});
     }
     // 每个普通参数
     for (std::size_t index = 0; index < fn.parameters.size(); ++index) {
         const auto &parameter = fn.parameters[index];
-        declare_local(fn.node->parameters[index].name,
-                      Binding{parameter.type, parameter.is_mut});
+        locals.parameters.push_back(declare_local(
+            fn.node->parameters[index].name,
+            Binding{parameter.type, parameter.is_mut, {}}));
     }
 }
 
@@ -216,11 +231,13 @@ void BodyChecker::pop_scope() {
     scopes_.pop_back();
 }
 
-void BodyChecker::declare_local(const std::string &name,
-                                const Binding &binding) {
+LocalId BodyChecker::declare_local(const std::string &name, Binding binding) {
     assert(!scopes_.empty());
+    binding.id = LocalId{analyzer_.result_.locals.size()};
+    analyzer_.result_.locals.push_back(binding);
     // 同一块内新 let 覆盖旧绑定；不报重复。
     scopes_.back()[name] = binding; // 新建或替换
+    return binding.id;
 }
 
 // 从最内层作用域向外查找绑定，实现局部名字遮蔽。

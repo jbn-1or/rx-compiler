@@ -143,6 +143,16 @@ EvaluatedConstant
 SemanticAnalyzer::evaluate_constant_value(const ConstantValue &value,
                                          const SemanticType *expected,
                                          const StructSymbol *current) {
+    const auto result = evaluate_constant_value_impl(value, expected, current);
+    if (result.ok && !result.type.is_error())
+        result_.constant_values.insert_or_assign(&value, result);
+    return result;
+}
+
+EvaluatedConstant
+SemanticAnalyzer::evaluate_constant_value_impl(const ConstantValue &value,
+                                              const SemanticType *expected,
+                                              const StructSymbol *current) {
     // 期望类型本身已经出错：不再追加新诊断，直接把失败向上传递。
     if (expected && expected->is_error())
         return failed_evaluation();
@@ -242,6 +252,7 @@ SemanticAnalyzer::evaluate_constant_value(const ConstantValue &value,
             // 目标求值失败（C1/C4/C5/C2 等）时，路径也返回失败，
             if (!target_eval.ok || target_eval.type.is_error())
                 return failed_evaluation();
+            result_.constant_paths.insert_or_assign(&value, target->id);
             // 目标常量已在 evaluate_constant 内用声明类型求值并通过 C1 比对，
             // 缓存里的 type 就是目标声明类型；直接复用，不能再用调用方的
             // expected 重新定型目标常量。

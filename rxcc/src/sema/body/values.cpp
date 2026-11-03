@@ -27,6 +27,8 @@ BodyChecker::check_integer_literal(const IntegerLiteral &literal,
         type = SemanticType::int_(SemanticType::IntKind::I32);
     }
 
+    analyzer_.result_.integer_literals.insert_or_assign(
+        &literal, IntegerLiteralFact{type, static_cast<uint32_t>(literal.value)});
     // 数字是值，本身不是一个可以存取的变量。
     return ExpressionResult::value(type);
 }
@@ -79,6 +81,7 @@ BodyChecker::check_value_path(const PathExpression &path) {
         const auto binding = lookup_local("self");
         if (!binding)
             return ExpressionResult::error();
+        analyzer_.result_.paths.insert_or_assign(&path, binding->id);
         return ExpressionResult::from_place(binding->type,
                                 PlaceAccessInformation{true, binding->is_mut,
                                                       false});
@@ -98,8 +101,9 @@ BodyChecker::check_value_path(const PathExpression &path) {
         if (const auto binding = lookup_local(first.name)) {
             // 局部名字不能带类型参数，比如 x::<i32> 
             if (reject_value_type_arguments(first, "local binding",
-                                            diagnostics_, path.span))
+                                             diagnostics_, path.span))
                 return ExpressionResult::error();
+            analyzer_.result_.paths.insert_or_assign(&path, binding->id);
             return ExpressionResult::from_place(binding->type,
                                     PlaceAccessInformation{true,
                                                           binding->is_mut,
@@ -122,6 +126,7 @@ BodyChecker::check_value_path(const PathExpression &path) {
                     constant->evaluated.type.is_error())
                     return ExpressionResult::error();
                 // 常量是值，不是可以改的存储位置。
+                analyzer_.result_.paths.insert_or_assign(&path, constant->id);
                 return ExpressionResult::value(constant->evaluated.type);
             }
             // 函数/内置函数不能单独当值用；真正的调用由 calls/call.cpp 处理。
@@ -157,6 +162,7 @@ BodyChecker::check_value_path(const PathExpression &path) {
     // 常量求值失败时，错误已经在常量阶段报过，这里不再重复报。
     if (!constant->evaluated.ok || constant->evaluated.type.is_error())
         return ExpressionResult::error();
+    analyzer_.result_.paths.insert_or_assign(&path, constant->id);
     return ExpressionResult::value(constant->evaluated.type);
 }
 

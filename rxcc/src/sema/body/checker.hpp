@@ -43,6 +43,8 @@ private:
     // 返回表达式按自身规则得到的类型、place 和发散状态，不做外层强制转换。
     ExpressionResult check_expression(const Expression &expression,
                                       const SemanticType *expected);
+    ExpressionResult check_expression_impl(const Expression &expression,
+                                           const SemanticType *expected);
     ExpressionResult check_block(const BlockExpression &block,
                                  const SemanticType *expected);
 
@@ -56,7 +58,7 @@ private:
     StatementResult check_statement(const Statement &statement);
     void push_scope();
     void pop_scope();
-    void declare_local(const std::string &name, const Binding &binding);
+    LocalId declare_local(const std::string &name, Binding binding);
     std::optional<Binding> lookup_local(const std::string &name) const;
 
     // values.cpp：字面量和值路径；统一分派在 checker.cpp。

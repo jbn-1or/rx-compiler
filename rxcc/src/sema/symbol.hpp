@@ -4,6 +4,7 @@
 
 #pragma once
 #include "ast/ast.hpp"
+#include "sema/identity.hpp"
 #include "sema/type.hpp"
 #include <cstdint>
 #include <set>
@@ -33,6 +34,7 @@ struct Symbol {
     Kind kind = Kind::Builtin; // 当前类别，main 是 Kind::Function
     std::string name; // 值名（函数名/常量名/内置函数名），"println_i32"
     Span span{};
+    std::optional<BuiltinIO> builtin_io; // 仅内置输入输出函数填写。
 };
 
 struct StructSymbol;
@@ -67,6 +69,7 @@ struct ResolvedReceiver {
 // `fn add(a: i32) -> i32` → {name="add", node=Function(add), owner=nullptr}
 // `impl S { fn get(&self) -> i32 }` → {name="get", node=Function(get), owner=S}
 struct FunctionSymbol : Symbol {
+    FunctionId id;
     const Function *node = nullptr;    // 指向 AST 函数节点（非拥有），可取 node->parameters、node->return_type
     StructSymbol *owner = nullptr;     // 所属结构体；顶层函数为 nullptr，impl S 内方法指向 S
     std::vector<ResolvedParameter> parameters; // 定型后的参数，按声明顺序
@@ -79,6 +82,7 @@ struct FunctionSymbol : Symbol {
 // `const MAX: i32 = 10;` → {name="MAX", node=Const(MAX), owner=nullptr}
 //     `impl S { const K: i32 = 1; }` → {name="K", owner=S}
 struct ConstantSymbol : Symbol {
+    ConstantId id;
     const Const *node = nullptr;   // 指向 AST 常量节点（非拥有），可取 node->type、node->value
     StructSymbol *owner = nullptr;
     // 求值三色状态
@@ -93,6 +97,7 @@ struct ConstantSymbol : Symbol {
 //   再配 `impl Point { fn len(&self) -> i32 }`
 //     → associated_items={"len" → FunctionSymbol(len)}
 struct StructSymbol {
+    StructId id;
     std::string name;             // 结构体名
     Span span{};
     const Struct *node = nullptr; // 保留声明节点，供后续语义结果和 IR 映射使用。

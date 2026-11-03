@@ -38,13 +38,17 @@ void SemanticAnalyzer::collect_declarations(const Crate &crate) {
 }
 
 // 为 get_i32、print_i32、println_i32 创建 Builtin符号，放入值名字表；
-// 这些符号由 result_.builtins 持有。这里登记名字，调用时使用的参数和返回类型
-// 由 body/calls/builtins.cpp 中的 builtin_signature 提供。
+// 符号、稳定的 I/O 身份和调用签名一起保存到结果中。
 void SemanticAnalyzer::initialize_builtins() {
-    for (const char *n : {"get_i32", "print_i32", "println_i32"}) {
+    for (const auto &[n, id] : {
+             std::pair{"get_i32", BuiltinIO::GetI32},
+             std::pair{"print_i32", BuiltinIO::PrintI32},
+             std::pair{"println_i32", BuiltinIO::PrintlnI32}}) {
         auto sym = std::make_unique<Symbol>();
         sym->kind = Symbol::Kind::Builtin;
         sym->name = n;
+        sym->builtin_io = id;
+        result_.builtin_signatures.emplace(id, builtin_signature(n).value());
         function_constant_namespace[n] = sym.get();
         result_.builtins.push_back(std::move(sym));
     }
@@ -83,6 +87,7 @@ void SemanticAnalyzer::collect_struct(const Struct &s) {
     }
     // 字段或 derive 有错时仍登记符号，让后续阶段可以继续解析此结构体。
     auto sym = std::make_unique<StructSymbol>();
+    sym->id = StructId{result_.structs.size()};
     sym->name = s.name;
     sym->span = s.span;
     sym->node = &s;
@@ -92,6 +97,7 @@ void SemanticAnalyzer::collect_struct(const Struct &s) {
     }
     sym->derives = std::move(derives);
     type_namespace[sym->name] = sym.get();
+    result_.struct_declarations.emplace(&s, sym->id);
     result_.structs.push_back(std::move(sym));
 }
 
@@ -111,12 +117,14 @@ void SemanticAnalyzer::collect_const(const Const &c) {
     }
     // 登记档案：owner = nullptr 表示顶层常量。
     auto sym = std::make_unique<ConstantSymbol>();
+    sym->id = ConstantId{result_.constants.size()};
     sym->kind = Symbol::Kind::Constant;
     sym->name = c.name;
     sym->span = c.span;
     sym->node = &c;
     sym->owner = nullptr;
     function_constant_namespace[sym->name] = sym.get();
+    result_.constant_declarations.emplace(&c, sym->id);
     result_.constants.push_back(std::move(sym));
 }
 
@@ -142,12 +150,14 @@ void SemanticAnalyzer::collect_function(const Function &f) {
 
     // 参数/接收者有错也登记，避免后续按名字找不到函数而连锁报错。
     auto sym = std::make_unique<FunctionSymbol>();
+    sym->id = FunctionId{result_.functions.size()};
     sym->kind = Symbol::Kind::Function;
     sym->name = f.name;
     sym->span = f.span;
     sym->node = &f;
     sym->owner = nullptr;
     function_constant_namespace[sym->name] = sym.get();
+    result_.function_declarations.emplace(&f, sym->id);
     result_.functions.push_back(std::move(sym));
 }
 
@@ -208,12 +218,14 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
             check_parameter_names(fn->parameters, fn->span);
             // 保存函数声明和所属结构体，签名留待后续定型。
             auto sym = std::make_unique<FunctionSymbol>();
+            sym->id = FunctionId{result_.functions.size()};
             sym->kind = Symbol::Kind::Function;
             sym->name = fn->name;
             sym->span = fn->span;
             sym->node = fn;
             sym->owner = target;
             target->associated_items[fn->name] = sym.get();
+            result_.function_declarations.emplace(fn, sym->id);
             result_.functions.push_back(std::move(sym));
         } else if (const auto *c = dynamic_cast<const Const *>(item.get())) {
             // N6：关联常量与同名方法/关联函数冲突。
@@ -224,12 +236,14 @@ void SemanticAnalyzer::collect_impl(const InherentImpl &impl) {
             }
             // 保存关联常量声明和所属结构体，值留待常量阶段求出。
             auto sym = std::make_unique<ConstantSymbol>();
+            sym->id = ConstantId{result_.constants.size()};
             sym->kind = Symbol::Kind::Constant;
             sym->name = c->name;
             sym->span = c->span;
             sym->node = c;
             sym->owner = target;
             target->associated_items[c->name] = sym.get();
+            result_.constant_declarations.emplace(c, sym->id);
             result_.constants.push_back(std::move(sym));
         }
     }
@@ -249,6 +263,7 @@ void SemanticAnalyzer::check_main_declaration() {
         return;
     }
     const auto *fn = static_cast<const FunctionSymbol *>(it->second);
+    result_.main_function = fn->id;
     // E2：main 不能有值参数。
     if (!fn->node->parameters.empty())
         diagnostics_.error(fn->span, "main cannot have value parameters");

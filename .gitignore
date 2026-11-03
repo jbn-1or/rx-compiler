@@ -35,3 +35,4 @@ rxcc/tests/*
 /tests
 
 .clang-format
+llvm-ir-practice

@@ -101,6 +101,9 @@ private:
     EvaluatedConstant evaluate_constant_value(const ConstantValue &value,
                                               const SemanticType *expected,
                                               const StructSymbol *current);
+    EvaluatedConstant evaluate_constant_value_impl(const ConstantValue &value,
+                                                   const SemanticType *expected,
+                                                   const StructSymbol *current);
     // 常量路径解析 + 三色递归求值。
     ConstantSymbol *resolve_constant_path(
         const std::vector<PathSegment> &path, Span span,

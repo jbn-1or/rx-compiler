@@ -132,10 +132,11 @@ ExpressionResult BodyChecker::check_ordinary_call(const PathExpression &path,
         return ExpressionResult::error();
     }
     // 普通函数取声明签名；其余值名尝试按内置函数解析。
-    const auto signature = symbol.kind == Symbol::Kind::Function
-                               ? std::optional(function_signature(
-                                     static_cast<const FunctionSymbol &>(symbol)))
-                               : builtin_signature(segment.name);
+    std::optional<CallableSignature> signature;
+    if (symbol.kind == Symbol::Kind::Function)
+        signature = function_signature(static_cast<const FunctionSymbol &>(symbol));
+    else if (symbol.builtin_io)
+        signature = analyzer_.result_.builtin_signatures.at(*symbol.builtin_io);
     if (!signature) {
         diagnostics_.error(path.span, "unknown built-in function: " + segment.name);
         return ExpressionResult::error();
@@ -149,6 +150,13 @@ ExpressionResult BodyChecker::check_ordinary_call(const PathExpression &path,
         : check_arguments(signature->parameters, call.arguments, call.span, diverges);
     if (!arguments_ok)
         return ExpressionResult::error();
+    if (symbol.kind == Symbol::Kind::Function) {
+        const auto id = static_cast<const FunctionSymbol &>(symbol).id;
+        analyzer_.result_.ordinary_calls.insert_or_assign(&call, id);
+        analyzer_.result_.paths.insert_or_assign(&path, id);
+    } else {
+        analyzer_.result_.ordinary_calls.insert_or_assign(&call, *symbol.builtin_io);
+    }
     return ExpressionResult::value(signature->return_type, diverges);
 }
 

@@ -28,10 +28,7 @@ chats/
 # Local source backups
 /rxcc/backup/
 
-rxcc/tests/*
-!/rxcc/tests/semantic_invariants.cpp
-!/rxcc/tests/ir/
-!/rxcc/tests/run_ir.py
+/rxcc/tests/
 /tests
 
 .clang-format

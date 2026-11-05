@@ -5,7 +5,7 @@
 //   --stage ir      语义检查后生成 LLVM IR，需要 -o <file.ll>
 //   --dump-tree      打印 ANTLR parse tree
 // 退出码：0 = 当前阶段接受或显示帮助；1 = 词法、语法、AST 构建或语义错误；
-// 2 = 命令行用法错误、源文件无法打开或输出文件无法打开。
+// 2 = 命令行用法错误、源文件无法打开或输出文件打开/写入失败。
 
 // 读文件 → ANTLRInputStream → RxLexer → CommonTokenStream → RxParser::crate。
 // 词法或语法检查报错后，不再构建 AST。
@@ -225,7 +225,7 @@ int main(int argc, char **argv) {
             if (output.has_error()) {
                 std::cerr << "rxcc: failed writing IR output '" << output_path << "'\n";
                 output.clear_error();
-                return 1;
+                return 2;
             }
             return 0;
         }

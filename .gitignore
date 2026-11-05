@@ -28,7 +28,9 @@ chats/
 # Local source backups
 /rxcc/backup/
 
-/rxcc/tests/
+/rxcc/tests/*
+!/rxcc/tests/ir/
+!/rxcc/tests/run_ir.py
 /tests
 
 .clang-format

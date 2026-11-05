@@ -14,9 +14,33 @@
 
 namespace rx {
 
+std::optional<std::vector<std::string>> assign_function_names(
+    const SemanticResult &semantics, llvm::raw_ostream &diagnostics) {
+    std::vector<std::string> names;
+    names.reserve(semantics.functions.size());
+    for (std::size_t index = 0; index < semantics.functions.size(); ++index) {
+        const auto &function = semantics.functions[index];
+        if (!function || !function->node || function->id.index != index) {
+            diagnostics << "IR 内部错误：无效的源函数身份记录\n";
+            return std::nullopt;
+        }
+        const auto declaration = semantics.function_declarations.find(function->node);
+        if (declaration == semantics.function_declarations.end() ||
+            declaration->second != function->id) {
+            diagnostics << "IR 内部错误：源函数声明与身份不一致\n";
+            return std::nullopt;
+        }
+        names.push_back("__rx_fn_" + std::to_string(function->id.index));
+    }
+    return names;
+}
+
 std::optional<IRArtifact> generate_ir(const Crate &crate,
                                       const SemanticResult &semantics,
                                       llvm::raw_ostream &diagnostics) {
+    const auto function_names = assign_function_names(semantics, diagnostics);
+    if (!function_names)
+        return std::nullopt;
     if (!semantics.main_function ||
         semantics.main_function->index >= semantics.functions.size() ||
         !semantics.functions[semantics.main_function->index]) {
@@ -52,10 +76,10 @@ std::optional<IRArtifact> generate_ir(const Crate &crate,
     auto &module = artifact.module();
     llvm::IRBuilder<> builder(context);
 
-    const auto source_name = "__rx_fn_" + std::to_string(source.id.index);
     auto *source_type = llvm::FunctionType::get(builder.getVoidTy(), false);
     auto *source_function = llvm::Function::Create(
-        source_type, llvm::Function::InternalLinkage, source_name, module);
+        source_type, llvm::Function::InternalLinkage,
+        function_names->at(source.id.index), module);
     builder.SetInsertPoint(llvm::BasicBlock::Create(context, "entry", source_function));
     builder.CreateRetVoid();
     builder.ClearInsertionPoint();

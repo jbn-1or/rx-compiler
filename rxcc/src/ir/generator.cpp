@@ -4,6 +4,7 @@
 #include "ir/generator.hpp"
 #include "ast/ast.hpp"
 #include "ir/storage.hpp"
+#include "ir/scalar.hpp"
 #include "ir/value.hpp"
 #include "sema/result.hpp"
 #include <llvm/IR/Argument.h>
@@ -41,6 +42,12 @@ bool is_top_level_function(const Crate &crate, const Function *function) {
 bool is_supported_value_type(const SemanticType &type) {
     return type.kind == SemanticType::Kind::Int ||
            type.kind == SemanticType::Kind::Bool;
+}
+
+bool is_signed_integer(const SemanticType &type) {
+    return type.kind == SemanticType::Kind::Int &&
+           (type.int_kind == SemanticType::IntKind::I32 ||
+            type.int_kind == SemanticType::IntKind::Isize);
 }
 
 bool add_local_id(const SemanticResult &semantics, LocalId id,
@@ -124,6 +131,87 @@ bool validate_expression(const Expression &expression, const SemanticResult &sem
         return fact->second.type.kind == SemanticType::Kind::Bool;
     if (dynamic_cast<const UnitExpression *>(&expression))
         return fact->second.type.kind == SemanticType::Kind::Unit;
+
+    if (const auto *binary = dynamic_cast<const BinaryExpression *>(&expression)) {
+        if (binary->operation == BinaryOperator::LogicalAnd ||
+            binary->operation == BinaryOperator::LogicalOr) {
+            diagnostics << "IR 生成尚未支持短路逻辑运算\n";
+            return false;
+        }
+        if (!binary->left || !binary->right ||
+            !validate_expression(*binary->left, semantics, function, visible_locals,
+                                 lets, diagnostics) ||
+            !validate_expression(*binary->right, semantics, function, visible_locals,
+                                 lets, diagnostics))
+            return false;
+        const auto &left = semantics.expressions.at(binary->left.get()).type;
+        const auto &right = semantics.expressions.at(binary->right.get()).type;
+        const bool arithmetic = binary->operation == BinaryOperator::Add ||
+                                binary->operation == BinaryOperator::Subtract ||
+                                binary->operation == BinaryOperator::Multiply ||
+                                binary->operation == BinaryOperator::Divide ||
+                                binary->operation == BinaryOperator::Remainder;
+        const bool bitwise = binary->operation == BinaryOperator::BitwiseAnd ||
+                             binary->operation == BinaryOperator::BitwiseOr ||
+                             binary->operation == BinaryOperator::BitwiseXor;
+        const bool shift = binary->operation == BinaryOperator::ShiftLeft ||
+                           binary->operation == BinaryOperator::ShiftRight;
+        const bool comparison = binary->operation == BinaryOperator::Equal ||
+                                binary->operation == BinaryOperator::NotEqual ||
+                                binary->operation == BinaryOperator::LessThan ||
+                                binary->operation == BinaryOperator::LessThanOrEqual ||
+                                binary->operation == BinaryOperator::GreaterThan ||
+                                binary->operation == BinaryOperator::GreaterThanOrEqual;
+        if ((arithmetic && (left.kind != SemanticType::Kind::Int ||
+                            !left.same_type(right) ||
+                            !fact->second.type.same_type(left))) ||
+            (bitwise && ((!left.same_type(right) || !is_supported_value_type(left)) ||
+                         !fact->second.type.same_type(left))) ||
+            (shift && (left.kind != SemanticType::Kind::Int ||
+                       right.kind != SemanticType::Kind::Int ||
+                       !fact->second.type.same_type(left))) ||
+            (comparison &&
+             (!left.same_type(right) || !is_supported_value_type(left) ||
+              fact->second.type.kind != SemanticType::Kind::Bool))) {
+            diagnostics << "IR 内部错误：标量运算的语义类型记录不一致\n";
+            return false;
+        }
+        return arithmetic || bitwise || shift || comparison;
+    }
+
+    if (const auto *unary = dynamic_cast<const UnaryExpression *>(&expression)) {
+        if (unary->operation != UnaryOperator::Negative &&
+            unary->operation != UnaryOperator::Not) {
+            diagnostics << "IR 生成尚未支持借用或解引用运算\n";
+            return false;
+        }
+        if (!unary->operand ||
+            !validate_expression(*unary->operand, semantics, function, visible_locals,
+                                 lets, diagnostics))
+            return false;
+        const auto &operand = semantics.expressions.at(unary->operand.get()).type;
+        const bool valid = unary->operation == UnaryOperator::Negative
+                               ? is_signed_integer(operand)
+                               : is_supported_value_type(operand);
+        if (!valid || !fact->second.type.same_type(operand)) {
+            diagnostics << "IR 内部错误：一元标量运算的语义类型记录不一致\n";
+            return false;
+        }
+        return true;
+    }
+
+    if (const auto *cast = dynamic_cast<const CastExpression *>(&expression)) {
+        if (!cast->operand || fact->second.type.kind != SemanticType::Kind::Int ||
+            !validate_expression(*cast->operand, semantics, function, visible_locals,
+                                 lets, diagnostics))
+            return false;
+        const auto &source = semantics.expressions.at(cast->operand.get()).type;
+        if (!is_supported_value_type(source)) {
+            diagnostics << "IR 生成尚未支持此源类型的 cast\n";
+            return false;
+        }
+        return true;
+    }
 
     if (const auto *path = dynamic_cast<const PathExpression *>(&expression)) {
         const auto target = semantics.paths.find(path);
@@ -302,6 +390,59 @@ struct FunctionEmitter {
     llvm::Function &function;
     llvm::raw_ostream &diagnostics;
 
+    ir::EmitResult emit_binary(const BinaryExpression &binary) {
+        auto left_result = emit_expression(*binary.left);
+        if (std::holds_alternative<ir::NoContinuation>(left_result))
+            return ir::NoContinuation{};
+        auto *left = std::get_if<ir::IRValue>(&left_result);
+        if (!left) {
+            diagnostics << "IR 生成尚未支持 unit 二元操作数\n";
+            return ir::NoContinuation{};
+        }
+
+        auto right_result = emit_expression(*binary.right);
+        if (std::holds_alternative<ir::NoContinuation>(right_result))
+            return ir::NoContinuation{};
+        auto *right = std::get_if<ir::IRValue>(&right_result);
+        if (!right) {
+            diagnostics << "IR 生成尚未支持 unit 二元操作数\n";
+            return ir::NoContinuation{};
+        }
+
+        const auto result = ir::emit_scalar_binary(builder, binary.operation,
+                                                   *left, *right, diagnostics);
+        return result ? ir::EmitResult{*result} : ir::EmitResult{ir::NoContinuation{}};
+    }
+
+    ir::EmitResult emit_unary(const UnaryExpression &unary) {
+        auto operand_result = emit_expression(*unary.operand);
+        if (std::holds_alternative<ir::NoContinuation>(operand_result))
+            return ir::NoContinuation{};
+        auto *operand = std::get_if<ir::IRValue>(&operand_result);
+        if (!operand) {
+            diagnostics << "IR 生成尚未支持 unit 一元操作数\n";
+            return ir::NoContinuation{};
+        }
+
+        const auto result = ir::emit_scalar_unary(builder, unary.operation,
+                                                  *operand, diagnostics);
+        return result ? ir::EmitResult{*result} : ir::EmitResult{ir::NoContinuation{}};
+    }
+
+    ir::EmitResult emit_cast(const CastExpression &cast) {
+        auto operand_result = emit_expression(*cast.operand);
+        if (std::holds_alternative<ir::NoContinuation>(operand_result))
+            return ir::NoContinuation{};
+        auto *operand = std::get_if<ir::IRValue>(&operand_result);
+        if (!operand) {
+            diagnostics << "IR 生成尚未支持 unit cast 操作数\n";
+            return ir::NoContinuation{};
+        }
+        const auto result = ir::emit_scalar_cast(
+            builder, *operand, semantics.expressions.at(&cast).type, diagnostics);
+        return result ? ir::EmitResult{*result} : ir::EmitResult{ir::NoContinuation{}};
+    }
+
     ir::EmitResult emit_expression(const Expression &expression) {
         if (const auto *integer = dynamic_cast<const IntegerLiteral *>(&expression)) {
             const auto &fact = semantics.integer_literals.at(integer);
@@ -313,6 +454,12 @@ struct FunctionEmitter {
                                semantics.expressions.at(boolean).type};
         if (dynamic_cast<const UnitExpression *>(&expression))
             return ir::Unit{};
+        if (const auto *binary = dynamic_cast<const BinaryExpression *>(&expression))
+            return emit_binary(*binary);
+        if (const auto *unary = dynamic_cast<const UnaryExpression *>(&expression))
+            return emit_unary(*unary);
+        if (const auto *cast = dynamic_cast<const CastExpression *>(&expression))
+            return emit_cast(*cast);
         if (const auto *path = dynamic_cast<const PathExpression *>(&expression))
             return emit_path(*path);
         if (const auto *call = dynamic_cast<const CallExpression *>(&expression))

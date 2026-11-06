@@ -516,11 +516,134 @@ void check_never_let() {
           "具体类型可以预留 slot，但不能在 return 后写入或继续执行");
 }
 
+void check_scalar_lowering() {
+    const auto crate = parse_crate(R"(
+        fn add(a: i32, b: i32) -> i32 { a + b }
+        fn subtract(a: i32, b: i32) -> i32 { a - b }
+        fn multiply(a: i32, b: i32) -> i32 { a * b }
+        fn signed_divide(a: i32, b: i32) -> i32 { a / b }
+        fn signed_remainder(a: isize, b: isize) -> isize { a % b }
+        fn unsigned_divide(a: u32, b: u32) -> u32 { a / b }
+        fn unsigned_remainder(a: usize, b: usize) -> usize { a % b }
+        fn integer_and(a: u32, b: u32) -> u32 { a & b }
+        fn integer_or(a: i32, b: i32) -> i32 { a | b }
+        fn integer_xor(a: i32, b: i32) -> i32 { a ^ b }
+        fn boolean_and(a: bool, b: bool) -> bool { a & b }
+        fn boolean_or(a: bool, b: bool) -> bool { a | b }
+        fn boolean_xor(a: bool, b: bool) -> bool { a ^ b }
+        fn negate(a: i32) -> i32 { -a }
+        fn invert_integer(a: u32) -> u32 { !a }
+        fn invert_boolean(a: bool) -> bool { !a }
+        fn equal(a: i32, b: i32) -> bool { a == b }
+        fn not_equal(a: bool, b: bool) -> bool { a != b }
+        fn signed_less(a: isize, b: isize) -> bool { a < b }
+        fn unsigned_less(a: u32, b: u32) -> bool { a < b }
+        fn boolean_less(a: bool, b: bool) -> bool { a < b }
+        fn signed_ge(a: i32, b: i32) -> bool { a >= b }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    std::string errors;
+    llvm::raw_string_ostream diagnostics(errors);
+    auto artifact = rx::generate_ir(*crate, sema, diagnostics);
+    diagnostics.flush();
+    check(artifact && errors.empty() &&
+              !llvm::verifyModule(artifact->module(), &diagnostics),
+          "标量运算模块应生成成功并通过 verifier");
+    const auto get_function = [&](const std::string &name) {
+        const auto found = std::find_if(
+            sema.functions.begin(), sema.functions.end(),
+            [&](const auto &symbol) { return symbol->name == name; });
+        check(found != sema.functions.end(), "标量运算测试函数必须存在");
+        return artifact->module().getFunction(
+            "__rx_fn_" + std::to_string((*found)->id.index));
+    };
+    const auto has_opcode = [&](const std::string &name, unsigned opcode) {
+        const auto *function = get_function(name);
+        return std::any_of(llvm::instructions(function).begin(),
+                           llvm::instructions(function).end(),
+                           [opcode](const llvm::Instruction &instruction) {
+                               return instruction.getOpcode() == opcode;
+                           });
+    };
+    check(has_opcode("add", llvm::Instruction::Add) &&
+              has_opcode("subtract", llvm::Instruction::Sub) &&
+              has_opcode("multiply", llvm::Instruction::Mul) &&
+              has_opcode("negate", llvm::Instruction::Sub),
+          "加减乘和取负必须使用普通 i32 算术指令");
+    for (const auto &name : {"add", "subtract", "multiply", "negate"}) {
+        for (const auto &instruction : llvm::instructions(get_function(name))) {
+            if (const auto *operation = llvm::dyn_cast<llvm::BinaryOperator>(&instruction))
+                check(!operation->hasNoSignedWrap() && !operation->hasNoUnsignedWrap(),
+                      "回绕算术不得添加 nsw/nuw 承诺");
+        }
+    }
+    check(has_opcode("signed_divide", llvm::Instruction::SDiv) &&
+              has_opcode("signed_remainder", llvm::Instruction::SRem) &&
+              has_opcode("unsigned_divide", llvm::Instruction::UDiv) &&
+              has_opcode("unsigned_remainder", llvm::Instruction::URem),
+          "除法和余数指令必须按源整数的符号性选择");
+    for (const auto &name : {"signed_divide", "signed_remainder",
+                             "unsigned_divide", "unsigned_remainder"}) {
+        for (const auto &instruction : llvm::instructions(get_function(name)))
+            if (const auto *operation = llvm::dyn_cast<llvm::BinaryOperator>(&instruction))
+                check(!operation->isExact(), "除法和余数不得附加 exact 承诺");
+    }
+    check(has_opcode("integer_and", llvm::Instruction::And) &&
+              has_opcode("integer_or", llvm::Instruction::Or) &&
+              has_opcode("integer_xor", llvm::Instruction::Xor) &&
+              has_opcode("boolean_and", llvm::Instruction::And) &&
+              has_opcode("boolean_or", llvm::Instruction::Or) &&
+              has_opcode("boolean_xor", llvm::Instruction::Xor),
+          "整数和 bool 位运算都必须使用 and/or/xor");
+
+    const auto has_predicate = [&](const std::string &name,
+                                   llvm::CmpInst::Predicate predicate) {
+        for (const auto &instruction : llvm::instructions(get_function(name)))
+            if (const auto *compare = llvm::dyn_cast<llvm::ICmpInst>(&instruction))
+                if (compare->getPredicate() == predicate &&
+                    compare->getType()->isIntegerTy(1))
+                    return true;
+        return false;
+    };
+    check(has_predicate("equal", llvm::CmpInst::ICMP_EQ) &&
+              has_predicate("not_equal", llvm::CmpInst::ICMP_NE) &&
+              has_predicate("signed_less", llvm::CmpInst::ICMP_SLT) &&
+              has_predicate("unsigned_less", llvm::CmpInst::ICMP_ULT) &&
+              has_predicate("boolean_less", llvm::CmpInst::ICMP_ULT) &&
+              has_predicate("signed_ge", llvm::CmpInst::ICMP_SGE),
+          "比较必须按语义类型选择比较谓词并返回 i1");
+
+    bool saw_integer_invert = false;
+    bool saw_boolean_invert = false;
+    for (const auto &instruction : llvm::instructions(get_function("invert_integer")))
+        if (const auto *operation = llvm::dyn_cast<llvm::BinaryOperator>(&instruction))
+            if (operation->getOpcode() == llvm::Instruction::Xor &&
+                operation->getType()->isIntegerTy(32)) {
+                const auto *mask = llvm::dyn_cast<llvm::ConstantInt>(
+                    operation->getOperand(1));
+                saw_integer_invert = mask && mask->isMinusOne();
+            }
+    for (const auto &instruction : llvm::instructions(get_function("invert_boolean")))
+        if (const auto *operation = llvm::dyn_cast<llvm::BinaryOperator>(&instruction))
+            if (operation->getOpcode() == llvm::Instruction::Xor &&
+                operation->getType()->isIntegerTy(1)) {
+                const auto *mask = llvm::dyn_cast<llvm::ConstantInt>(
+                    operation->getOperand(1));
+                saw_boolean_invert = mask && mask->isOne();
+            }
+    check(saw_integer_invert && saw_boolean_invert,
+          "整数 ! 应与全 1 位模式异或，bool ! 应与 true 异或");
+    diagnostics.flush();
+    check(errors.empty(), "标量运算模块不应产生 verifier 诊断");
+}
+
 void run_tests() {
     check_function_names();
     check_local_slots();
     check_calls_returns_and_blocks();
     check_never_let();
+    check_scalar_lowering();
     check_entry("fn main() {}");
     check_entry(R"(
         const LEN: usize = 2;
@@ -532,8 +655,8 @@ void run_tests() {
     rx::Diagnostics diagnostics;
     const auto result = rx::SemanticAnalyzer(diagnostics).analyze(*invalid);
     check(!result && !diagnostics.ok(), "缺少 main 必须在语义分析时失败");
-    check_rejected("fn main() { let x = 1 + 2; }");
-    check_rejected("fn main() {} fn unused() { let x = 1 + 2; }");
+    check_rejected("fn main() { let x = true && false; }");
+    check_rejected("fn main() {} fn unused() { let x = true || false; }");
     check_rejected("struct Data {} impl Data { fn unused(&self) {} } fn main() {}");
 
     const auto first = parse_crate("fn main() {}");

@@ -78,7 +78,8 @@ set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "-w"
 
 # LLVM 模块及其 context 一起持有；不改变前端的 C++20、异常或 RTTI 设置。
 add_library(rxcc_ir STATIC
-  src/ir/artifact.cpp src/ir/generator.cpp src/ir/value.cpp src/ir/storage.cpp)
+  src/ir/artifact.cpp src/ir/generator.cpp src/ir/value.cpp src/ir/storage.cpp
+  src/ir/scalar.cpp)
 target_include_directories(rxcc_ir PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(rxcc_ir SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 separate_arguments(RX_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")
@@ -116,10 +117,16 @@ if(BUILD_TESTING)
   target_compile_options(ir_entry_test PRIVATE -Wall -Wextra)
   add_test(NAME ir_entry_test COMMAND ir_entry_test)
 
+  add_executable(ir_scalar_test tests/ir/scalar_test.cpp)
+  target_link_libraries(ir_scalar_test PRIVATE rxcc_ir)
+  target_compile_options(ir_scalar_test PRIVATE -Wall -Wextra)
+  add_test(NAME ir_scalar_test COMMAND ir_scalar_test)
+
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME ir_cli_smoke
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_ir.py"
-      --compiler "$<TARGET_FILE:rxcc>" --ir-test "$<TARGET_FILE:ir_entry_test>")
+      --compiler "$<TARGET_FILE:rxcc>" --ir-test "$<TARGET_FILE:ir_entry_test>"
+      --scalar-test "$<TARGET_FILE:ir_scalar_test>")
   set_tests_properties(ir_cli_smoke PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.." TIMEOUT 180)
 endif()

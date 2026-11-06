@@ -77,7 +77,8 @@ target_compile_options(rxcc_frontend PRIVATE -Wall -Wextra)
 set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
 
 # LLVM 模块及其 context 一起持有；不改变前端的 C++20、异常或 RTTI 设置。
-add_library(rxcc_ir STATIC src/ir/artifact.cpp src/ir/generator.cpp)
+add_library(rxcc_ir STATIC
+  src/ir/artifact.cpp src/ir/generator.cpp src/ir/value.cpp src/ir/storage.cpp)
 target_include_directories(rxcc_ir PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_include_directories(rxcc_ir SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
 separate_arguments(RX_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")

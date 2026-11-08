@@ -19,12 +19,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
 
-      - name: Install Clang 22 for LLVM IR tests
+      - name: Install LLVM 22 command-line tools for IR validation
         run: |
           curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
           echo 'deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-22 main' | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y clang-22
+          sudo apt-get install -y clang-22 llvm-22
 
       - name: Set up xmake
         uses: xmake-io/github-action-setup-xmake@v1
@@ -43,3 +43,8 @@ jobs:
 
       - name: Run tests
         run: make test BUILD_REFERENCE=true
+
+      - name: Validate self-owned IR and RV32 behavior
+        run: |
+          ctest --test-dir rxcc/build --output-on-failure
+          python3 rxcc/tests/run_ir.py --reimu

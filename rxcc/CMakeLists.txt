@@ -3,14 +3,13 @@
 #   cmake -S rxcc -B rxcc/build
 #   cmake --build rxcc/build -j
 #   ./rxcc/build/rxcc --dump-tree rxcc/examples/hello.rx
-# LLVM 22 development files are required. If discovery fails, configure with:
-#   cmake -S rxcc -B rxcc/build -DLLVM_DIR="$(llvm-config-22 --cmakedir)"
+# LLVM 22 command-line tools are used only by the external IR tests.
+# Building rxcc does not require LLVM headers or libraries.
 #
 # Generated parser sources and the matching ANTLR runtime are committed so normal
 # builds work offline, without Java or the local dev/antlr toolchain.
 cmake_minimum_required(VERSION 3.16)
-# LLVM's dependency checks (for example FindFFI) compile C test programs.
-project(rxcc LANGUAGES C CXX)
+project(rxcc LANGUAGES CXX)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug CACHE STRING "" FORCE)
@@ -21,13 +20,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
-find_package(LLVM REQUIRED CONFIG)
-if(NOT LLVM_VERSION_MAJOR EQUAL 22)
-  message(FATAL_ERROR
-    "rxcc requires LLVM 22; found ${LLVM_PACKAGE_VERSION} in ${LLVM_DIR}. "
-    "Set LLVM_DIR to the directory reported by llvm-config-22 --cmakedir.")
-endif()
-message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../vendor/antlr4-runtime"
                  "${CMAKE_CURRENT_BINARY_DIR}/antlr4-runtime")
 
@@ -76,21 +68,12 @@ target_link_libraries(rxcc_frontend PUBLIC rxcc_antlr_runtime Threads::Threads)
 target_compile_options(rxcc_frontend PRIVATE -Wall -Wextra)
 set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")
 
-# LLVM 模块及其 context 一起持有；不改变前端的 C++20、异常或 RTTI 设置。
+# 自有 LLVM IR 子集、构建/检查/文本输出；不链接 LLVM 开发库。
 add_library(rxcc_ir STATIC
-  src/ir/artifact.cpp src/ir/generator.cpp src/ir/value.cpp src/ir/storage.cpp
-  src/ir/scalar.cpp)
+  src/ir/model.cpp src/ir/builder.cpp src/ir/check.cpp src/ir/printer.cpp
+  src/ir/artifact.cpp src/ir/generator.cpp)
 target_include_directories(rxcc_ir PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_include_directories(rxcc_ir SYSTEM PUBLIC ${LLVM_INCLUDE_DIRS})
-separate_arguments(RX_LLVM_DEFINITIONS NATIVE_COMMAND "${LLVM_DEFINITIONS}")
-target_compile_options(rxcc_ir PUBLIC ${RX_LLVM_DEFINITIONS})
 target_compile_options(rxcc_ir PRIVATE -Wall -Wextra)
-if(LLVM_LINK_LLVM_DYLIB AND TARGET LLVM)
-  target_link_libraries(rxcc_ir PUBLIC LLVM)
-else()
-  llvm_map_components_to_libnames(RX_LLVM_LIBS Core Support)
-  target_link_libraries(rxcc_ir PUBLIC ${RX_LLVM_LIBS})
-endif()
 
 add_executable(rxcc src/main.cpp)
 target_link_libraries(rxcc PRIVATE rxcc_frontend rxcc_ir)
@@ -98,35 +81,27 @@ target_compile_options(rxcc PRIVATE -Wall -Wextra)
 
 include(CTest)
 if(BUILD_TESTING)
-  # This optional local test may be ignored by the developer's Git configuration.
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/semantic_invariants.cpp")
-    add_executable(semantic_invariants tests/semantic_invariants.cpp)
-    target_link_libraries(semantic_invariants PRIVATE rxcc_frontend)
-    target_compile_options(semantic_invariants PRIVATE -Wall -Wextra)
-    add_test(NAME semantic_invariants COMMAND semantic_invariants)
-  endif()
+  add_executable(semantic_invariants tests/semantic_invariants.cpp)
+  target_link_libraries(semantic_invariants PRIVATE rxcc_frontend)
+  target_compile_options(semantic_invariants PRIVATE -Wall -Wextra)
+  add_test(NAME semantic_invariants COMMAND semantic_invariants)
 
-  add_executable(ir_api_smoke tests/ir/api_smoke.cpp)
-  target_link_libraries(ir_api_smoke PRIVATE rxcc_ir)
-  target_compile_options(ir_api_smoke PRIVATE -Wall -Wextra)
-  add_test(NAME ir_api_invariants COMMAND ir_api_smoke --test)
-  add_test(NAME ir_api_smoke COMMAND ir_api_smoke)
+  add_executable(ir_model_smoke tests/ir/model_test.cpp)
+  target_link_libraries(ir_model_smoke PRIVATE rxcc_ir)
+  target_compile_options(ir_model_smoke PRIVATE -Wall -Wextra)
+  add_test(NAME ir_model_invariants COMMAND ir_model_smoke --test)
+  add_test(NAME ir_model_smoke COMMAND ir_model_smoke)
 
   add_executable(ir_entry_test tests/ir/entry_test.cpp)
   target_link_libraries(ir_entry_test PRIVATE rxcc_frontend rxcc_ir)
   target_compile_options(ir_entry_test PRIVATE -Wall -Wextra)
   add_test(NAME ir_entry_test COMMAND ir_entry_test)
 
-  add_executable(ir_scalar_test tests/ir/scalar_test.cpp)
-  target_link_libraries(ir_scalar_test PRIVATE rxcc_ir)
-  target_compile_options(ir_scalar_test PRIVATE -Wall -Wextra)
-  add_test(NAME ir_scalar_test COMMAND ir_scalar_test)
-
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME ir_cli_smoke
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_ir.py"
       --compiler "$<TARGET_FILE:rxcc>" --ir-test "$<TARGET_FILE:ir_entry_test>"
-      --scalar-test "$<TARGET_FILE:ir_scalar_test>")
+      --model-test "$<TARGET_FILE:ir_model_smoke>")
   set_tests_properties(ir_cli_smoke PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.." TIMEOUT 180)
 endif()

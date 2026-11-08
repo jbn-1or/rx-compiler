@@ -31,6 +31,7 @@ chats/
 /rxcc/tests/*
 !/rxcc/tests/ir/
 !/rxcc/tests/run_ir.py
+!/rxcc/tests/semantic_invariants.cpp
 /tests
 
 .clang-format

@@ -33,10 +33,6 @@
 #include "ast_builder.hpp"
 #include "diagnostics.hpp"
 #include "sema/sema.hpp"
-#include <llvm/IR/Module.h>
-#include <llvm/Support/FileSystem.h>
-#include <llvm/Support/raw_ostream.h>
-#include <llvm/IR/Verifier.h>
 
 namespace {
 
@@ -206,25 +202,25 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (stage == "ir") {
-            auto artifact = rx::generate_ir(*crate, *semantic_result, llvm::errs());
+            auto artifact = rx::generate_ir(*crate, *semantic_result, std::cerr);
             if (!artifact)
                 return 1;
 
-            // 先验证完整模块，再创建/截断输出文件，避免校验失败破坏旧文件。
-            if (llvm::verifyModule(artifact->module(), &llvm::errs()))
+            // 先检查并完成文本生成，再打开输出，避免 lowering 失败破坏旧文件。
+            std::ostringstream text;
+            if (!artifact->verify_and_print(text, std::cerr))
                 return 1;
-            std::error_code error;
-            llvm::raw_fd_ostream output(output_path, error, llvm::sys::fs::OF_Text);
-            if (error) {
+            std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
+            if (!output) {
                 std::cerr << "rxcc: cannot open IR output '" << output_path
-                          << "': " << error.message() << '\n';
+                          << "'\n";
                 return 2;
             }
-            artifact->module().print(output, nullptr);
+            output << text.str();
             output.flush();
-            if (output.has_error()) {
+            output.close();
+            if (!output) {
                 std::cerr << "rxcc: failed writing IR output '" << output_path << "'\n";
-                output.clear_error();
                 return 2;
             }
             return 0;

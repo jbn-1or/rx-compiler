@@ -1,0 +1,86 @@
+[
+  {
+    "source": "loop_storage.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "循环临时 slot 不逐迭代累积消耗栈",
+    "metadata": {
+      "testpoint": "P11-07",
+      "requires": "P11.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "loop_storage.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "循环临时 slot 不逐迭代累积消耗栈",
+    "metadata": {
+      "testpoint": "P11-07",
+      "requires": "P11.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "loop_storage.out"
+      }
+    ]
+  },
+  {
+    "source": "recursive_frames.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "递归调用前后局部值存活且各帧独立",
+    "metadata": {
+      "testpoint": "P11-08",
+      "requires": "P11.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "recursive_frames.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "递归调用前后局部值存活且各帧独立",
+    "metadata": {
+      "testpoint": "P11-08",
+      "requires": "P11.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "recursive_frames.out"
+      }
+    ]
+  },
+  {
+    "source": "mixed_pipeline.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "拥有聚合的克隆、删除、相等联合行为",
+    "metadata": {
+      "testpoint": "P11-10",
+      "requires": "P11.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "mixed_pipeline.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "拥有聚合的克隆、删除、相等联合行为",
+    "metadata": {
+      "testpoint": "P11-10",
+      "requires": "P11.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "mixed_pipeline.out"
+      }
+    ]
+  }
+]

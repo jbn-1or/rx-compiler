@@ -1,0 +1,8 @@
+fn main() {
+    let mut values = Vec::<usize>::new();
+    values.push(values.len());
+    values.push(values.len());
+    println_i32(values[0] as i32);
+    println_i32(values[1] as i32);
+    println_i32(values.len() as i32);
+}

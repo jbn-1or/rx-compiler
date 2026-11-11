@@ -1,0 +1,11 @@
+fn mark(tag: i32, value: bool) -> bool { println_i32(tag); value }
+fn main() {
+    println_i32((mark(1, false) & mark(2, true)) as i32);
+    println_i32((mark(3, true) | mark(4, false)) as i32);
+    println_i32((true ^ true) as i32);
+    println_i32((!false) as i32);
+    println_i32(6i32 & 3i32);
+    println_i32(6i32 | 3i32);
+    println_i32(6i32 ^ 3i32);
+    println_i32(!0i32);
+}

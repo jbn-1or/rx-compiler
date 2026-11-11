@@ -1,0 +1,6 @@
+fn main() {
+    println_i32((-1i32 < 0i32) as i32);
+    println_i32((4294967295u32 < 1u32) as i32);
+    println_i32((false < true) as i32);
+    println_i32((true > false) as i32);
+}

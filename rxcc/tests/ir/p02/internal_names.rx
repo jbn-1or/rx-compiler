@@ -1,0 +1,3 @@
+fn __rx_fn_1() {}
+fn main() -> () {}
+fn helper() {}

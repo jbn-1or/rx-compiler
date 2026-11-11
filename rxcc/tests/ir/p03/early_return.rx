@@ -1,0 +1,3 @@
+fn value() -> i32 { return 7; println_i32(99); 99 }
+fn stop() { return; println_i32(99); }
+fn main() { println_i32(value()); stop(); println_i32(8); }

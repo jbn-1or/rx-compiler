@@ -1,0 +1,142 @@
+[
+  {
+    "source": "deep_clone.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "拥有内容深克隆，引用字段保持目标",
+    "metadata": {
+      "testpoint": "P10-01",
+      "requires": "P10.1",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "deep_clone.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "拥有内容深克隆，引用字段保持目标",
+    "metadata": {
+      "testpoint": "P10-01",
+      "requires": "P10.1",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "deep_clone.out"
+      }
+    ]
+  },
+  {
+    "source": "shared_ref_clone.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "共享引用自身可 Clone，不要求目标 Clone",
+    "metadata": {
+      "testpoint": "P10-03",
+      "requires": "P10.1",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "shared_ref_clone.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "共享引用自身可 Clone，不要求目标 Clone",
+    "metadata": {
+      "testpoint": "P10-03",
+      "requires": "P10.1",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "shared_ref_clone.out"
+      }
+    ]
+  },
+  {
+    "source": "equality.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "相等按内容比较且不消耗拥有者",
+    "metadata": {
+      "testpoint": "P10-06",
+      "requires": "P10.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "equality.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "相等按内容比较且不消耗拥有者",
+    "metadata": {
+      "testpoint": "P10-06",
+      "requires": "P10.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "equality.out"
+      }
+    ]
+  },
+  {
+    "source": "eq_order.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "相等与不等的值操作数各求值一次",
+    "metadata": {
+      "testpoint": "P10-09",
+      "requires": "P10.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "eq_order.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "相等与不等的值操作数各求值一次",
+    "metadata": {
+      "testpoint": "P10-09",
+      "requires": "P10.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "eq_order.out"
+      }
+    ]
+  },
+  {
+    "source": "recursive_tree.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "递归 helper 生成终止且深克隆树独立",
+    "metadata": {
+      "testpoint": "P10-11",
+      "requires": "P10.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "recursive_tree.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "递归 helper 生成终止且深克隆树独立",
+    "metadata": {
+      "testpoint": "P10-11",
+      "requires": "P10.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "recursive_tree.out"
+      }
+    ]
+  }
+]

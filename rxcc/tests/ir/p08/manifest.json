@@ -1,0 +1,114 @@
+[
+  {
+    "source": "methods.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "共享/可变接收者和显式关联调用",
+    "metadata": {
+      "testpoint": "P8-01",
+      "requires": "P8.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "methods.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "共享/可变接收者和显式关联调用",
+    "metadata": {
+      "testpoint": "P8-01",
+      "requires": "P8.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "methods.out"
+      }
+    ]
+  },
+  {
+    "source": "inherent_clone.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "同名用户 clone 遵守真实参数和返回类型",
+    "metadata": {
+      "testpoint": "P8-02",
+      "requires": "P8.1",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "inherent_clone.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "同名用户 clone 遵守真实参数和返回类型",
+    "metadata": {
+      "testpoint": "P8-02",
+      "requires": "P8.1",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "inherent_clone.out"
+      }
+    ]
+  },
+  {
+    "source": "receiver_order.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "接收者、参数、方法体顺序和执行次数",
+    "metadata": {
+      "testpoint": "P8-05",
+      "requires": "P8.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "receiver_order.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "接收者、参数、方法体顺序和执行次数",
+    "metadata": {
+      "testpoint": "P8-05",
+      "requires": "P8.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "receiver_order.out"
+      }
+    ]
+  },
+  {
+    "source": "array_len.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "数组 len 保留接收者副作用和提前离开",
+    "metadata": {
+      "testpoint": "P8-09",
+      "requires": "P8.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "array_len.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "数组 len 保留接收者副作用和提前离开",
+    "metadata": {
+      "testpoint": "P8-09",
+      "requires": "P8.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "array_len.out"
+      }
+    ]
+  }
+]

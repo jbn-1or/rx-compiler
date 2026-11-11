@@ -1,0 +1,12 @@
+fn main() {
+    let a = 3;
+    let b = 7;
+    println_i32(&a + &b);
+    println_i32(-&a);
+    let flag = false;
+    println_i32((!&flag) as i32);
+    let mut x = 3;
+    x += &b;
+    println_i32(x);
+    println_i32((&a < &b) as i32);
+}

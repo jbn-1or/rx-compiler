@@ -1,0 +1,14 @@
+fn main() {
+    let mut values = Vec::<i32>::new();
+    let mut i = 0usize;
+    while i < 65usize { values.push(i as i32); i += 1usize; }
+    println_i32(values.len() as i32);
+    i = 0usize;
+    let mut sum = 0;
+    while i < values.len() {
+        if values[i] != i as i32 { println_i32(-1); return; }
+        sum += values[i];
+        i += 1usize;
+    }
+    println_i32(sum);
+}

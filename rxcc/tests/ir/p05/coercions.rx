@@ -1,0 +1,13 @@
+fn read(value: &i32) -> i32 { *value }
+fn main() {
+    let mut x = 7;
+    let p = &mut x;
+    println_i32(read(p));
+    let r = &*p;
+    let rr = &r;
+    println_i32(read(rr));
+    { let q: &mut i32 = p; *q = 8; }
+    println_i32(*p);
+    *p = 9;
+    println_i32(*p);
+}

@@ -1,0 +1,5 @@
+struct Data { value: i32 }
+impl Data { fn get(&self, extra: i32) -> i32 { println_i32(3); self.value + extra } }
+fn make() -> Data { println_i32(1); Data { value: 4 } }
+fn argument() -> i32 { println_i32(2); 3 }
+fn main() { println_i32(make().get(argument())); }

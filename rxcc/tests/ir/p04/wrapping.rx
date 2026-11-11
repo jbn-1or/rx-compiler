@@ -1,0 +1,10 @@
+fn main() {
+    let max = 2147483647i32;
+    let min = -2147483648i32;
+    println_i32(max + 1);
+    println_i32(min - 1);
+    println_i32(65536i32 * 65536i32);
+    println_i32(-min);
+    println_i32((4294967295u32 + 1u32) as i32);
+    println_i32((0u32 - 1u32) as i32);
+}

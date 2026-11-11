@@ -1,0 +1,7 @@
+fn main() {
+    let mut x = 1;
+    let mut created = Vec::<&mut i32>::new();
+    created.push(&mut x);
+    let values = created;
+    *values[0] = 2;
+}

@@ -1,0 +1,7 @@
+fn sum(n: i32) -> i32 {
+    let saved = n;
+    if n == 0 { return 0; }
+    let rest = sum(n - 1);
+    saved + rest
+}
+fn main() { println_i32(sum(64)); }

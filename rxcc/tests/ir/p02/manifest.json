@@ -1,0 +1,58 @@
+[
+  {
+    "source": "empty_main.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "空源入口与返回零的机器入口",
+    "metadata": {
+      "testpoint": "P2-01",
+      "requires": "P2",
+      "ir_status": "baseline"
+    }
+  },
+  {
+    "source": "empty_main.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "空源入口与返回零的机器入口",
+    "metadata": {
+      "testpoint": "P2-01",
+      "requires": "P2",
+      "ir_status": "baseline"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "empty_main.out"
+      }
+    ]
+  },
+  {
+    "source": "internal_names.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "用户符号不与稳定内部函数名混淆",
+    "metadata": {
+      "testpoint": "P2-02",
+      "requires": "P2",
+      "ir_status": "baseline"
+    }
+  },
+  {
+    "source": "internal_names.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "用户符号不与稳定内部函数名混淆",
+    "metadata": {
+      "testpoint": "P2-02",
+      "requires": "P2",
+      "ir_status": "baseline"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "internal_names.out"
+      }
+    ]
+  }
+]

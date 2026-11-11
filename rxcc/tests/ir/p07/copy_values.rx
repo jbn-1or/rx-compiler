@@ -1,0 +1,18 @@
+#[derive(Clone, Copy)]
+struct Pair { first: i32, second: i32 }
+fn main() {
+    let original = Pair { first: 1, second: 2 };
+    let mut copied = original;
+    copied.first = 9;
+    println_i32(original.first);
+    println_i32(copied.first);
+    let a = [3, 4];
+    let mut b = a;
+    b[0] = 8;
+    println_i32(a[0]);
+    println_i32(b[0]);
+    b = a;
+    println_i32(b[0]);
+    copied = copied;
+    println_i32(copied.first);
+}

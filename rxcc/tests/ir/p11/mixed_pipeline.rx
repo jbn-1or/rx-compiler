@@ -1,0 +1,14 @@
+#[derive(Clone, PartialEq)]
+struct Bag { values: Vec<Box<i32>> }
+fn main() {
+    let mut values = Vec::<Box<i32>>::new();
+    values.push(Box::<i32>::new(1));
+    values.push(Box::<i32>::new(2));
+    let original = Bag { values: values };
+    let mut copied = original.clone();
+    println_i32((original == copied) as i32);
+    let mut removed = copied.values.remove(0);
+    *removed = 3;
+    println_i32(*removed);
+    println_i32(*original.values[0]);
+}

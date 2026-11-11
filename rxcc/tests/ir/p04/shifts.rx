@@ -1,0 +1,14 @@
+fn main() {
+    let zero = 0u32;
+    let edge = 31usize;
+    let wrap = 32i32;
+    let next = 33isize;
+    let negative = -1i32;
+    println_i32(1i32 << zero);
+    println_i32(1i32 << edge);
+    println_i32(1i32 << wrap);
+    println_i32(1i32 << next);
+    println_i32(1i32 << negative);
+    println_i32(-8i32 >> 1u32);
+    println_i32((4294967288u32 >> 1isize) as i32);
+}

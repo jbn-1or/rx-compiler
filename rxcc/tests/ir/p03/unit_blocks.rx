@@ -1,0 +1,2 @@
+fn main() { ping(); { (); } println_i32(8); }
+fn ping() { println_i32(7); }

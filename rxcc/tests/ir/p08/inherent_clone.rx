@@ -1,0 +1,3 @@
+struct Data { value: i32 }
+impl Data { fn clone(&self, delta: i32) -> i32 { self.value + delta } }
+fn main() { let x = Data { value: 7 }; println_i32(x.clone(2)); }

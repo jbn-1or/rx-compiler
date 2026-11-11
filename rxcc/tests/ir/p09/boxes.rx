@@ -1,0 +1,13 @@
+fn make() -> Box<i32> { Box::<i32>::new(7) }
+fn read(x: &i32) -> i32 { *x }
+fn main() {
+    let mut b = make();
+    println_i32(*b);
+    *b = 8;
+    println_i32(read(&b));
+    let nested = Box::<Box<i32>>::new(b);
+    println_i32(read(&nested));
+    let x = 1;
+    let moved = nested;
+    println_i32(**moved);
+}

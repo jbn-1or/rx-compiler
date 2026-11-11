@@ -1,0 +1,5 @@
+fn main() {
+    if true { println_i32(1); } else { println_i32(2); }
+    if false { println_i32(3); }
+    if false { println_i32(5); } else { println_i32(4); }
+}

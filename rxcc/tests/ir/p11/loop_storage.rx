@@ -1,0 +1,10 @@
+fn main() {
+    let mut i = 0;
+    let mut sum = 0;
+    while i < 100000 {
+        let r = &mut 1;
+        sum += *r;
+        i += 1;
+    }
+    println_i32(sum);
+}

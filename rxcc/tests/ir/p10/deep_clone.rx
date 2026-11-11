@@ -1,0 +1,17 @@
+#[derive(Clone)]
+struct Data<'a> { boxed: Box<i32>, values: Vec<i32>, shared: &'a i32 }
+fn main() {
+    let x = 9;
+    let mut values = Vec::<i32>::new();
+    values.push(2);
+    let original = Data { boxed: Box::<i32>::new(1), values: values, shared: &x };
+    let mut copied = original.clone();
+    *copied.boxed = 7;
+    copied.values[0] = 8;
+    println_i32(*original.boxed);
+    println_i32(original.values[0]);
+    println_i32(*copied.boxed);
+    println_i32(copied.values[0]);
+    println_i32(*original.shared);
+    println_i32(*copied.shared);
+}

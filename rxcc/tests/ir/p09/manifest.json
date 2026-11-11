@@ -1,0 +1,181 @@
+[
+  {
+    "source": "boxes.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "Box 返回、移动和多层引用转换",
+    "metadata": {
+      "testpoint": "P9-01",
+      "requires": "P9.1",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "boxes.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "Box 返回、移动和多层引用转换",
+    "metadata": {
+      "testpoint": "P9-01",
+      "requires": "P9.1",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "boxes.out"
+      }
+    ]
+  },
+  {
+    "source": "empty_vec.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "非零大小元素的空 Vec 是有效值",
+    "metadata": {
+      "testpoint": "P9-05",
+      "requires": "P9.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "empty_vec.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "非零大小元素的空 Vec 是有效值",
+    "metadata": {
+      "testpoint": "P9-05",
+      "requires": "P9.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "empty_vec.out"
+      }
+    ]
+  },
+  {
+    "source": "vec_growth.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "多次增长后活动元素顺序稳定",
+    "metadata": {
+      "testpoint": "P9-07",
+      "requires": "P9.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "vec_growth.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "多次增长后活动元素顺序稳定",
+    "metadata": {
+      "testpoint": "P9-07",
+      "requires": "P9.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "vec_growth.out"
+      }
+    ]
+  },
+  {
+    "source": "vec_two_phase.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "push 参数在更新头之前读取原 len",
+    "metadata": {
+      "testpoint": "P9-08",
+      "requires": "P9.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "vec_two_phase.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "push 参数在更新头之前读取原 len",
+    "metadata": {
+      "testpoint": "P9-08",
+      "requires": "P9.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "vec_two_phase.out"
+      }
+    ]
+  },
+  {
+    "source": "vec_remove.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "首中末删除保序且删空后可以追加",
+    "metadata": {
+      "testpoint": "P9-11",
+      "requires": "P9.4",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "vec_remove.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "首中末删除保序且删空后可以追加",
+    "metadata": {
+      "testpoint": "P9-11",
+      "requires": "P9.4",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "vec_remove.out"
+      }
+    ]
+  },
+  {
+    "source": "remove_owned.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "非 Clone 结构体和嵌套 Vec 的 push/remove 不深拷贝",
+    "metadata": {
+      "testpoint": "P9-12",
+      "requires": "P9.4",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "remove_owned.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "非 Clone 结构体和嵌套 Vec 的 push/remove 不深拷贝",
+    "metadata": {
+      "testpoint": "P9-12",
+      "requires": "P9.4",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "remove_owned.out"
+      }
+    ]
+  },
+  {
+    "source": "immutable_vec_write.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "不可变 Vec 的索引不能借内部可变引用绕过权限",
+    "metadata": {
+      "testpoint": "P9-14",
+      "requires": "P9",
+      "ir_status": "planned"
+    }
+  }
+]

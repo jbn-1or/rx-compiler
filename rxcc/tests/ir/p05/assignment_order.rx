@@ -1,0 +1,9 @@
+fn target(x: &mut i32) -> &mut i32 { println_i32(1); *x = 10; x }
+fn rhs() -> i32 { println_i32(2); 7 }
+fn main() {
+    let mut x = 0;
+    *target(&mut x) = rhs();
+    println_i32(x);
+    *target(&mut x) += rhs();
+    println_i32(x);
+}

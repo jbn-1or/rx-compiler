@@ -1,0 +1,5 @@
+fn make(tag: i32) -> Box<i32> { println_i32(tag); Box::<i32>::new(7) }
+fn main() {
+    println_i32((make(1) == make(2)) as i32);
+    println_i32((make(1) != make(2)) as i32);
+}

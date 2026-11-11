@@ -1,0 +1,7 @@
+fn choose(flag: bool) {
+    let mut a = 1;
+    let b = 2;
+    let r = if flag { &mut a } else { &b };
+    println_i32(*r);
+}
+fn main() { choose(true); choose(false); }

@@ -1,0 +1,2 @@
+fn identity(flag: bool) -> bool { let saved = flag; saved }
+fn main() { let yes = identity(true); let no = identity(false); }

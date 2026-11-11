@@ -1,0 +1,5 @@
+fn main() {
+    let values = Vec::<i32>::new();
+    println_i32(values.len() as i32);
+    println_i32(values.is_empty() as i32);
+}

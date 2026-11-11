@@ -1,0 +1,10 @@
+fn main() {
+    let x = 1;
+    let old = &x;
+    let x = 2;
+    println_i32(*old);
+    println_i32(x);
+    let p = &mut 3;
+    *p = 4;
+    println_i32(*p);
+}

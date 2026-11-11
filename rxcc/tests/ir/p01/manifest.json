@@ -1,0 +1,41 @@
+[
+  {
+    "source": "shadowing.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "同名局部与参数遮蔽保留独立身份",
+    "metadata": {
+      "testpoint": "P1-03",
+      "requires": "P3.4",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "shadowing.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "同名局部与参数遮蔽保留独立身份",
+    "metadata": {
+      "testpoint": "P1-03",
+      "requires": "P3.4",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "shadowing.out"
+      }
+    ]
+  },
+  {
+    "source": "unreachable_error.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "不可达代码仍检查普通名称错误",
+    "metadata": {
+      "testpoint": "P1-12",
+      "requires": "P1",
+      "ir_status": "planned"
+    }
+  }
+]

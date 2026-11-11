@@ -1,0 +1,5 @@
+fn main() {
+    println_i32(get_i32());
+    println_i32(get_i32());
+    println_i32(get_i32());
+}

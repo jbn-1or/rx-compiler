@@ -1,0 +1,7 @@
+fn make() -> [i32; 3] { println_i32(9); [1, 2, 3] }
+fn length(flag: bool) -> usize { (if flag { return 0; } else { make() }).len() }
+fn main() {
+    println_i32(make().len() as i32);
+    println_i32(length(true) as i32);
+    println_i32(length(false) as i32);
+}

@@ -1,0 +1,5 @@
+fn main() {
+    let depth = get_i32();
+    if depth > 0 { main(); }
+    println_i32(depth);
+}

@@ -1,0 +1,170 @@
+[
+  {
+    "source": "wrapping.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "四种回绕算术不受不溢出标志影响",
+    "metadata": {
+      "testpoint": "P4-01",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "wrapping.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "四种回绕算术不受不溢出标志影响",
+    "metadata": {
+      "testpoint": "P4-01",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "wrapping.out"
+      }
+    ]
+  },
+  {
+    "source": "division.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "有符号除法余数与无符号高位除法",
+    "metadata": {
+      "testpoint": "P4-02",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "division.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "有符号除法余数与无符号高位除法",
+    "metadata": {
+      "testpoint": "P4-02",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "division.out"
+      }
+    ]
+  },
+  {
+    "source": "comparison.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "整数符号性与 bool 无符号排序",
+    "metadata": {
+      "testpoint": "P4-03",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "comparison.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "整数符号性与 bool 无符号排序",
+    "metadata": {
+      "testpoint": "P4-03",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "comparison.out"
+      }
+    ]
+  },
+  {
+    "source": "bitwise.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "bool 位运算不短路，整数按位取反",
+    "metadata": {
+      "testpoint": "P4-05",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "bitwise.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "bool 位运算不短路，整数按位取反",
+    "metadata": {
+      "testpoint": "P4-05",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "bitwise.out"
+      }
+    ]
+  },
+  {
+    "source": "shifts.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "低五位移位掩码和算术/逻辑右移",
+    "metadata": {
+      "testpoint": "P4-07",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "shifts.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "低五位移位掩码和算术/逻辑右移",
+    "metadata": {
+      "testpoint": "P4-07",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "shifts.out"
+      }
+    ]
+  },
+  {
+    "source": "casts.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "位模式 cast 与 bool 零扩展",
+    "metadata": {
+      "testpoint": "P4-09",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "casts.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "位模式 cast 与 bool 零扩展",
+    "metadata": {
+      "testpoint": "P4-09",
+      "requires": "P4.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "casts.out"
+      }
+    ]
+  }
+]

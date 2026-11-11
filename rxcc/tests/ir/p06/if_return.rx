@@ -1,0 +1,2 @@
+fn choose(flag: bool) -> i32 { if flag { return 7; } else { 8 } }
+fn main() { println_i32(choose(true)); println_i32(choose(false)); }

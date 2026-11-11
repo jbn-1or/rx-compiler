@@ -1,0 +1,7 @@
+fn forward(x: i32) -> i32 { let x = x; x }
+fn main() {
+    let x = 1;
+    let x = 2;
+    { let x = x; println_i32(forward(x)); }
+    println_i32(x);
+}

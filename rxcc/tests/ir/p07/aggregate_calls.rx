@@ -1,0 +1,15 @@
+#[derive(Clone, Copy)]
+struct Pair { left: i32, right: i32 }
+fn change(mut p: Pair) -> Pair { p.left = 9; p }
+fn array(mut a: [i32; 2]) -> [i32; 2] { a[0] = 8; a }
+fn main() {
+    let p = Pair { left: 1, right: 2 };
+    let q = change(p);
+    println_i32(p.left);
+    println_i32(q.left);
+    println_i32(q.right);
+    let a = [3, 4];
+    let b = array(a);
+    println_i32(a[0]);
+    println_i32(b[0]);
+}

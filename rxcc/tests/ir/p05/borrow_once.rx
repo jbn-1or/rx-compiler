@@ -1,0 +1,7 @@
+fn make() -> i32 { println_i32(9); 3 }
+fn main() {
+    let p = &mut make();
+    println_i32(*p);
+    *p = 4;
+    println_i32(*p);
+}

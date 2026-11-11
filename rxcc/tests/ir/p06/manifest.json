@@ -1,0 +1,254 @@
+[
+  {
+    "source": "unit_if.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "unit if 只执行所选路径",
+    "metadata": {
+      "testpoint": "P6-01",
+      "requires": "P6.1",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "unit_if.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "unit if 只执行所选路径",
+    "metadata": {
+      "testpoint": "P6-01",
+      "requires": "P6.1",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "unit_if.out"
+      }
+    ]
+  },
+  {
+    "source": "if_values.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "整数 if 结果和分支副作用同时正确",
+    "metadata": {
+      "testpoint": "P6-03",
+      "requires": "P6.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "if_values.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "整数 if 结果和分支副作用同时正确",
+    "metadata": {
+      "testpoint": "P6-03",
+      "requires": "P6.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "if_values.out"
+      }
+    ]
+  },
+  {
+    "source": "if_return.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "发散分支不产生正常结果边",
+    "metadata": {
+      "testpoint": "P6-06",
+      "requires": "P6.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "if_return.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "发散分支不产生正常结果边",
+    "metadata": {
+      "testpoint": "P6-06",
+      "requires": "P6.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "if_return.out"
+      }
+    ]
+  },
+  {
+    "source": "short_circuit.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "四种短路路径与 RHS 标记次数",
+    "metadata": {
+      "testpoint": "P6-07",
+      "requires": "P6.4",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "short_circuit.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "四种短路路径与 RHS 标记次数",
+    "metadata": {
+      "testpoint": "P6-07",
+      "requires": "P6.4",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "short_circuit.out"
+      }
+    ]
+  },
+  {
+    "source": "while_condition.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "while 每次和退出前重新求值条件",
+    "metadata": {
+      "testpoint": "P6-09",
+      "requires": "P6.5",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "while_condition.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "while 每次和退出前重新求值条件",
+    "metadata": {
+      "testpoint": "P6-09",
+      "requires": "P6.5",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "while_condition.out"
+      }
+    ]
+  },
+  {
+    "source": "loop_control.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "continue 和 break 终止当前迭代路径",
+    "metadata": {
+      "testpoint": "P6-10",
+      "requires": "P6.6",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "loop_control.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "continue 和 break 终止当前迭代路径",
+    "metadata": {
+      "testpoint": "P6-10",
+      "requires": "P6.6",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "loop_control.out"
+      }
+    ]
+  },
+  {
+    "source": "break_value.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "所有 break 正常边提供整数结果",
+    "metadata": {
+      "testpoint": "P6-12",
+      "requires": "P6.7A",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "break_value.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "所有 break 正常边提供整数结果",
+    "metadata": {
+      "testpoint": "P6-12",
+      "requires": "P6.7A",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "break_value.out"
+      }
+    ]
+  },
+  {
+    "source": "reference_lub.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "无期望引用 LUB 回填前面分支调整",
+    "metadata": {
+      "testpoint": "P6-13",
+      "requires": "P6.7B",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "reference_lub.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "无期望引用 LUB 回填前面分支调整",
+    "metadata": {
+      "testpoint": "P6-13",
+      "requires": "P6.7B",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "reference_lub.out"
+      }
+    ]
+  },
+  {
+    "source": "source_main_recursion.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "源 main 的递归返回恢复源调用者",
+    "metadata": {
+      "testpoint": "P6-17",
+      "requires": "P6.8",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "source_main_recursion.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "源 main 的递归返回恢复源调用者",
+    "metadata": {
+      "testpoint": "P6-17",
+      "requires": "P6.8",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": "source_main_recursion.in",
+        "output": "source_main_recursion.out"
+      }
+    ]
+  }
+]

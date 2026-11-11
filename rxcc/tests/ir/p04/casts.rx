@@ -1,0 +1,12 @@
+fn main() {
+    println_i32((-1i32 as u32) as i32);
+    println_i32(2147483648u32 as i32);
+    println_i32(true as i32);
+    println_i32((true as u32) as i32);
+    println_i32((true as isize) as i32);
+    println_i32((true as usize) as i32);
+    println_i32(false as i32);
+    println_i32((false as u32) as i32);
+    println_i32((false as isize) as i32);
+    println_i32((false as usize) as i32);
+}

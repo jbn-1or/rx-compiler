@@ -1,0 +1,14 @@
+#[derive(Clone, PartialEq, Eq)]
+struct Node { value: i32, children: Vec<Node> }
+fn main() {
+    let leaf = Node { value: 2, children: Vec::<Node>::new() };
+    let mut children = Vec::<Node>::new();
+    children.push(leaf);
+    let tree = Node { value: 1, children: children };
+    let mut copied = tree.clone();
+    println_i32((tree == copied) as i32);
+    copied.children[0].value = 9;
+    println_i32((tree == copied) as i32);
+    println_i32(tree.children[0].value);
+    println_i32(copied.children[0].value);
+}

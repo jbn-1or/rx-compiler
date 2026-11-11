@@ -1,0 +1,198 @@
+[
+  {
+    "source": "literal_io.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "print 无分隔符，println 精确换行",
+    "metadata": {
+      "testpoint": "P3-01",
+      "requires": "P3.1",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "literal_io.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "print 无分隔符，println 精确换行",
+    "metadata": {
+      "testpoint": "P3-01",
+      "requires": "P3.1",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "literal_io.out"
+      }
+    ]
+  },
+  {
+    "source": "read_io.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "连续读取整数边界，每次输入消费一次",
+    "metadata": {
+      "testpoint": "P3-02",
+      "requires": "P3.1",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "read_io.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "连续读取整数边界，每次输入消费一次",
+    "metadata": {
+      "testpoint": "P3-02",
+      "requires": "P3.1",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": "read_io.in",
+        "output": "read_io.out"
+      }
+    ]
+  },
+  {
+    "source": "shadowing.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "遮蔽初始化读取旧绑定，退出块恢复绑定",
+    "metadata": {
+      "testpoint": "P3-03",
+      "requires": "P3.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "shadowing.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "遮蔽初始化读取旧绑定，退出块恢复绑定",
+    "metadata": {
+      "testpoint": "P3-03",
+      "requires": "P3.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "shadowing.out"
+      }
+    ]
+  },
+  {
+    "source": "unit_blocks.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "前向 unit 调用和块结果允许继续执行",
+    "metadata": {
+      "testpoint": "P3-06",
+      "requires": "P3.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "unit_blocks.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "前向 unit 调用和块结果允许继续执行",
+    "metadata": {
+      "testpoint": "P3-06",
+      "requires": "P3.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "unit_blocks.out"
+      }
+    ]
+  },
+  {
+    "source": "scalar_calls.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "从左到右求值参数并使用标量尾返回",
+    "metadata": {
+      "testpoint": "P3-07",
+      "requires": "P3.4",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "scalar_calls.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "从左到右求值参数并使用标量尾返回",
+    "metadata": {
+      "testpoint": "P3-07",
+      "requires": "P3.4",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "scalar_calls.out"
+      }
+    ]
+  },
+  {
+    "source": "early_return.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "提前返回终止当前路径，unit 返回后调用者继续",
+    "metadata": {
+      "testpoint": "P3-10",
+      "requires": "P3.5",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "early_return.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "提前返回终止当前路径，unit 返回后调用者继续",
+    "metadata": {
+      "testpoint": "P3-10",
+      "requires": "P3.5",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "early_return.out"
+      }
+    ]
+  },
+  {
+    "source": "bool_boundary.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "bool 经参数、局部、尾返回保持计算/存储边界",
+    "metadata": {
+      "testpoint": "P3-13",
+      "requires": "P3.6",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "bool_boundary.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "bool 经参数、局部、尾返回保持计算/存储边界",
+    "metadata": {
+      "testpoint": "P3-13",
+      "requires": "P3.6",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "bool_boundary.out"
+      }
+    ]
+  }
+]

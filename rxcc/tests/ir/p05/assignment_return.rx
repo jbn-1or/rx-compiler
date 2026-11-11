@@ -1,0 +1,3 @@
+fn target(x: &mut i32) -> &mut i32 { println_i32(99); x }
+fn stop() { let mut x = 1; *target(&mut x) = return; }
+fn main() { stop(); println_i32(7); }

@@ -1,0 +1,142 @@
+[
+  {
+    "source": "construction_order.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "字段按源码顺序求值按声明顺序存放",
+    "metadata": {
+      "testpoint": "P7-06",
+      "requires": "P7.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "construction_order.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "字段按源码顺序求值按声明顺序存放",
+    "metadata": {
+      "testpoint": "P7-06",
+      "requires": "P7.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "construction_order.out"
+      }
+    ]
+  },
+  {
+    "source": "repeat_coercion.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "数组重复只求值一次并先转换引用",
+    "metadata": {
+      "testpoint": "P7-07",
+      "requires": "P7.2",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "repeat_coercion.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "数组重复只求值一次并先转换引用",
+    "metadata": {
+      "testpoint": "P7-07",
+      "requires": "P7.2",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "repeat_coercion.out"
+      }
+    ]
+  },
+  {
+    "source": "copy_values.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "结构体和数组副本独立且整体赋值安全",
+    "metadata": {
+      "testpoint": "P7-11",
+      "requires": "P7.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "copy_values.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "结构体和数组副本独立且整体赋值安全",
+    "metadata": {
+      "testpoint": "P7-11",
+      "requires": "P7.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "copy_values.out"
+      }
+    ]
+  },
+  {
+    "source": "aggregate_calls.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "聚合参数与返回具有独立按值存储",
+    "metadata": {
+      "testpoint": "P7-14",
+      "requires": "P7.4",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "aggregate_calls.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "聚合参数与返回具有独立按值存储",
+    "metadata": {
+      "testpoint": "P7-14",
+      "requires": "P7.4",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "aggregate_calls.out"
+      }
+    ]
+  },
+  {
+    "source": "temporary_array.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "返回数组上的索引与借用只构造一次",
+    "metadata": {
+      "testpoint": "P7-15",
+      "requires": "P7.4",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "temporary_array.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "返回数组上的索引与借用只构造一次",
+    "metadata": {
+      "testpoint": "P7-15",
+      "requires": "P7.4",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "temporary_array.out"
+      }
+    ]
+  }
+]

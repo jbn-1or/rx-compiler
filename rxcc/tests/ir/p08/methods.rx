@@ -1,0 +1,13 @@
+struct Data { value: i32 }
+impl Data {
+    const START: i32 = 7;
+    fn new(value: i32) -> Self { Self { value: value } }
+    fn get(&self) -> i32 { self.value }
+    fn set(&mut self, value: i32) { self.value = value; }
+}
+fn main() {
+    let mut x = Data::new(Data::START);
+    println_i32(x.get());
+    x.set(8);
+    println_i32(Data::get(&x));
+}

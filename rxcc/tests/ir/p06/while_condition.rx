@@ -1,0 +1,2 @@
+fn condition(x: i32) -> bool { println_i32(x); x < 2 }
+fn main() { let mut x = 0; while condition(x) { x += 1; } }

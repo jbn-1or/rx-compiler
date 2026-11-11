@@ -1,0 +1,8 @@
+struct Data { value: i32 }
+fn main() {
+    let x = Data { value: 7 };
+    let r = &x;
+    let copied: &Data = r.clone();
+    println_i32(copied.value);
+    println_i32(x.value);
+}

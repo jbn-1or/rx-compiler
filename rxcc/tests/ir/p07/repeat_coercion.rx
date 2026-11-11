@@ -1,0 +1,14 @@
+fn mark(x: i32) -> i32 { println_i32(x); x }
+fn main() {
+    let listed = [mark(1), mark(2)];
+    let repeated = [mark(3); 2];
+    println_i32(listed[0]);
+    println_i32(listed[1]);
+    println_i32(repeated[0]);
+    println_i32(repeated[1]);
+    let x = 7;
+    let r = &x;
+    let a: [&i32; 2] = [&r; 2];
+    println_i32(*a[0]);
+    println_i32(*a[1]);
+}

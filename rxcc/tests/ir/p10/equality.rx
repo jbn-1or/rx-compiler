@@ -1,0 +1,22 @@
+#[derive(PartialEq)]
+struct Mixed { flag: bool, value: i32, tail: bool }
+fn main() {
+    let a = Box::<i32>::new(7);
+    let b = Box::<i32>::new(7);
+    println_i32((a == b) as i32);
+    println_i32(*a);
+    println_i32(*b);
+    let mut v = Vec::<i32>::new();
+    v.push(1); v.push(2); v.push(3); v.remove(2);
+    let mut w = Vec::<i32>::new();
+    w.push(1); w.push(2);
+    println_i32((v == w) as i32);
+    println_i32(v[1]);
+    println_i32(w[1]);
+    let x = 5;
+    let y = 5;
+    println_i32((&x == &y) as i32);
+    let left = Mixed { flag: true, value: 7, tail: false };
+    let right = Mixed { tail: false, value: 7, flag: true };
+    println_i32((left == right) as i32);
+}

@@ -1,0 +1,170 @@
+[
+  {
+    "source": "references.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "引用保留旧 place 和可写临时值",
+    "metadata": {
+      "testpoint": "P5-01",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "references.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "引用保留旧 place 和可写临时值",
+    "metadata": {
+      "testpoint": "P5-01",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "references.out"
+      }
+    ]
+  },
+  {
+    "source": "borrow_once.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "借用值只物化一次且存储持续有效",
+    "metadata": {
+      "testpoint": "P5-02",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "borrow_once.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "借用值只物化一次且存储持续有效",
+    "metadata": {
+      "testpoint": "P5-02",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "borrow_once.out"
+      }
+    ]
+  },
+  {
+    "source": "coercions.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "嵌套引用转换和可变重借用",
+    "metadata": {
+      "testpoint": "P5-05",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "coercions.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "嵌套引用转换和可变重借用",
+    "metadata": {
+      "testpoint": "P5-05",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "coercions.out"
+      }
+    ]
+  },
+  {
+    "source": "assignment_order.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "普通和复合赋值 RHS 优先，旧值在求目标后读取",
+    "metadata": {
+      "testpoint": "P5-08",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "assignment_order.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "普通和复合赋值 RHS 优先，旧值在求目标后读取",
+    "metadata": {
+      "testpoint": "P5-08",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "assignment_order.out"
+      }
+    ]
+  },
+  {
+    "source": "assignment_return.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "RHS return 阻止赋值目标求值",
+    "metadata": {
+      "testpoint": "P5-10",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "assignment_return.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "RHS return 阻止赋值目标求值",
+    "metadata": {
+      "testpoint": "P5-10",
+      "requires": "P5.3",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "assignment_return.out"
+      }
+    ]
+  },
+  {
+    "source": "reference_operands.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "标量引用运算读取目标而不修改操作数",
+    "metadata": {
+      "testpoint": "P5-12",
+      "requires": "P5.4",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "reference_operands.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "标量引用运算读取目标而不修改操作数",
+    "metadata": {
+      "testpoint": "P5-12",
+      "requires": "P5.4",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "reference_operands.out"
+      }
+    ]
+  }
+]

@@ -1,4 +1,4 @@
-// P2：真实源码的空函数、双入口、命名与失败边界。
+// P2/P3.1：真实源码的双入口、字面量打印、命名与失败边界。
 #include "RxLexer.h"
 #include "RxParser.h"
 #include "ast_builder.hpp"
@@ -46,7 +46,7 @@ rx::SemanticResult analyze(const rx::Crate &crate) {
 rx::IRArtifact generate(const rx::Crate &crate, const rx::SemanticResult &sema) {
     std::ostringstream diagnostics;
     auto artifact = rx::generate_ir(crate, sema, diagnostics);
-    check(artifact && diagnostics.str().empty(), "P2 有效输入必须成功生成模块");
+    check(artifact && diagnostics.str().empty(), "已支持的有效输入必须成功生成模块");
     return std::move(*artifact);
 }
 
@@ -105,15 +105,78 @@ void check_function_names() {
     check(!rx::assign_function_names(sema, diagnostics), "损坏的源函数身份必须拒绝");
 }
 
+void check_println() {
+    const auto crate = parse_crate(
+        "fn unused() { println_i32(99); } fn main() { println_i32(42); println_i32(0i32); }");
+    auto sema = analyze(*crate);
+    const auto artifact = generate(*crate, sema);
+    const auto &module = artifact.module();
+    const auto *println = module.find_function("println_i32");
+    check(println && println->is_declaration() && println->linkage == Linkage::External &&
+              println->signature == Signature{Type::Void, {Type::I32}} &&
+              module.functions().size() == sema.functions.size() + 2,
+          "所有调用应共享一个运行时声明");
+    const auto *main = module.find_function("__rx_fn_1");
+    const auto &instructions = main->blocks[0].instructions;
+    check(instructions.size() == 2 && !instructions[0].result && !instructions[1].result &&
+              std::get<Call>(instructions[0].operation).function == println->id &&
+              std::get<Call>(instructions[0].operation).arguments ==
+                  std::vector<Operand>{Operand::constant(Type::I32, 42)} &&
+              std::get<Call>(instructions[1].operation).arguments ==
+                  std::vector<Operand>{Operand::constant(Type::I32, 0)},
+          "打印必须保留语句顺序、常量和 void call 的无结果语义");
+    check(module.find_function("__rx_fn_0")->blocks[0].instructions.size() == 1,
+          "未调用函数的打印也必须生成");
+
+    // 修改语义事实而不修改 AST，确认生成器不从源码数值重新推导。
+    for (auto &[literal, fact] : sema.integer_literals) {
+        (void)literal;
+        fact.bits = 0xffffffffu;
+    }
+    const auto changed = generate(*crate, sema);
+    const auto &call = std::get<Call>(changed.module().find_function("__rx_fn_1")
+                                        ->blocks[0].instructions[0].operation);
+    check(call.arguments[0] == Operand::constant(Type::I32, 0xffffffffu),
+          "常量位模式必须来自语义事实");
+
+    for (int corruption = 0; corruption < 5; ++corruption) {
+        auto broken = analyze(*crate);
+        switch (corruption) {
+        case 0: broken.ordinary_calls.clear(); break;
+        case 1: broken.builtin_signatures.clear(); break;
+        case 2: broken.integer_literals.clear(); break;
+        case 3: broken.builtin_signatures.at(rx::BuiltinIO::PrintlnI32).parameters.clear(); break;
+        case 4: broken.integer_literals.begin()->second.type = rx::SemanticType::bool_(); break;
+        }
+        std::ostringstream errors;
+        check(!rx::generate_ir(*crate, broken, errors) &&
+                  errors.str().find("内部错误") != std::string::npos,
+              "缺失或损坏的调用与字面量事实必须报告内部错误");
+    }
+    for (auto &[node, target] : sema.ordinary_calls) {
+        (void)node;
+        target = *sema.main_function;
+    }
+    std::ostringstream errors;
+    check(!rx::generate_ir(*crate, sema, errors) &&
+              errors.str().find("尚未支持") != std::string::npos,
+          "不能根据 println_i32 的源码名字把用户函数目标当成 builtin");
+}
+
 void run_tests() {
     check_function_names();
+    check_println();
     check_entry("fn main() {}");
     check_entry("fn main() -> () {}");
     check_entry("fn __rx_fn_1() {} fn main() {} fn helper() {}");
     check_entry("const LEN: usize = 2; struct Data { values: [i32; LEN] } impl Data { const VALUE: i32 = 7; } fn main() {}");
     for (const auto &source : {
              "fn main() { let x = 1; }",
-             "fn main() { println_i32(42); }",
+             "fn main() { Box::<i32>::new(1); }",
+             "fn main() { Vec::<i32>::new(); }",
+             "fn main() { print_i32(42); }",
+             "fn main() { println_i32(get_i32()); }",
+             "fn main() { println_i32(42) }",
              "fn main() { main(); }",
              "fn main() { return; }",
              "fn main() { (); }",
@@ -121,7 +184,7 @@ void run_tests() {
              "fn main() { 1 + 2; }",
              "fn main() { { } }",
              "fn main() { let x = return; }",
-             "fn main() {} fn unused() { println_i32(99); }",
+             "fn main() {} fn unused() { println_i32(99); let x = 1; }",
              "fn main() {} fn unused(value: i32) {}",
              "fn main() {} fn unused() -> i32 { 7 }",
              "struct Data {} impl Data { fn unused(&self) {} } fn main() {}"})

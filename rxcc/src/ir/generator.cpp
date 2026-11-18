@@ -1,4 +1,4 @@
-// 将已通过语义检查的程序转换为 IR，当前只支持空的、无参数、返回 unit 的普通函数。
+// 将已通过语义检查的程序转换为 IR，支持无参 unit 函数和 i32 字面量的 println 调用。
 // 先命名并检查所有源函数，再创建 IR 函数和机器入口 main，不忽略未调用的函数。
 // 这里只构建模块，输出 LLVM 文本由 artifact/printer 完成。
 #include "ir/generator.hpp"
@@ -36,7 +36,7 @@ bool validate_functions(const Crate &crate, const SemanticResult &semantics,
     for (const auto &owned : semantics.functions) {
         const auto &function = *owned; // assign_function_names 已检查指针、ID 和声明记录。
         if (function.owner) {
-            diagnostics << "IR 生成尚未支持方法或关联函数（P2 仅生成空的普通函数）\n";
+            diagnostics << "IR 生成尚未支持方法或关联函数\n";
             return false;
         }
         if (!top_level.erase(function.node)) {
@@ -48,10 +48,10 @@ bool validate_functions(const Crate &crate, const SemanticResult &semantics,
             diagnostics << "IR 生成尚未支持此函数签名（P2 仅支持无参 unit 函数）\n";
             return false;
         }
-        // 当前不支持语句和块尾表达式，发现后直接报错，不能当作空函数生成。
+        // 块尾表达式留给后续小步；语句在生成时逐一检查，不能静默忽略。
         const auto &body = *function.node->body;
-        if (!body.statements.empty() || body.tail) {
-            diagnostics << "IR 生成尚未支持非空函数体（P3 及后续 lowering 待实现）\n";
+        if (body.tail) {
+            diagnostics << "IR 生成尚未支持块尾表达式\n";
             return false;
         }
     }
@@ -59,6 +59,58 @@ bool validate_functions(const Crate &crate, const SemanticResult &semantics,
         diagnostics << "IR 内部错误：当前 Crate 的顶层函数缺少语义记录\n";
         return false;
     }
+    return true;
+}
+
+bool emit_println(const Statement &statement, const SemanticResult &semantics,
+                  ir::Module &module, ir::IRBuilder &builder,
+                  std::optional<ir::IRFunctionId> &println, std::ostream &diagnostics) {
+    const auto *expression = dynamic_cast<const ExpressionStatement *>(&statement);
+    const auto *call = expression
+        ? dynamic_cast<const CallExpression *>(expression->expression.get()) : nullptr;
+    const auto *path = call ? dynamic_cast<const PathExpression *>(call->callee.get()) : nullptr;
+    // 限定调用没有 ordinary_calls 记录，不能把尚未支持误报成语义事实缺失。
+    if (!path || path->segments.size() != 1) {
+        diagnostics << "IR 生成尚未支持此语句或限定调用\n";
+        return false;
+    }
+    const auto target = semantics.ordinary_calls.find(call);
+    if (target == semantics.ordinary_calls.end()) {
+        diagnostics << "IR 内部错误：缺少普通调用目标记录\n";
+        return false;
+    }
+    const auto *builtin = std::get_if<BuiltinIO>(&target->second);
+    if (!builtin || *builtin != BuiltinIO::PrintlnI32) {
+        diagnostics << "IR 生成尚未支持此调用目标\n";
+        return false;
+    }
+    const auto signature = semantics.builtin_signatures.find(*builtin);
+    if (signature == semantics.builtin_signatures.end()) {
+        diagnostics << "IR 内部错误：缺少内置调用签名\n";
+        return false;
+    }
+    const auto i32 = SemanticType::int_(SemanticType::IntKind::I32);
+    const auto &source_signature = signature->second;
+    if (source_signature.receiver || !source_signature.return_type.is_unit() ||
+        source_signature.parameters.size() != 1 ||
+        !source_signature.parameters[0].same_type(i32) || call->arguments.size() != 1) {
+        diagnostics << "IR 内部错误：println_i32 调用与签名不一致\n";
+        return false;
+    }
+    const auto *literal = dynamic_cast<const IntegerLiteral *>(call->arguments[0].get());
+    if (!literal) {
+        diagnostics << "IR 生成尚未支持非 i32 字面量的打印实参\n";
+        return false;
+    }
+    const auto fact = semantics.integer_literals.find(literal);
+    if (fact == semantics.integer_literals.end() || !fact->second.type.same_type(i32)) {
+        diagnostics << "IR 内部错误：缺少有效的 i32 字面量语义记录\n";
+        return false;
+    }
+    if (!println)
+        println = module.add_function("println_i32", {ir::Type::Void, {ir::Type::I32}},
+                                      ir::Linkage::External);
+    builder.call(*println, {ir::Operand::constant(ir::Type::I32, fact->second.bits)});
     return true;
 }
 
@@ -87,7 +139,7 @@ std::optional<std::vector<std::string>> assign_function_names(
     return names;
 }
 
-// 生成空源函数和机器入口 main；遇到不支持的代码或内部构建错误时返回空值。
+// 生成源函数和机器入口 main；遇到不支持的代码或内部构建错误时返回空值。
 std::optional<IRArtifact> generate_ir(const Crate &crate, const SemanticResult &semantics,
                                       std::ostream &diagnostics) {
     const auto function_names = assign_function_names(semantics, diagnostics);
@@ -102,9 +154,13 @@ std::optional<IRArtifact> generate_ir(const Crate &crate, const SemanticResult &
         std::vector<ir::IRFunctionId> functions;
         for (const auto &name : *function_names)
             functions.push_back(module.add_function(name, {ir::Type::Void, {}}, ir::Linkage::Internal));
-        // 所有函数都有 ID 后，再创建各自的入口块；空函数只需添加 ret void。
-        for (const auto id : functions) {
-            builder.set_insert_point(module.function(id).add_block());
+        std::optional<ir::IRFunctionId> println;
+        // 按源码语句顺序生成所有函数，包括未被调用的函数。
+        for (std::size_t index = 0; index < functions.size(); ++index) {
+            builder.set_insert_point(module.function(functions[index]).add_block());
+            for (const auto &statement : semantics.functions[index]->node->body->statements)
+                if (!emit_println(*statement, semantics, module, builder, println, diagnostics))
+                    return std::nullopt;
             builder.ret();
         }
         // 源 main 返回 unit，对应内部 void 函数；机器入口按 C ABI 调用它后返回 i32 0。

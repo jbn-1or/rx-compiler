@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the P2-only IR baseline with external LLVM 22 tools."""
+"""Validate the P2/P3.1 IR subset with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -52,7 +52,7 @@ def main():
     parser.add_argument("--opt", default="opt-22")
     parser.add_argument("--clang", default="clang-22")
     parser.add_argument("--reimu", action="store_true",
-                        help="also run P2 modules with RV32 Clang and REIMU")
+                        help="also run modules with RV32 Clang and REIMU")
     args = parser.parse_args()
     tools = [args.compiler, args.ir_test, args.model_test, args.llvm_as, args.opt]
     if args.reimu:
@@ -101,10 +101,35 @@ def main():
             run([args.compiler, "--stage", "ir", str(source), "-o", str(repeated)])
             if repeated.read_bytes() != output.read_bytes():
                 raise RuntimeError("identical source must produce deterministic text")
-            modules.append((name, output))
+            modules.append((name, output, b""))
 
         if (temp / "plain-helper.ll").read_bytes() != (temp / "lifetime-helper.ll").read_bytes():
             raise RuntimeError("a helper's lifetime parameter must erase to the same P2 IR")
+
+        fixture = Path(__file__).resolve().parent / "ir" / "p03" / "println_42.rx"
+        for name, source_text, expected in (
+            ("println-42", fixture.read_text(encoding="utf-8"), fixture.with_suffix(".out").read_bytes()),
+            ("println-7", "fn main() { println_i32(7); }", b"7\n"),
+            ("println-0", "fn main() { println_i32(0); }", b"0\n"),
+            ("println-sequence", "fn main() { println_i32(7); println_i32(0i32); "
+             "println_i32(2147483647); }", b"7\n0\n2147483647\n"),
+            ("println-unused", "fn unused() { println_i32(99); } "
+             "fn main() { println_i32(42); }", b"42\n"),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(source_text, encoding="utf-8")
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            text = output.read_text(encoding="utf-8")
+            if text.count("declare void @println_i32(i32)") != 1:
+                raise RuntimeError(f"{name}: expected exactly one println declaration")
+            if re.search(r"%\w+\s*=\s*call void", text):
+                raise RuntimeError(f"{name}: void call must not produce a value")
+            repeated = temp / f"{name}-repeated.ll"
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(repeated)])
+            if repeated.read_bytes() != output.read_bytes():
+                raise RuntimeError(f"{name}: nondeterministic LLVM text")
+            modules.append((name, output, expected))
 
         for name, command in (
             ("model-smoke", [args.model_test]),
@@ -112,8 +137,8 @@ def main():
         ):
             output = temp / f"{name}.ll"
             output.write_text(run(command).stdout, encoding="utf-8")
-            modules.append((name, output))
-        for name, output in modules:
+            modules.append((name, output, b""))
+        for name, output, _ in modules:
             run([args.llvm_as, str(output), "-o", str(temp / f"{name}.bc")])
             run([args.opt, "-passes=verify", "-disable-output", str(output)])
 
@@ -133,10 +158,12 @@ def main():
         if not debug.stdout.strip() or debug.stdout.strip() in output.read_text(encoding="utf-8"):
             raise RuntimeError("parse tree output leaked into LLVM text")
 
-        # All are semantically valid. Reject P3+ in the whole crate, including unused bodies.
+        # All are semantically valid. Reject unsupported lowering even in unused bodies.
         for index, contents in enumerate((
             "fn main() { let x = 1; }",
-            "fn main() { println_i32(42); }",
+            "fn main() { print_i32(42); }",
+            "fn main() { println_i32(get_i32()); }",
+            "fn main() { println_i32(42) }",
             "fn main() { Box::<i32>::new(1); }",
             "fn main() { Vec::<i32>::new(); }",
             "fn main() { main(); }",
@@ -146,7 +173,7 @@ def main():
             "fn main() { 1 + 2; }",
             "fn main() { { } }",
             "fn main() { let x = return; }",
-            "fn main() {} fn unused() { println_i32(99); }",
+            "fn main() {} fn unused() { println_i32(99); let x = 1; }",
             "fn main() {} fn unused(value: i32) {}",
             "fn main() {} fn unused() -> i32 { 7 }",
             "struct Data {} impl Data { fn unused(&self) {} } fn main() {}",
@@ -171,6 +198,9 @@ def main():
             "fn main<'a>() {}",
             "fn main() {} fn unused() { let x: i32 = true; }",
             "fn main() { return; let x = missing; }",
+            "fn main() { println_i32(true); }",
+            "fn main() { println_i32(7u32); }",
+            "fn println_i32() {} fn main() { println_i32(); }",
         )):
             invalid_source = temp / f"semantic-error-{index}.rx"
             invalid_source.write_text(contents, encoding="utf-8")
@@ -178,14 +208,24 @@ def main():
             output.write_bytes(b"preserve on semantic failure\n")
             result = run([args.compiler, "--stage", "ir", str(invalid_source), "-o", str(output)], expected=1)
             if not semantic.stderr.strip() or result.stderr != semantic.stderr:
-                raise RuntimeError("IR must perform complete semantic checks before P2 lowering")
+                raise RuntimeError("IR must perform complete semantic checks before lowering")
             if output.read_bytes() != b"preserve on semantic failure\n":
                 raise RuntimeError("semantic failure changed the previous output")
         if Path("/dev/full").exists():
             run([args.compiler, "--stage", "ir", str(source), "-o", "/dev/full"], expected=2)
 
         if args.reimu:
-            for name, ir_path in modules:
+            runtime = temp / "runtime.c"
+            runtime.write_text('extern int printf(const char *, ...);\n'
+                               'void println_i32(int value) { (void)printf("%d\\n", value); }\n',
+                               encoding="utf-8")
+            runtime_assembly = temp / "runtime.s"
+            run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
+                 "-mllvm", "-riscv-no-aliases", "-O2", "-fno-builtin", "-S", str(runtime),
+                 "-o", str(runtime_assembly)])
+            run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
+                 "-c", str(runtime_assembly), "-o", str(temp / "runtime.o")])
+            for name, ir_path, expected_stdout in modules:
                 for optimization in ("O0", "O2"):
                     assembly = temp / f"{name}-{optimization}.s"
                     stdout = temp / f"{name}-{optimization}.out"
@@ -195,11 +235,12 @@ def main():
                     run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
                          "-c", str(assembly), "-o", str(temp / f"{name}-{optimization}.o")])
                     run(["xmake", "run", "-P", "vendor/REIMU", "reimu", "--memory=256M", "--stack=1M",
-                         "-f", str(assembly), "-o", str(stdout), "-p", str(profile)])
+                         "-f", f"{assembly},{runtime_assembly}", "-o", str(stdout), "-p", str(profile)])
                     exits = [line for line in profile.read_bytes().splitlines() if line.startswith(b"Exit code:")]
-                    if stdout.read_bytes() != b"" or exits != [b"Exit code: 0"]:
-                        raise RuntimeError(f"{name} {optimization}: expected empty stdout and exit zero")
-    print(f"P2 IR tests passed: {len(modules)} modules verified" +
+                    if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
+                        raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
+                                           f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
+    print(f"P2/P3.1 IR tests passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

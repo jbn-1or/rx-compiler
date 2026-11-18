@@ -118,8 +118,11 @@ bool BodyChecker::require_coerce(const ExpressionResult &from,
         return false;
     if (can_coerce(from.type, from.place, to))
         return true;
-    diagnostics_.error(at, "type mismatch: expected " + to.toString() +
-                               ", found " + from.type.toString());
+    if (from.place.crossed_shared && from.type.same_type(to))
+        diagnostics_.error(at, "cannot mutably reborrow through shared access");
+    else
+        diagnostics_.error(at, "type mismatch: expected " + to.toString() +
+                                   ", found " + from.type.toString());
     return false;
 }
 

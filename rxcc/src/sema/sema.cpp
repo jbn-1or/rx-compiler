@@ -8,6 +8,7 @@ namespace rx {
 std::optional<SemanticResult> SemanticAnalyzer::analyze(const Crate &crate) {
     type_namespace.clear();
     function_constant_namespace.clear();
+    trait_cache_.clear();
     result_ = SemanticResult{};
     // 预登记内置 I/O；先收集全部结构体，再收集常量、函数与 impl；
     // 建立全局名字表和关联项索引

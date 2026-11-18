@@ -1,7 +1,9 @@
 // P2 独立验证：模型所有权、call/ret、结构检查与确定的文本输出。
 #include "ir/artifact.hpp"
 #include "ir/builder.hpp"
+#include <iomanip>
 #include <iostream>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -70,8 +72,6 @@ void check_invalid_models() {
     reject_model([](Module &m) {
         m.find_function("__rx_fn_0")->blocks[0].terminator = Return{Operand::constant(Type::I32, 1)};
     });
-    reject_model([](Module &m) { m.find_function("__rx_fn_0")->name = "main"; });
-    reject_model([](Module &m) { m.find_function("main")->name = "unsafe\"symbol"; });
     reject_model([](Module &m) { m.target_triple = "x86_64-unknown-linux-gnu"; });
     reject_model([](Module &m) { m.find_function("main")->new_value(Type::I32); });
     reject_model([](Module &m) { m.find_function("main")->blocks[0].id.index = 99; });
@@ -107,6 +107,10 @@ void check_invalid_models() {
     reject_model([](Module &m) { m.find_function("__rx_fn_0")->blocks.clear(); });
 }
 
+struct GroupedDigits : std::numpunct<char> {
+    std::string do_grouping() const override { return "\3"; }
+};
+
 void run_tests() {
     static_assert(std::is_nothrow_move_constructible_v<rx::IRArtifact>);
     static_assert(!std::is_copy_constructible_v<rx::IRArtifact>);
@@ -119,6 +123,16 @@ void run_tests() {
     std::ostringstream text, again, diagnostics;
     check(moved.verify_and_print(text, diagnostics) && diagnostics.str().empty(), "合法模型必须通过检查");
     check(moved.verify_and_print(again, diagnostics) && text.str() == again.str(), "重复输出必须确定");
+    std::ostringstream formatted;
+    const std::locale locale(std::locale::classic(), new GroupedDigits);
+    formatted.imbue(locale);
+    formatted << std::hex << std::showbase << std::setfill('#') << std::setw(40);
+    const auto flags = formatted.flags();
+    check(moved.verify_and_print(formatted, diagnostics) && formatted.str() == text.str(),
+          "数字进制、分组和字段宽度不得改变 IR 文本");
+    check(formatted.flags() == flags && formatted.width() == 40 && formatted.fill() == '#' &&
+              formatted.getloc() == locale && formatted.rdbuf()->getloc() == locale,
+          "输出后应保留调用方的流和缓冲区格式");
     check(text.str().find("ret i32 -2147483648") == std::string::npos &&
               text.str().find("i32 -2147483648") != std::string::npos &&
               text.str().find("ret i32 -1") != std::string::npos,
@@ -133,7 +147,10 @@ void run_tests() {
     rejects([&] { builder.ret(); });
     rejects([&] { builder.set_insert_point(independent.module().find_function("main")->blocks[0].id); });
     rejects([&] { module.add_function("main", {Type::I32, {}}, Linkage::External); });
+    rejects([&] { module.add_function("unsafe\"symbol", {Type::Void, {}}, Linkage::External); });
     rejects([&] { module.add_function("bad", {Type::Void, {Type::Void}}, Linkage::External); });
+    check(!module.find_function("bad") && module.find_function("main")->id == main_id,
+          "登记失败不能破坏函数名称索引");
     builder.set_insert_point(module.find_function("main")->blocks[0].id);
     rejects([&] { builder.ret(Operand::constant(Type::I32, 0)); });
     const auto open_id = module.add_function("open", {Type::Void, {}}, Linkage::Internal);
@@ -153,6 +170,10 @@ void run_tests() {
     check(!builder.insert_point(), "发出 ret 后关闭插入位置");
     std::ostream failed(nullptr);
     check(!moved.verify_and_print(failed, diagnostics), "写入失败必须传播");
+    struct RejectWrites : std::streambuf {} unwritable;
+    std::ostream failing_output(&unwritable);
+    check(!moved.verify_and_print(failing_output, diagnostics) && failing_output.bad(),
+          "缓冲区写入失败应传播到目标流");
     check_invalid_models();
 }
 }

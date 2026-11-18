@@ -595,6 +595,51 @@ void check_failed_semantic_result() {
     }
 }
 
+void check_block_tail_reborrow() {
+    for (const char *initializer : {"v[0]", "{ v[0] }", "{ { v[0] } }",
+                                    "if flag { v[0] } else { v[1] }"}) {
+        const auto crate = parse_crate(std::string("fn f(v: Vec<&mut i32>, flag: bool) { ") +
+            "let r: &mut i32 = " + initializer + "; } fn main() {}");
+        rx::Diagnostics diagnostics;
+        check(!rx::SemanticAnalyzer(diagnostics).analyze(*crate) && !diagnostics.ok(),
+              "a block tail must check the indexed Vec place before mutable reborrowing");
+    }
+    analyze_fixture(*parse_crate(R"(
+        fn shared(v: Vec<&mut i32>) { let r: &i32 = { v[0] }; }
+        fn writable(mut v: Vec<&mut i32>, flag: bool) {
+            let r: &mut i32 = if flag { v[0] } else { v[1] };
+            *r = 3;
+        }
+        fn main() {}
+    )"));
+}
+
+void check_trait_dependencies() {
+    // 每层共享前一层的两个字段类型，结构体数量与输入长度均线性增长。
+    std::string source = "#[derive(Clone)] struct S0 { value: i32 }\n";
+    for (int depth = 1; depth <= 32; ++depth) {
+        const auto child = "Box<S" + std::to_string(depth - 1) + ">";
+        source += "#[derive(Clone)] struct S" + std::to_string(depth) +
+                  " { left: " + child + ", right: " + child + " }\n";
+    }
+    analyze_fixture(*parse_crate(source + "fn main() {}"));
+
+    const auto invalid = parse_crate(R"(
+        struct Leaf { value: i32 }
+        #[derive(Clone)] struct A { link: Vec<B>, leaf: Leaf }
+        #[derive(Clone)] struct B { back: Box<A> }
+        #[derive(Clone)] struct C { child: B }
+        fn main() {}
+    )");
+    rx::Diagnostics diagnostics;
+    check(!rx::SemanticAnalyzer(diagnostics).analyze(*invalid), "recursive Clone depends on every field");
+    bool rejected_child = false;
+    for (const auto &item : diagnostics.items)
+        if (item.message == "field child does not support Clone")
+            rejected_child = true;
+    check(rejected_child, "a provisional recursive success must not escape a failed query");
+}
+
 struct UnknownExpression : rx::Expression {
     void accept(rx::AstVisitor &) override {}
 };
@@ -750,5 +795,7 @@ int main() {
     check_expression_queries();
     check_semantic_result_ownership();
     check_failed_semantic_result();
+    check_block_tail_reborrow();
+    check_trait_dependencies();
     std::cout << "semantic invariants: passed\n";
 }

@@ -85,6 +85,8 @@ if(BUILD_TESTING)
   target_link_libraries(semantic_invariants PRIVATE rxcc_frontend)
   target_compile_options(semantic_invariants PRIVATE -Wall -Wextra)
   add_test(NAME semantic_invariants COMMAND semantic_invariants)
+  # 共享字段类型的回归样例应在线性规模内完成。
+  set_tests_properties(semantic_invariants PROPERTIES TIMEOUT 60)
 
   add_executable(ir_model_smoke tests/ir/model_test.cpp)
   target_link_libraries(ir_model_smoke PRIVATE rxcc_ir)

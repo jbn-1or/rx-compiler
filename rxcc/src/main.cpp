@@ -18,6 +18,7 @@
 // ./rxcc/build/rxcc --dump-tree path      # 附带打印 ANTLR parse tree
 // cmake --build rxcc/build -j
 
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -151,6 +152,11 @@ int main(int argc, char **argv) {
     if (!ok) {
         std::cerr << "rxcc: cannot open source file: " << source_path << "\n";
         return 2;
+    }
+    // ANTLR 会在解码时剥掉 BOM，Rx §3 的 ASCII 输入规则须先检查原始字节。
+    if (std::any_of(source.begin(), source.end(), [](unsigned char byte) { return byte > 0x7f; })) {
+        std::cerr << source_path << ": Rx source must contain only 7-bit ASCII\n";
+        return 1;
     }
 
     // --- 前端：词法 + 语法 ---------------------------------------------------

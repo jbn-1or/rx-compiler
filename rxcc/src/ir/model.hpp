@@ -9,6 +9,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -118,10 +120,11 @@ struct BasicBlock {
 // 保存一个函数的名称、参数、返回类型和函数体；没有基本块时只有声明。
 // 参数和指令结果使用同一张值类型表，基本块使用另一张表单独编号。
 struct Function {
+    Function(IRFunctionId id, std::string name, Signature signature, Linkage linkage);
     // 这个函数的 IR ID，在添加到模块时分配，不直接使用 sema 的 FunctionId。
     IRFunctionId id;
-    // LLVM 全局符号名，不含 @ 前缀；在模块内唯一。
-    std::string name;
+    // 模块的名称索引借用这个不可变的 LLVM 全局符号名。
+    const std::string name;
     // 符号链接属性，决定是否仅在模块内部可见。
     Linkage linkage;
     // 函数的返回类型和参数类型，供调用和返回检查使用。
@@ -191,6 +194,7 @@ private:
     // 按添加顺序保存函数指针，并负责释放函数；IRFunctionId.index 对应表下标。
     // vector 扩容只会移动指针，不会移动函数对象，因此已有函数引用仍然有效。
     std::vector<std::unique_ptr<Function>> functions_;
+    std::unordered_map<std::string_view, Function *> functions_by_name_;
 };
 
 // 判断函数名是否可以不加引号，直接写入 LLVM 文本。

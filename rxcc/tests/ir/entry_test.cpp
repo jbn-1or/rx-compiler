@@ -133,6 +133,10 @@ void run_tests() {
     std::ostringstream errors;
     check(!rx::generate_ir(*second, sema, errors) && errors.str().find("内部错误") != std::string::npos,
           "不能使用其他 AST 的语义结果");
+    const auto with_helper = parse_crate("fn main() {} fn helper() {}");
+    auto missing_helper = analyze(*with_helper);
+    missing_helper.functions.pop_back();
+    check(!rx::generate_ir(*with_helper, missing_helper, errors), "不能漏掉顶层函数的语义记录");
     sema.main_function.reset();
     check(!rx::generate_ir(*first, sema, errors), "缺少 main 身份必须拒绝");
 

@@ -14,8 +14,9 @@ BodyChecker::BodyChecker(SemanticAnalyzer &analyzer)
 void BodyChecker::check_function(const FunctionSymbol &fn) {
     enter_function(fn);
     assert(fn.node && fn.node->body);
-    // 函数体被当作一个块表达式：返回类型作为 expected 传给块，块算完之后再用 require_coerce 核对最终结果
+    // 函数体直接从块入口检查；嵌套块由 check_expression 登记结果。
     const auto body = check_block(*fn.node->body, &fn.return_type);
+    analyzer_.result_.expressions.insert_or_assign(fn.node->body.get(), body);
     require_coerce(body, fn.return_type, fn.node->body->span);
 }
 
@@ -36,8 +37,11 @@ ExpressionResult BodyChecker::check_block(const BlockExpression &block,
     // 有 tail → check_expression(tail, expected)，取其类型作为块结果
     if (block.tail) {
         const auto tail = check_expression(*block.tail, expected);
-        // 块产生值，不继承尾表达式的 place 权限。
-        result = ExpressionResult::value(tail.type, diverges || tail.diverges);
+        // 在尾表达式的 place 上检查重借用；形成块的值以后就没有这条访问路径了。
+        if (expected && !require_coerce(tail, *expected, block.tail->span))
+            result = ExpressionResult::error();
+        else
+            result = ExpressionResult::value(tail.type, diverges || tail.diverges);
     } else if (diverges) {  // 无 tail → 根据语句摘要得到 Never、Error 或 Unit
         result = ExpressionResult::value(SemanticType::never());
     } else if (has_error) {
@@ -46,8 +50,6 @@ ExpressionResult BodyChecker::check_block(const BlockExpression &block,
         result = ExpressionResult::value(SemanticType::unit());
     }
     pop_scope();
-    // 函数体也会直接进入这里，不一定经过 check_expression，故在此保存块的结果。
-    analyzer_.result_.expressions.insert_or_assign(&block, result);
     return result;
 }
 

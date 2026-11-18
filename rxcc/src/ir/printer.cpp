@@ -2,6 +2,7 @@
 // 调用前必须检查模块；值用 %v_<编号> 命名，块用 bb_<编号> 命名，避免重名。
 
 #include "ir/printer.hpp"
+#include <locale>
 #include <ostream>
 
 namespace rx::ir {
@@ -40,7 +41,14 @@ void instruction(std::ostream &out, const Module &module, const Instruction &ins
 } // namespace
 
 // 依次输出目标配置、函数和基本块，顺序与添加时一致，不使用内存地址命名。
-void print_module(const Module &module, std::ostream &out) {
+void print_module(const Module &module, std::ostream &destination) {
+    const std::ostream::sentry ready(destination);
+    if (!ready)
+        return;
+    // 独立的格式状态保证 LLVM 整数使用无分组的十进制。先设置 locale，再借用缓冲区。
+    std::ostream out(nullptr);
+    out.imbue(std::locale::classic());
+    out.rdbuf(destination.rdbuf());
     out << "target datalayout = \"" << module.data_layout << "\"\n"
         << "target triple = \"" << module.target_triple << "\"\n\n";
     for (const auto &owned : module.functions()) {
@@ -79,6 +87,8 @@ void print_module(const Module &module, std::ostream &out) {
         }
         out << "}\n\n";
     }
+    if (!out)
+        destination.setstate(out.rdstate());
 }
 
 } // namespace rx::ir

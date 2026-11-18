@@ -104,41 +104,13 @@ ParsedInt parse_int_literal(const std::string &raw) {
     return {value, suffix};
 }
 
-// 判断一个语法树节点是不是二元运算符（折叠二元链时用来区分运算符和操作数）。
-// 例：`+`、`&&`、`<<` → true；`1`、`a::b` 这类操作数 → false。
-bool is_operator_piece(antlr4::tree::ParseTree *node) {
-    if (dynamic_cast<RxParser::AdditiveOperatorContext *>(node) ||      // + -
-        dynamic_cast<RxParser::MultiplicativeOperatorContext *>(node) || // * / %
-        dynamic_cast<RxParser::ComparisonExceptLtContext *>(node) ||     // == != <= > >=
-        dynamic_cast<RxParser::ShiftRightContext *>(node)) {             // >>
-        return true;
-    }
-    auto *term = dynamic_cast<antlr4::tree::TerminalNode *>(node);
-    if (!term)
-        return false;
-    switch (term->getSymbol()->getType()) {
-        case RxParser::ANDAND:
-        case RxParser::OROR:
-        case RxParser::AMP:
-        case RxParser::CARET:
-        case RxParser::PIPE:
-        case RxParser::SHL:
-        case RxParser::LT:
-            return true;
-        default:
-            return false;
-    }
-}
-
 // 把二元运算符翻译成 BinaryOperator 枚举；不是运算符就返回空。
 // 例：`*` → Multiply、`&&` → LogicalAnd、`>=` → GreaterThanOrEqual。
 std::optional<BinaryOperator>
 map_binary_operator(antlr4::tree::ParseTree *node) {
     if (auto *operation =
             dynamic_cast<RxParser::AdditiveOperatorContext *>(node)) {
-        (void)operation;
-        return node->getText() == "+" ? std::optional(BinaryOperator::Add)
-                                      : std::optional(BinaryOperator::Subtract);
+        return operation->PLUS() ? BinaryOperator::Add : BinaryOperator::Subtract;
     }
     if (auto *operation =
             dynamic_cast<RxParser::MultiplicativeOperatorContext *>(node)) {
@@ -611,34 +583,30 @@ AstBuilder::build_let(RxParser::LetStatementContext *ctx) {
 // 例：`1 + 2 + 3` → Binary{Add, Binary{Add, 1, 2}, 3}；只有一个操作数时原样返回。
 std::shared_ptr<Expression>
 AstBuilder::fold_chain(antlr4::ParserRuleContext *ctx) {
-    std::shared_ptr<Expression> acc;
-    std::optional<BinaryOperator> pending_op;
-    // 遍历运算链上的每个孩子：是运算符就先记下，是操作数就往左边的树上合并
-    for (auto *child : ctx->children) {
-        if (is_operator_piece(child)) {
-            pending_op = map_binary_operator(child);
-            continue;
-        }
-        auto operand = dispatch(child);
-        if (!operand)
-            return nullptr;
-        if (!acc) {
-            acc = std::move(operand); // 第一个操作数成为当前累计子树。
-        } else if (pending_op) {
-            // 累计子树作为左操作数，与新操作数合并成左结合的二元树。
-            auto bin = std::make_shared<BinaryExpression>();
-            bin->operation = *pending_op;
-            bin->span =
-                Span{acc->span.start, operand->span.end};
-            bin->left = std::move(acc);
-            bin->right = std::move(operand);
-            acc = std::move(bin);
-            pending_op.reset();
-        } else {
-            diagnostics_.error(span_of(ctx),
-                         "二元链：连续操作数缺少运算符（防御分支）");
+    const auto &children = ctx->children;
+    // 文法保证操作数与运算符交替，且首尾均为操作数。
+    if (children.empty() || children.size() % 2 == 0) {
+        diagnostics_.error(span_of(ctx), "二元运算链缺少操作数");
+        return nullptr;
+    }
+    auto acc = dispatch(children.front());
+    if (!acc)
+        return nullptr;
+    for (std::size_t i = 1; i < children.size(); i += 2) {
+        const auto operation = map_binary_operator(children[i]);
+        if (!operation) {
+            diagnostics_.error(span_of(ctx), "未知二元运算符");
             return nullptr;
         }
+        auto right = dispatch(children[i + 1]);
+        if (!right)
+            return nullptr;
+        auto binary = std::make_shared<BinaryExpression>();
+        binary->operation = *operation;
+        binary->span = Span{acc->span.start, right->span.end};
+        binary->left = std::move(acc);
+        binary->right = std::move(right);
+        acc = std::move(binary);
     }
     return acc;
 }

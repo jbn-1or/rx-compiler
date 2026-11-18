@@ -4,7 +4,6 @@
 #include "ir/check.hpp"
 #include <algorithm>
 #include <ostream>
-#include <set>
 
 namespace rx::ir {
 namespace {
@@ -102,11 +101,10 @@ bool check_module(const Module &module, std::ostream &diagnostics) {
         return false;
     }
     // 函数 ID 要匹配所属模块和函数表下标，函数名也不能在模块中重复。
-    std::set<std::string> names;
     for (std::size_t i = 0; i < module.functions().size(); ++i) {
         const auto &function = *module.functions()[i];
         if (function.id != IRFunctionId{module.identity(), i} ||
-            !valid_symbol_name(function.name) || !names.insert(function.name).second ||
+            !valid_symbol_name(function.name) || module.find_function(function.name) != &function ||
             (function.linkage != Linkage::Internal && function.linkage != Linkage::External)) {
             diagnostics << "IR 内部错误：函数身份、符号或链接属性无效/重复\n";
             return false;

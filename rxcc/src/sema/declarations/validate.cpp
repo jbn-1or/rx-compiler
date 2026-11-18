@@ -142,16 +142,19 @@ void SemanticAnalyzer::visit_layout_type(const SemanticType &type, Span at,
     }
 }
 
-// 查询类型是否具备 trait 能力（D6）；结构体递归时用 visiting 假设成立，
-// 保证递归类型能够终止（D7）。Error 视为满足，避免连锁诊断。
-bool SemanticAnalyzer::has_trait(const SemanticType &type, Derive trait) const {
-    std::set<std::pair<const StructSymbol *, Derive>> visiting;
-    return has_trait_impl(type, trait, visiting);
+// 每个字段都须满足同一个 trait。只有整次查询成功，遇到的递归假设才全部成立。
+bool SemanticAnalyzer::has_trait(const SemanticType &type, Derive trait) {
+    auto &known = trait_cache_[trait];
+    std::unordered_set<const StructSymbol *> visited;
+    if (!has_trait_impl(type, trait, known, visited))
+        return false;
+    for (const auto *sym : visited)
+        known.emplace(sym, true);
+    return true;
 }
 
-bool SemanticAnalyzer::has_trait_impl(
-    const SemanticType &type, Derive trait,
-    std::set<std::pair<const StructSymbol *, Derive>> &visiting) const {
+bool SemanticAnalyzer::has_trait_impl(const SemanticType &type, Derive trait, StructTraitCache &known,
+                                      std::unordered_set<const StructSymbol *> &visited) {
     switch (type.kind) {
         case SemanticType::Kind::Int:
         case SemanticType::Kind::Bool:
@@ -168,14 +171,14 @@ bool SemanticAnalyzer::has_trait_impl(
             if (trait == Derive::Copy || trait == Derive::Clone)
                 return !type.is_mut;
             // PartialEq/Eq 继续查询引用目标的能力。
-            return has_trait_impl(*type.inner, trait, visiting);
+            return has_trait_impl(*type.inner, trait, known, visited);
         case SemanticType::Kind::Array:
-            return type.inner && has_trait_impl(*type.inner, trait, visiting);
+            return type.inner && has_trait_impl(*type.inner, trait, known, visited);
         case SemanticType::Kind::Box:
         case SemanticType::Kind::Vec:
             if (trait == Derive::Copy)
                 return false;
-            return type.inner && has_trait_impl(*type.inner, trait, visiting);
+            return type.inner && has_trait_impl(*type.inner, trait, known, visited);
         case SemanticType::Kind::Struct: {
             const StructSymbol *sym = type.struct_symbol;
             // 结构体必须显式请求该 trait。
@@ -187,20 +190,18 @@ bool SemanticAnalyzer::has_trait_impl(
             if (trait == Derive::Eq && !sym->derives.count(Derive::PartialEq))
                 return false;
 
-            const auto key = std::make_pair(sym, trait);
-            if (visiting.count(key))
+            if (const auto it = known.find(sym); it != known.end())
+                return it->second;
+            if (!visited.insert(sym).second)
                 return true;
-            visiting.insert(key);
-            bool ok = true;
-            // 所有字段都必须具备该能力。
             for (const auto &field : sym->field_types) {
-                if (!has_trait_impl(field.second, trait, visiting)) {
-                    ok = false;
-                    break;
+                if (!has_trait_impl(field.second, trait, known, visited)) {
+                    // 已有一个确定不满足的字段，沿这条依赖路径可以立即缓存失败。
+                    known.emplace(sym, false);
+                    return false;
                 }
             }
-            visiting.erase(key);
-            return ok;
+            return true;
         }
     }
     return false;

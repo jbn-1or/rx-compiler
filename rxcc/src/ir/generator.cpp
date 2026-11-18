@@ -8,17 +8,10 @@
 #include "sema/result.hpp"
 #include <ostream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace rx {
 namespace {
-
-// 判断函数节点是否直接出现在当前 crate 的顶层，不通过名称猜测是否为同一个函数。
-bool is_top_level_function(const Crate &crate, const Function *function) {
-    for (const auto &item : crate.items)
-        if (item.get() == function)
-            return true;
-    return false;
-}
 
 // 检查源 main 的记录是否正确，以及所有函数是否都能由当前生成器处理。
 // 即使某个函数没有被调用，也不能忽略其中尚不支持的参数或函数体。
@@ -36,13 +29,17 @@ bool validate_functions(const Crate &crate, const SemanticResult &semantics,
         diagnostics << "IR 内部错误：源 main 与语义结果不一致\n";
         return false;
     }
+    std::unordered_set<const Function *> top_level;
+    for (const auto &item : crate.items)
+        if (const auto *function = dynamic_cast<const Function *>(item.get()))
+            top_level.insert(function);
     for (const auto &owned : semantics.functions) {
         const auto &function = *owned; // assign_function_names 已检查指针、ID 和声明记录。
         if (function.owner) {
             diagnostics << "IR 生成尚未支持方法或关联函数（P2 仅生成空的普通函数）\n";
             return false;
         }
-        if (!is_top_level_function(crate, function.node)) {
+        if (!top_level.erase(function.node)) {
             diagnostics << "IR 内部错误：语义结果中的函数不属于当前 Crate\n";
             return false;
         }
@@ -57,6 +54,10 @@ bool validate_functions(const Crate &crate, const SemanticResult &semantics,
             diagnostics << "IR 生成尚未支持非空函数体（P3 及后续 lowering 待实现）\n";
             return false;
         }
+    }
+    if (!top_level.empty()) {
+        diagnostics << "IR 内部错误：当前 Crate 的顶层函数缺少语义记录\n";
+        return false;
     }
     return true;
 }

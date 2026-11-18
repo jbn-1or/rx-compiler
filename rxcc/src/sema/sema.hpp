@@ -15,6 +15,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -85,11 +86,11 @@ private:
                            LayoutVisitStates &states);
 
     // declarations/validate.cpp：能力查询与 derive 验证。
-    // 查询入口隐藏递归状态；visiting 只用于本次查询的递归假设。
-    bool has_trait(const SemanticType &type, Derive trait) const;
-    bool has_trait_impl(
-        const SemanticType &type, Derive trait,
-        std::set<std::pair<const StructSymbol *, Derive>> &visiting) const;
+    using StructTraitCache = std::unordered_map<const StructSymbol *, bool>;
+    std::map<Derive, StructTraitCache> trait_cache_;
+    bool has_trait(const SemanticType &type, Derive trait);
+    static bool has_trait_impl(const SemanticType &type, Derive trait, StructTraitCache &known,
+                               std::unordered_set<const StructSymbol *> &visited);
     // 检查结构体已请求的 derive 是否合法（D2–D5）。
     void check_derives();
     void check_one_derive(StructSymbol &sym, Derive trait);

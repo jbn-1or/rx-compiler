@@ -28,6 +28,14 @@ bool valid_constant(const Operand &operand) {
     return operand.type == Type::I32 && operand.constant_bits();
 }
 
+Function::Function(IRFunctionId id, std::string name, Signature signature, Linkage linkage)
+    : id(id), name(std::move(name)), linkage(linkage), signature(std::move(signature)) {
+    value_types.reserve(this->signature.parameters.size());
+    parameters.reserve(this->signature.parameters.size());
+    for (const auto type : this->signature.parameters)
+        parameters.push_back(new_value(type));
+}
+
 // 为参数或指令结果分配值 ID，并把类型添加到当前函数的值类型表。
 Operand Function::new_value(Type type) {
     // id 是当前函数的成员；新值的下标就是追加类型前的表长度。
@@ -96,31 +104,26 @@ IRFunctionId Module::add_function(std::string function_name, Signature signature
         throw std::logic_error("IR 函数名称重复、非法或签名无效");
     // 用模块编号和当前函数数量组成新函数的 ID。
     const IRFunctionId id{identity_, functions_.size()};
-    auto function = std::make_unique<Function>();
-    function->id = id;
-    function->name = std::move(function_name);
-    function->linkage = linkage;
-    function->signature = std::move(signature);
-    // 先为参数分配值 ID，后续指令结果接着编号，不从 0 重新开始。
-    for (const auto type : function->signature.parameters)
-        function->parameters.push_back(function->new_value(type));
-    functions_.push_back(std::move(function));
+    auto function = std::make_unique<Function>(id, std::move(function_name), std::move(signature), linkage);
+    const auto &stored = functions_.emplace_back(std::move(function));
+    try {
+        functions_by_name_.emplace(stored->name, stored.get());
+    } catch (...) {
+        functions_.pop_back();
+        throw;
+    }
     return id;
 }
 
 // 按名称查找函数；找不到时返回 nullptr，不自动创建新函数。
 Function *Module::find_function(const std::string &function_name) {
-    for (const auto &function : functions_)
-        if (function->name == function_name)
-            return function.get();
-    return nullptr;
+    const auto it = functions_by_name_.find(function_name);
+    return it == functions_by_name_.end() ? nullptr : it->second;
 }
 // 在只读模块中按名称查找函数，找不到时返回 nullptr。
 const Function *Module::find_function(const std::string &function_name) const {
-    for (const auto &function : functions_)
-        if (function->name == function_name)
-            return function.get();
-    return nullptr;
+    const auto it = functions_by_name_.find(function_name);
+    return it == functions_by_name_.end() ? nullptr : it->second;
 }
 // 检查 ID 中的模块编号、函数下标和表中记录，判断函数是否属于本模块。
 bool Module::contains(IRFunctionId id) const {

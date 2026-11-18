@@ -69,6 +69,14 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="rxcc-p2-") as directory:
         temp = Path(directory)
+        source = temp / "encoding.rx"
+        for data, expected in ((b"fn main() {}\r\n", 0),
+                               (b"\xef\xbb\xbffn main() {}\n", 1),
+                               (b"// \xff\nfn main() {}\n", 1)):
+            source.write_bytes(data)
+            for stage in ("parse", "ast", "semantic", "ir"):
+                output = ["-o", str(temp / "encoding.ll")] if stage == "ir" else []
+                run([args.compiler, "--stage", stage, str(source), *output], expected=expected)
         modules = []
         for name, source_text in (
             ("empty-main", "fn main() {}"),
@@ -129,6 +137,8 @@ def main():
         for index, contents in enumerate((
             "fn main() { let x = 1; }",
             "fn main() { println_i32(42); }",
+            "fn main() { Box::<i32>::new(1); }",
+            "fn main() { Vec::<i32>::new(); }",
             "fn main() { main(); }",
             "fn main() { return; }",
             "fn main() { (); }",

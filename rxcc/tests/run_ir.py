@@ -73,6 +73,8 @@ def main():
         for name, source_text in (
             ("empty-main", "fn main() {}"),
             ("explicit-unit", "fn main() -> () {}"),
+            ("plain-helper", "fn f() {} fn main() {}"),
+            ("lifetime-helper", "fn f<'a>() {} fn main() {}"),
             ("internal-names", "fn __rx_fn_1() {} fn main() {} fn helper() {}"),
             ("declarations", "const N: usize = 2; struct Data { values: [i32; N] } "
              "impl Data { const VALUE: i32 = 7; } fn main() {}"),
@@ -92,6 +94,9 @@ def main():
             if repeated.read_bytes() != output.read_bytes():
                 raise RuntimeError("identical source must produce deterministic text")
             modules.append((name, output))
+
+        if (temp / "plain-helper.ll").read_bytes() != (temp / "lifetime-helper.ll").read_bytes():
+            raise RuntimeError("a helper's lifetime parameter must erase to the same P2 IR")
 
         for name, command in (
             ("model-smoke", [args.model_test]),
@@ -153,6 +158,7 @@ def main():
 
         for index, contents in enumerate((
             "fn main(value: i32) {}",
+            "fn main<'a>() {}",
             "fn main() {} fn unused() { let x: i32 = true; }",
             "fn main() { return; let x = missing; }",
         )):

@@ -28,10 +28,11 @@ bool validate_functions(const Crate &crate, const SemanticResult &semantics,
         diagnostics << "IR 内部错误：缺少有效的源 main 语义记录\n";
         return false;
     }
-    // 源 main 必须是无接收者、无参数、返回 unit 的顶层函数。
+    // 源 main 必须是无接收者、无值参数和生命周期参数、返回 unit 的顶层函数。
     const auto &main = *semantics.functions[semantics.main_function->index];
     if (main.id != *semantics.main_function || main.name != "main" || main.owner ||
-        !main.parameters.empty() || main.receiver || !main.return_type.is_unit()) {
+        main.node->has_generic_parameters || !main.parameters.empty() ||
+        main.receiver || !main.return_type.is_unit()) {
         diagnostics << "IR 内部错误：源 main 与语义结果不一致\n";
         return false;
     }
@@ -45,9 +46,8 @@ bool validate_functions(const Crate &crate, const SemanticResult &semantics,
             diagnostics << "IR 内部错误：语义结果中的函数不属于当前 Crate\n";
             return false;
         }
-        if (function.node->has_generic_parameters || !function.node->body ||
-            !function.parameters.empty() || !function.node->parameters.empty() ||
-            !function.return_type.is_unit()) {
+        if (!function.node->body || !function.parameters.empty() ||
+            !function.node->parameters.empty() || !function.return_type.is_unit()) {
             diagnostics << "IR 生成尚未支持此函数签名（P2 仅支持无参 unit 函数）\n";
             return false;
         }

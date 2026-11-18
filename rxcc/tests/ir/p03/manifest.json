@@ -1,12 +1,40 @@
 [
   {
+    "source": "println_42.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "打印整数字面量 42 并换行",
+    "metadata": {
+      "testpoint": "P3-17",
+      "requires": "P3.1",
+      "ir_status": "planned"
+    }
+  },
+  {
+    "source": "println_42.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "打印整数字面量 42 并换行",
+    "metadata": {
+      "testpoint": "P3-17",
+      "requires": "P3.1",
+      "ir_status": "planned"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "println_42.out"
+      }
+    ]
+  },
+  {
     "source": "literal_io.rx",
     "stage": "semantic",
     "compilation_success": true,
     "description": "print 无分隔符，println 精确换行",
     "metadata": {
       "testpoint": "P3-01",
-      "requires": "P3.1",
+      "requires": "P3.4",
       "ir_status": "planned"
     }
   },
@@ -17,7 +45,7 @@
     "description": "print 无分隔符，println 精确换行",
     "metadata": {
       "testpoint": "P3-01",
-      "requires": "P3.1",
+      "requires": "P3.4",
       "ir_status": "planned"
     },
     "io": [
@@ -34,7 +62,7 @@
     "description": "连续读取整数边界，每次输入消费一次",
     "metadata": {
       "testpoint": "P3-02",
-      "requires": "P3.1",
+      "requires": "P3.4",
       "ir_status": "planned"
     }
   },
@@ -45,7 +73,7 @@
     "description": "连续读取整数边界，每次输入消费一次",
     "metadata": {
       "testpoint": "P3-02",
-      "requires": "P3.1",
+      "requires": "P3.4",
       "ir_status": "planned"
     },
     "io": [

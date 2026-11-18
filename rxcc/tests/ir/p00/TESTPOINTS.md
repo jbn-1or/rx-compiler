@@ -7,7 +7,7 @@
 | 编号 | 输入/操作 | 断言 | 层次/依赖 |
 | --- | --- | --- | --- |
 | P0-01 | 手写 internal void 源 main；external i32 main 调用后返回 0 | 两个入口不同；空 stdout；profile 恰有 `Exit code: 0` | I/E；已有空模块基础 |
-| P0-02 | 手写调用 `println_i32(42)` | stdout 精确为 `42\n`，不是字面反斜杠 n 或 CRLF | I/E；运行时 |
+| P0-02 | 手写调用 `println_i32(42)`，分别让机器 main 返回 0 和 7 | 两次 stdout 均为 `42\n`；验收命令须在 profile 唯一的退出码为 0 时通过，返回 7 时失败 | I/E；按计划 P0.1 运行 |
 | P0-03 | 依次 `print_i32(1)`、`print_i32(-2)`、`println_i32(0)` | stdout 为 `1-20\n`，print 不添加分隔符 | I/E；运行时 |
 | P0-04 | 连续三次 get；stdin=` -2147483648 0 2147483647\n`；逐个 println | 输出三行原十进制值；正确处理前导空白、符号与全 32 位范围 | I/E；运行时 |
 | P0-05 | 核对 triple、layout、Clang 参数 | 指针/usize/isize 均为 32 位，小端，rv32im、ilp32；O0/O2 相同 | I/C |

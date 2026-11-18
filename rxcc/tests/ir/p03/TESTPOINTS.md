@@ -5,12 +5,13 @@
 
 | 编号/步骤 | 源码/构造 | 预期与关键断言 | 层次/依赖 |
 | --- | --- | --- | --- |
-| P3-01 / .1 | `literal_io.rx`：print 1、print 2、println 42 | 精确输出 `1242\n`；print/println 外部签名正确；void call 无值 | U/I/E；P3.1 |
-| P3-02 / .1 | `read_io.rx`：三次 get 后逐次 println；配套 .in | 输出 MIN、0、MAX 三行；每个 get 执行一次，顺序不变 | I/E；P3.1 |
+| P3-17 / .1 | `println_42.rx` 只调用一次 `println_i32(42)` | 精确输出 `42\n`，退出 0；void call 无结果值 | U/I/E；P3.1 |
 | P3-03 / .2 | `shadowing.rx`：嵌套遮蔽、`let x=x` | 输出 `1\n2\n3\n2\n`；LocalId 各有固定 slot，初始化读旧绑定 | I/E；平坦遮蔽 P3.2，完整种子的块依赖 P3.3 |
 | P3-04 / .2 | 手工 alloca/load/store 模型 | alloca 结果 ptr；load/store 显式内容类型及合法 align；错类型/无效地址操作数拒绝 | U/I；P3.2 |
 | P3-05 / .2 | let 的初始化器是打印后返回的标量块 | 初始化执行一次；slot 在入口，store 在源码求值位置 | I/E；块调用依赖 P3.3–.4 |
 | P3-06 / .3 | `unit_blocks.rx`：前向 ping、unit 尾块、分号语句 | 输出 `7\n8\n`；Unit 正常继续，既非零整数也非 NoContinuation | I/E；P3.3 |
+| P3-01 / .4 | `literal_io.rx` 连续 print 1、print 2、println 42 | 精确输出 `1242\n`，print 和 println 的外部签名正确 | U/I/E；P3.4 |
+| P3-02 / .4 | `read_io.rx` 从配套 .in 连续读三个整数并逐个 println | 输出 MIN、0、MAX 三行，每个输入恰好读取一次 | I/E；P3.4 |
 | P3-07 / .4 | `scalar_calls.rx`：mark 实参、前向调用、传参与尾返回 | 标记 `1\n2\n7\n`；参数从左到右；结果可立即作为参数 | I/E；P3.4 |
 | P3-08 / .4 | 参数被同名 let 遮蔽；mut 标量参数 | 参数有自己的 slot；调用者值不变；遮蔽初始化读参数 | I/E；P3.4；修改依赖 P5 |
 | P3-09 / .4 | 10 个标量参数，第 1/8/10 参数返回或打印 | 声明/定义/call 签名完全一致，不按机器寄存器数截断参数 | I/E；P3.4 |

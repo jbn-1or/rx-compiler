@@ -12,24 +12,39 @@ namespace rx::ir {
 // 返回类型在 LLVM 文本中的名称；不支持的类型返回空串，供其他函数检查。
 const char *type_name(Type type) {
     switch (type) {
-        case Type::Void: return "void";
-        case Type::I32: return "i32";
+        case Type::Void:
+            return "void";
+        case Type::I32:
+            return "i32";
+        case Type::Ptr:
+            return "ptr";
     }
     return "";
 }
 
+bool valid_storage(Type type, uint32_t alignment) {
+    return type == Type::I32 && alignment != 0 &&
+           (alignment & (alignment - 1)) == 0;
+}
+
 // 用指定类型和 32 个二进制位创建常量操作数，不重新推导源语言整数类型。
-Operand Operand::constant(Type type, uint32_t bits) { return {type, bits}; }
+Operand Operand::constant(Type type, uint32_t bits) {
+    return {type, bits};
+}
 // 用指定类型和值 ID 创建操作数；所属函数和类型是否匹配由使用方检查。
-Operand Operand::local(Type type, ValueId id) { return {type, id}; }
+Operand Operand::local(Type type, ValueId id) {
+    return {type, id};
+}
 
 // 判断操作数是否保存了 i32 常量；void 和空操作数都不是有效的数据常量。
 bool valid_constant(const Operand &operand) {
     return operand.type == Type::I32 && operand.constant_bits();
 }
 
-Function::Function(IRFunctionId id, std::string name, Signature signature, Linkage linkage)
-    : id(id), name(std::move(name)), linkage(linkage), signature(std::move(signature)) {
+Function::Function(IRFunctionId id, std::string name, Signature signature,
+                   Linkage linkage)
+    : id(id), name(std::move(name)), linkage(linkage),
+      signature(std::move(signature)) {
     value_types.reserve(this->signature.parameters.size());
     parameters.reserve(this->signature.parameters.size());
     for (const auto type : this->signature.parameters)
@@ -69,7 +84,8 @@ const BasicBlock &Function::block(BlockId block_id) const {
 bool Function::contains(const Operand &operand) const {
     if (const auto *value = operand.value_id())
         return value->function == id && value->index < value_types.size() &&
-               operand.type != Type::Void && value_types[value->index] == operand.type;
+               operand.type != Type::Void &&
+               value_types[value->index] == operand.type;
     // 常量没有所属函数，也不占用值编号，可以在任何函数中使用。
     return valid_constant(operand);
 }
@@ -84,8 +100,8 @@ Module::Module(std::string module_name) : name(std::move(module_name)) {
 // 检查函数名能否直接写入 LLVM 文本而不加引号；首字符不能是数字。
 bool valid_symbol_name(const std::string &name) {
     const auto initial = [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-               c == '-' || c == '$' || c == '.' || c == '_';
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' ||
+               c == '$' || c == '.' || c == '_';
     };
     return !name.empty() && initial(name.front()) &&
            std::all_of(name.begin(), name.end(), [&](char c) {
@@ -94,17 +110,19 @@ bool valid_symbol_name(const std::string &name) {
 }
 
 // 检查名称和参数、返回类型，创建函数并分配 ID，函数体随后再添加。
-IRFunctionId Module::add_function(std::string function_name, Signature signature,
-                                  Linkage linkage) {
+IRFunctionId Module::add_function(std::string function_name,
+                                  Signature signature, Linkage linkage) {
     // 名称不能重复，参数不能是 void；检查失败时不向模块添加函数。
     if (!valid_symbol_name(function_name) || find_function(function_name) ||
         !*type_name(signature.result) ||
-        std::any_of(signature.parameters.begin(), signature.parameters.end(),
-                    [](Type type) { return type == Type::Void || !*type_name(type); }))
+        std::any_of(
+            signature.parameters.begin(), signature.parameters.end(),
+            [](Type type) { return type == Type::Void || !*type_name(type); }))
         throw std::logic_error("IR 函数名称重复、非法或签名无效");
     // 用模块编号和当前函数数量组成新函数的 ID。
     const IRFunctionId id{identity_, functions_.size()};
-    auto function = std::make_unique<Function>(id, std::move(function_name), std::move(signature), linkage);
+    auto function = std::make_unique<Function>(id, std::move(function_name),
+                                               std::move(signature), linkage);
     const auto &stored = functions_.emplace_back(std::move(function));
     try {
         functions_by_name_.emplace(stored->name, stored.get());

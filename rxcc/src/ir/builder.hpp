@@ -25,7 +25,16 @@ public:
     bool can_use(const Operand &operand) const;
 
     // 添加函数调用并返回结果操作数；被调用函数返回 void 时返回空值。
-    std::optional<Operand> call(IRFunctionId function, std::vector<Operand> arguments = {});
+    std::optional<Operand> call(IRFunctionId function,
+                                std::vector<Operand> arguments = {});
+    // 在当前函数入口分配固定存储，不改变当前插入点。
+    Operand entry_alloca(Type storage_type, uint32_t alignment);
+    Operand load(Type storage_type, Operand address, uint32_t alignment);
+    void store(Type storage_type, Operand value, Operand address,
+               uint32_t alignment);
+    void store(Operand value, Operand address, uint32_t alignment) {
+        store(value.type, value, address, alignment);
+    }
     // 添加与当前函数返回类型匹配的 ret 指令，然后取消选中的基本块。
     void ret(std::optional<Operand> value = std::nullopt);
 

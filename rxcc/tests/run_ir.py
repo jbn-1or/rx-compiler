@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the P2/P3.1 IR subset with external LLVM 22 tools."""
+"""Validate the P2/P3.1/P3.2 IR subset with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -131,6 +131,35 @@ def main():
                 raise RuntimeError(f"{name}: nondeterministic LLVM text")
             modules.append((name, output, expected))
 
+        for name, source_text, expected in (
+            ("local-shadow", "fn main() { let x = 1; println_i32(x); "
+             "let x = 2; println_i32(x); }", b"1\n2\n"),
+            ("local-shadow-init", "fn main() { let x = 1; let x = x; "
+             "println_i32(x); println_i32(x); }", b"1\n1\n"),
+            ("local-order", "fn main() { let a = 7; let b = 42; println_i32(b); "
+             "println_i32(a); println_i32(b); }", b"42\n7\n42\n"),
+            ("local-constant", "const N: i32 = 42; fn main() { let x = N; "
+             "println_i32(N); println_i32(x); }", b"42\n42\n"),
+            ("local-associated-constant", "struct S {} impl S { const MIN: i32 = -2147483648; } "
+             "fn main() { let x = S::MIN; println_i32(x); println_i32(S::MIN); }",
+             b"-2147483648\n-2147483648\n"),
+            ("local-unused", "fn unused() { let x = 8; } fn main() { let mut x: i32 = 7; "
+             "println_i32(x); }", b"7\n"),
+            ("local-integer-types", "fn main() { let a: u32 = 1u32; let b = a; "
+             "let c: usize = 2usize; let d = c; let e: isize = 3isize; let f = e; "
+             "println_i32(4); }", b"4\n"),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(source_text, encoding="utf-8")
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            repeated = temp / f"{name}-repeated.ll"
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(repeated)])
+            if repeated.read_bytes() != output.read_bytes():
+                raise RuntimeError(f"{name}: nondeterministic LLVM text")
+            modules.append((name, output, expected))
+
         for name, command in (
             ("model-smoke", [args.model_test]),
             ("model-values", [args.model_test, "--emit-model"]),
@@ -160,7 +189,9 @@ def main():
 
         # All are semantically valid. Reject unsupported lowering even in unused bodies.
         for index, contents in enumerate((
-            "fn main() { let x = 1; }",
+            "fn main() { let x = true; }",
+            "fn main() { let x = 1 + 2; }",
+            "fn main() { let mut x = 1; x = 2; }",
             "fn main() { print_i32(42); }",
             "fn main() { println_i32(get_i32()); }",
             "fn main() { println_i32(42) }",
@@ -173,7 +204,7 @@ def main():
             "fn main() { 1 + 2; }",
             "fn main() { { } }",
             "fn main() { let x = return; }",
-            "fn main() {} fn unused() { println_i32(99); let x = 1; }",
+            "fn main() {} fn unused() { println_i32(99); let x = true; }",
             "fn main() {} fn unused(value: i32) {}",
             "fn main() {} fn unused() -> i32 { 7 }",
             "struct Data {} impl Data { fn unused(&self) {} } fn main() {}",
@@ -240,7 +271,7 @@ def main():
                     if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
                         raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
                                            f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
-    print(f"P2/P3.1 IR tests passed: {len(modules)} modules verified" +
+    print(f"P2/P3.1/P3.2 IR tests passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

@@ -17,25 +17,41 @@ void operand(std::ostream &out, const Operand &value) {
         // 最高位为 1 时按负数输出，先转成 64 位再减 2^32，避免 32 位计算溢出。
         const auto bits = *value.constant_bits();
         out << (bits >= 0x80000000u ? static_cast<int64_t>(bits) - 0x100000000LL
-                                  : static_cast<int64_t>(bits));
+                                    : static_cast<int64_t>(bits));
     }
 }
 
-// 输出 call 指令，从模块中查询被调用函数的名称和返回类型。
-// 有返回数据时先输出 %v_<编号> =，返回 void 时只输出调用本身。
-void instruction(std::ostream &out, const Module &module, const Instruction &instruction) {
+// 输出指令；有结果时先输出 %v_<编号> =。
+void instruction(std::ostream &out, const Module &module,
+                 const Instruction &instruction) {
     out << "  ";
     if (instruction.result)
         out << "%v_" << instruction.result->index << " = ";
-    const auto &call = std::get<Call>(instruction.operation);
-    const auto &function = module.function(call.function);
-    out << "call " << type_name(function.signature.result) << " @" << function.name << '(';
-    for (std::size_t i = 0; i < call.arguments.size(); ++i) {
-        if (i)
-            out << ", ";
-        operand(out, call.arguments[i]);
+    if (const auto *allocation = std::get_if<Alloca>(&instruction.operation)) {
+        out << "alloca " << type_name(allocation->storage_type) << ", align "
+            << allocation->alignment << '\n';
+    } else if (const auto *load = std::get_if<Load>(&instruction.operation)) {
+        out << "load " << type_name(load->storage_type) << ", ";
+        operand(out, load->address);
+        out << ", align " << load->alignment << '\n';
+    } else if (const auto *store = std::get_if<Store>(&instruction.operation)) {
+        out << "store ";
+        operand(out, store->value);
+        out << ", ";
+        operand(out, store->address);
+        out << ", align " << store->alignment << '\n';
+    } else {
+        const auto &call = std::get<Call>(instruction.operation);
+        const auto &function = module.function(call.function);
+        out << "call " << type_name(function.signature.result) << " @"
+            << function.name << '(';
+        for (std::size_t i = 0; i < call.arguments.size(); ++i) {
+            if (i)
+                out << ", ";
+            operand(out, call.arguments[i]);
+        }
+        out << ")\n";
     }
-    out << ")\n";
 }
 
 } // namespace
@@ -45,7 +61,8 @@ void print_module(const Module &module, std::ostream &destination) {
     const std::ostream::sentry ready(destination);
     if (!ready)
         return;
-    // 独立的格式状态保证 LLVM 整数使用无分组的十进制。先设置 locale，再借用缓冲区。
+    // 独立的格式状态保证 LLVM 整数使用无分组的十进制。先设置
+    // locale，再借用缓冲区。
     std::ostream out(nullptr);
     out.imbue(std::locale::classic());
     out.rdbuf(destination.rdbuf());
@@ -56,7 +73,8 @@ void print_module(const Module &module, std::ostream &destination) {
         out << (function.is_declaration() ? "declare " : "define ");
         if (function.linkage == Linkage::Internal)
             out << "internal ";
-        out << type_name(function.signature.result) << " @" << function.name << '(';
+        out << type_name(function.signature.result) << " @" << function.name
+            << '(';
         for (std::size_t i = 0; i < function.parameters.size(); ++i) {
             if (i)
                 out << ", ";
@@ -75,6 +93,9 @@ void print_module(const Module &module, std::ostream &destination) {
         // 每个块都打印标签，包括唯一的入口块；先打印普通指令，最后打印 ret。
         for (const auto &block : function.blocks) {
             out << "bb_" << block.id.index << ":\n";
+            if (block.id.index == 0)
+                for (const auto &allocation : function.entry_allocas)
+                    instruction(out, module, allocation);
             for (const auto &operation : block.instructions)
                 instruction(out, module, operation);
             const auto &ret = std::get<Return>(*block.terminator);

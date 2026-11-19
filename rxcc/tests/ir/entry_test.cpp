@@ -1,4 +1,4 @@
-// P2/P3.1：真实源码的双入口、字面量打印、命名与失败边界。
+// P2/P3：真实源码的入口、整数打印、局部存储与失败边界。
 #include "RxLexer.h"
 #include "RxParser.h"
 #include "ast_builder.hpp"
@@ -46,7 +46,8 @@ rx::SemanticResult analyze(const rx::Crate &crate) {
 rx::IRArtifact generate(const rx::Crate &crate, const rx::SemanticResult &sema) {
     std::ostringstream diagnostics;
     auto artifact = rx::generate_ir(crate, sema, diagnostics);
-    check(artifact && diagnostics.str().empty(), "已支持的有效输入必须成功生成模块");
+    if (!artifact || !diagnostics.str().empty())
+        throw std::runtime_error("已支持的有效输入必须成功生成模块: " + diagnostics.str());
     return std::move(*artifact);
 }
 
@@ -163,15 +164,62 @@ void check_println() {
           "不能根据 println_i32 的源码名字把用户函数目标当成 builtin");
 }
 
+void check_locals() {
+    const auto crate = parse_crate(
+        "const N: i32 = 42; fn main() { let x = N; println_i32(x); "
+        "let x = x; println_i32(x); println_i32(x); }");
+    auto sema = analyze(*crate);
+    const auto artifact = generate(*crate, sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "局部变量模块必须通过自检");
+    const auto ir = text.str();
+    const auto first_alloca = ir.find("alloca i32");
+    const auto second_alloca = ir.find("alloca i32", first_alloca + 1);
+    const auto first_store = ir.find("store i32");
+    const auto first_load = ir.find("load i32", first_store);
+    const auto first_call = ir.find("call void @println_i32", first_load);
+    const auto init_load = ir.find("load i32", first_call);
+    const auto second_store = ir.find("store i32", init_load);
+    const auto second_load = ir.find("load i32", second_store);
+    const auto second_call = ir.find("call void @println_i32", second_load);
+    const auto third_load = ir.find("load i32", second_call);
+    const auto third_call = ir.find("call void @println_i32", third_load);
+    check(first_alloca != std::string::npos && second_alloca != std::string::npos &&
+              first_store != std::string::npos && first_load != std::string::npos &&
+              first_call != std::string::npos && init_load != std::string::npos &&
+              second_store != std::string::npos && second_load != std::string::npos &&
+              second_call != std::string::npos && third_load != std::string::npos &&
+              third_call != std::string::npos && second_alloca < first_store,
+          "遮蔽需要两个入口 slot；初始化与每次读取必须按源码顺序执行");
+
+    for (int corruption = 0; corruption < 4; ++corruption) {
+        auto broken = analyze(*crate);
+        switch (corruption) {
+        case 0: broken.let_bindings.clear(); break;
+        case 1: broken.locals.clear(); break;
+        case 2: broken.paths.clear(); break;
+        case 3: broken.constants.at(0)->evaluated.ok = false; break;
+        }
+        std::ostringstream errors;
+        check(!rx::generate_ir(*crate, broken, errors) &&
+                  errors.str().find("内部错误") != std::string::npos,
+              "缺少局部绑定、路径或常量语义事实必须报告内部错误");
+    }
+}
+
 void run_tests() {
     check_function_names();
     check_println();
+    check_locals();
     check_entry("fn main() {}");
     check_entry("fn main() -> () {}");
     check_entry("fn __rx_fn_1() {} fn main() {} fn helper() {}");
     check_entry("const LEN: usize = 2; struct Data { values: [i32; LEN] } impl Data { const VALUE: i32 = 7; } fn main() {}");
     for (const auto &source : {
-             "fn main() { let x = 1; }",
+             "fn main() { let x = true; }",
+             "fn main() { let x = 1 + 2; }",
+             "fn main() { let mut x = 1; x = 2; }",
              "fn main() { Box::<i32>::new(1); }",
              "fn main() { Vec::<i32>::new(); }",
              "fn main() { print_i32(42); }",
@@ -184,7 +232,7 @@ void run_tests() {
              "fn main() { 1 + 2; }",
              "fn main() { { } }",
              "fn main() { let x = return; }",
-             "fn main() {} fn unused() { println_i32(99); let x = 1; }",
+             "fn main() {} fn unused() { println_i32(99); let x = true; }",
              "fn main() {} fn unused(value: i32) {}",
              "fn main() {} fn unused() -> i32 { 7 }",
              "struct Data {} impl Data { fn unused(&self) {} } fn main() {}"})

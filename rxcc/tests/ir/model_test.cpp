@@ -57,9 +57,25 @@ void add_typed_calls(Module &module) {
     builder.ret(Operand::constant(Type::I32, 0xffffffffu));
 }
 
+void add_storage(Module &module) {
+    IRBuilder builder(module);
+    const auto id = module.add_function("storage", {Type::I32, {}}, Linkage::Internal);
+    auto &function = module.function(id);
+    builder.set_insert_point(function.add_block());
+    const auto first = builder.entry_alloca(Type::I32, 4);
+    builder.store(Type::I32, Operand::constant(Type::I32, 1), first, 4);
+    const auto loaded = builder.load(Type::I32, first, 4);
+    const auto insertion = builder.insert_point();
+    const auto second = builder.entry_alloca(Type::I32, 4);
+    check(builder.insert_point() == insertion, "入口分配不得改变插入点");
+    builder.store(Type::I32, loaded, second, 4);
+    builder.ret(builder.load(Type::I32, second, 4));
+}
+
 template <class F> void reject_model(F corrupt) {
     auto artifact = make_module();
     add_typed_calls(artifact.module());
+    add_storage(artifact.module());
     corrupt(artifact.module());
     std::ostringstream text, diagnostics;
     check(!artifact.verify_and_print(text, diagnostics) && text.str().empty() && !diagnostics.str().empty(),
@@ -105,6 +121,14 @@ void check_invalid_models() {
         m.find_function("external_io")->signature.parameters[0] = Type::Void;
     });
     reject_model([](Module &m) { m.find_function("__rx_fn_0")->blocks.clear(); });
+    reject_model([](Module &m) { std::get<Alloca>(m.find_function("storage")->entry_allocas[0].operation).alignment = 3; });
+    reject_model([](Module &m) { m.find_function("storage")->entry_allocas[0].type = Type::I32; });
+    reject_model([](Module &m) { m.find_function("storage")->entry_allocas[1].result = m.find_function("storage")->entry_allocas[0].result; });
+    reject_model([](Module &m) { std::get<Store>(m.find_function("storage")->blocks[0].instructions[0].operation).address = Operand::constant(Type::I32, 0); });
+    reject_model([](Module &m) { std::get<Load>(m.find_function("storage")->blocks[0].instructions[1].operation).storage_type = Type::Ptr; });
+    reject_model([](Module &m) { std::get<Store>(m.find_function("storage")->blocks[0].instructions[0].operation).alignment = 0; });
+    reject_model([](Module &m) { m.find_function("storage")->blocks[0].instructions.push_back(m.find_function("storage")->entry_allocas[0]); });
+    reject_model([](Module &m) { m.find_function("external_io")->entry_allocas.push_back(m.find_function("storage")->entry_allocas[0]); });
 }
 
 struct GroupedDigits : std::numpunct<char> {
@@ -175,6 +199,36 @@ void run_tests() {
     check(!moved.verify_and_print(failing_output, diagnostics) && failing_output.bad(),
           "缓冲区写入失败应传播到目标流");
     check_invalid_models();
+    auto storage = make_module();
+    add_storage(storage.module());
+    std::ostringstream storage_text;
+    check(storage.verify_and_print(storage_text, diagnostics), "存储模型必须通过检查");
+    const auto printed = storage_text.str();
+    check(printed.find("%v_0 = alloca i32, align 4\n  %v_2 = alloca i32, align 4\n  store i32 1, ptr %v_0, align 4\n  %v_1 = load i32, ptr %v_0, align 4\n  store i32 %v_1, ptr %v_2, align 4") != std::string::npos,
+          "迟分配必须移到入口，保持原值编号和正文顺序");
+    IRBuilder memory(storage.module());
+    rejects([&] { memory.entry_alloca(Type::I32, 4); });
+    rejects([&] { memory.load(Type::I32, Operand::constant(Type::I32, 0), 4); });
+    const auto memory_id = storage.module().add_function("memory_errors", {Type::Void, {}}, Linkage::Internal);
+    auto &memory_function = storage.module().function(memory_id);
+    const auto block = memory_function.add_block();
+    memory.set_insert_point(block);
+    const auto address = memory.entry_alloca(Type::I32, 4);
+    const auto values = memory_function.value_types.size();
+    rejects([&] { memory.entry_alloca(Type::Void, 4); });
+    rejects([&] { memory.entry_alloca(Type::I32, 3); });
+    rejects([&] { memory.load(Type::Ptr, address, 4); });
+    rejects([&] { memory.load(Type::I32, Operand::constant(Type::I32, 0), 4); });
+    rejects([&] { memory.store(Type::I32, address, address, 4); });
+    rejects([&] { memory.store(Type::I32, Operand::constant(Type::I32, 1), address, 0); });
+    check(memory_function.value_types.size() == values && memory_function.entry_allocas.size() == 1 &&
+              memory_function.blocks[0].instructions.empty() && memory.insert_point() == block,
+          "无效存储请求不得产生部分指令或改变状态");
+    memory.ret();
+    rejects([&] { memory.store(Type::I32, Operand::constant(Type::I32, 1), address, 4); });
+    memory.set_insert_point(block);
+    rejects([&] { memory.entry_alloca(Type::I32, 4); });
+    rejects([&] { memory.load(Type::I32, address, 4); });
 }
 }
 
@@ -188,8 +242,10 @@ int main(int argc, char **argv) {
         if (argc > 2 || (!mode.empty() && mode != "--invalid" && mode != "--emit-model"))
             return 2;
         auto artifact = make_module(mode == "--invalid");
-        if (mode == "--emit-model")
+        if (mode == "--emit-model") {
             add_typed_calls(artifact.module());
+            add_storage(artifact.module());
+        }
         return artifact.verify_and_print(std::cout, std::cerr) ? 0 : 1;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

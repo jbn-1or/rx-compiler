@@ -1,6 +1,6 @@
 // 定义保存 IR 所需的模块、函数、基本块、操作数和指令，不依赖 LLVM 开发库。
 // 一个模块保存多个函数，每个函数保存自己的基本块，以及参数和指令结果的类型。
-// 当前只支持 void/i32 类型和 call/ret 指令，不负责推导源程序的类型。
+// 当前支持整数和指针，以及调用、存储和返回指令，不推导源程序类型。
 #pragma once
 
 #include <cstddef>
@@ -16,13 +16,14 @@
 
 namespace rx::ir {
 
-// 当前支持的 IR 类型：Void 表示没有返回数据，I32 表示 32 位整数。
-enum class Type { Void, I32 };
+// Void 表示没有返回数据，I32 表示 32 位整数，Ptr 表示不透明地址。
+enum class Type { Void, I32, Ptr };
 // 返回类型在 LLVM 文本中的名称；不支持的类型返回空串。
 const char *type_name(Type type);
 
 // 表示尚未分配下标，不能用它访问函数、值或基本块表。
-inline constexpr std::size_t invalid_index = std::numeric_limits<std::size_t>::max();
+inline constexpr std::size_t invalid_index =
+    std::numeric_limits<std::size_t>::max();
 
 // 通过模块编号和函数下标找到一个 IR 函数，不是语义分析中的 FunctionId。
 // 同时保存模块编号，防止把另一个模块中下标相同的函数当成当前模块的函数。
@@ -54,7 +55,7 @@ struct BlockId {
 struct Operand {
     // 这个操作数的 IR 类型；默认 Void 表示还没有可用的数据值。
     Type type = Type::Void;
-    // monostate 表示空值，uint32_t 保存常量的 32 个二进制位，ValueId 引用 SSA 值。
+    // monostate 表示空值，uint32_t保存常量的 32 个二进制位，ValueId 引用 SSA值。
     std::variant<std::monostate, uint32_t, ValueId> value;
 
     // 用类型和常量的二进制位创建操作数，不分配值 ID。
@@ -62,7 +63,9 @@ struct Operand {
     // 用类型和已有的值 ID 创建操作数，不在这里检查值是否已经定义。
     static Operand local(Type type, ValueId id);
     // 常量操作数返回其二进制位的地址，其他操作数返回 nullptr。
-    const uint32_t *constant_bits() const { return std::get_if<uint32_t>(&value); }
+    const uint32_t *constant_bits() const {
+        return std::get_if<uint32_t>(&value);
+    }
     // SSA 操作数返回其值 ID 的地址，其他操作数返回 nullptr。
     const ValueId *value_id() const { return std::get_if<ValueId>(&value); }
     bool operator==(const Operand &) const = default;
@@ -88,15 +91,31 @@ struct Call {
     // 按形参顺序保存的实参，数量和类型必须与被调用函数匹配。
     std::vector<Operand> arguments;
 };
-// 普通指令支持的操作种类，当前只有 Call。
-using Operation = std::variant<Call>;
+struct Alloca {
+    Type storage_type;
+    uint32_t alignment;
+};
+struct Load {
+    Type storage_type;
+    Operand address;
+    uint32_t alignment;
+};
+struct Store {
+    Type storage_type;
+    Operand value;
+    Operand address;
+    uint32_t alignment;
+};
+// P3.2 仅支持 i32 存储；对齐必须是非零的 2 的幂。
+bool valid_storage(Type type, uint32_t alignment);
+using Operation = std::variant<Call, Alloca, Load, Store>;
 // 保存一条普通指令的操作、结果类型，以及有返回数据时分配的结果 ID。
 struct Instruction {
-    // 结果值的 ID；返回 void 的调用没有结果，因此为空。
+    // 结果值的 ID；无结果指令为空。
     std::optional<ValueId> result;
-    // 结果的 IR 类型，当前等于被调用函数的返回类型。
+    // 结果的 IR 类型，无结果指令为 Void。
     Type type;
-    // 这条指令具体要做什么，当前保存 Call 及其目标函数和实参。
+    // 这条指令的具体操作及操作数。
     Operation operation;
 };
 
@@ -120,7 +139,8 @@ struct BasicBlock {
 // 保存一个函数的名称、参数、返回类型和函数体；没有基本块时只有声明。
 // 参数和指令结果使用同一张值类型表，基本块使用另一张表单独编号。
 struct Function {
-    Function(IRFunctionId id, std::string name, Signature signature, Linkage linkage);
+    Function(IRFunctionId id, std::string name, Signature signature,
+             Linkage linkage);
     // 这个函数的 IR ID，在添加到模块时分配，不直接使用 sema 的 FunctionId。
     IRFunctionId id;
     // 模块的名称索引借用这个不可变的 LLVM 全局符号名。
@@ -133,6 +153,8 @@ struct Function {
     std::vector<Operand> parameters;
     // 记录每个参数和指令结果的类型，ValueId.index 是这张表的下标。
     std::vector<Type> value_types;
+    // 固定分配总是在入口正文之前输出，不改变正文的求值顺序。
+    std::vector<Instruction> entry_allocas;
     // 按创建顺序保存的基本块；定义的第一个块为入口块。
     std::vector<BasicBlock> blocks;
 
@@ -169,7 +191,8 @@ public:
     // 返回模块编号，用来检查函数是否属于这个模块。
     uint64_t identity() const { return identity_; }
     // 添加函数并分配函数和参数的 ID；名称不能重复，函数体随后再添加。
-    IRFunctionId add_function(std::string name, Signature signature, Linkage linkage);
+    IRFunctionId add_function(std::string name, Signature signature,
+                              Linkage linkage);
     // 按函数名查找，找不到时返回 nullptr。
     Function *find_function(const std::string &name);
     const Function *find_function(const std::string &name) const;

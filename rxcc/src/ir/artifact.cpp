@@ -9,14 +9,16 @@
 namespace rx {
 
 // 创建指定名称的模块，供生成器通过 module() 添加函数和指令。
-IRArtifact::IRArtifact(const std::string &name) : module_(std::make_unique<ir::Module>(name)) {}
+IRArtifact::IRArtifact(const std::string &name)
+    : module_(std::make_unique<ir::Module>(name)) {}
 // 释放保存的模块，以及模块中的函数、基本块和指令。
 IRArtifact::~IRArtifact() = default;
 // 将模块指针移交给新对象，不改变模块地址，也不重新分配任何 ID。
 IRArtifact::IRArtifact(IRArtifact &&) noexcept = default;
 
 // 检查模块并输出 LLVM 文本；检查或写入失败时输出错误信息并返回 false。
-bool IRArtifact::verify_and_print(std::ostream &output, std::ostream &diagnostics) const {
+bool IRArtifact::verify_and_print(std::ostream &output,
+                                  std::ostream &diagnostics) const {
     // 检查失败时立即返回，避免把不合法的模块写入输出流。
     if (!ir::check_module(*module_, diagnostics))
         return false;

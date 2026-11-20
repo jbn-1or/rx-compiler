@@ -71,7 +71,7 @@ set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "-w"
 # 自有 LLVM IR 子集、构建/检查/文本输出；不链接 LLVM 开发库。
 add_library(rxcc_ir STATIC
   src/ir/model.cpp src/ir/builder.cpp src/ir/check.cpp src/ir/printer.cpp
-  src/ir/artifact.cpp src/ir/generator.cpp)
+  src/ir/artifact.cpp src/ir/lowering.cpp src/ir/generator.cpp)
 target_include_directories(rxcc_ir PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_compile_options(rxcc_ir PRIVATE -Wall -Wextra)
 

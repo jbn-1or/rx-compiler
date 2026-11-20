@@ -208,7 +208,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (stage == "ir") {
-            auto artifact = rx::generate_ir(*crate, *semantic_result, std::cerr);
+            auto artifact = rx::generate_ir(*semantic_result, std::cerr);
             if (!artifact)
                 return 1;
 

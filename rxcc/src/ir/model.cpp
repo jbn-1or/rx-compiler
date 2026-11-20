@@ -14,6 +14,10 @@ const char *type_name(Type type) {
     switch (type) {
         case Type::Void:
             return "void";
+        case Type::I1:
+            return "i1";
+        case Type::I8:
+            return "i8";
         case Type::I32:
             return "i32";
         case Type::Ptr:
@@ -22,8 +26,22 @@ const char *type_name(Type type) {
     return "";
 }
 
+// 判断类型是否是已定义的 Type 枚举值。
+bool is_known_type(Type type) { return *type_name(type) != '\0'; }
+
+// 返回整数类型的位宽；非整数类型（void、指针）返回 0。
+unsigned integer_width(Type type) {
+    switch (type) {
+        case Type::I1: return 1;
+        case Type::I8: return 8;
+        case Type::I32: return 32;
+        default: return 0;
+    }
+}
+
+// 检查存储类型和对齐是否合法：类型为 i32 或 i8，且对齐值是 2 的幂。
 bool valid_storage(Type type, uint32_t alignment) {
-    return type == Type::I32 && alignment != 0 &&
+    return (type == Type::I32 || type == Type::I8) && alignment != 0 &&
            (alignment & (alignment - 1)) == 0;
 }
 
@@ -32,18 +50,32 @@ Operand Operand::constant(Type type, uint32_t bits) {
     return {type, bits};
 }
 // 用指定类型和值 ID 创建操作数；所属函数和类型是否匹配由使用方检查。
-Operand Operand::local(Type type, ValueId id) {
-    return {type, id};
+Operand Operand::local(Type type, ValueId value_id) {
+    return {type, value_id};
 }
 
-// 判断操作数是否保存了 i32 常量；void 和空操作数都不是有效的数据常量。
+// 判断操作数的位模式是否落在其类型允许的范围内：
+// i1 只能是 0/1，i8 最大 0xff，i32 接受全部 32 位；其他类型不能是常量。
 bool valid_constant(const Operand &operand) {
-    return operand.type == Type::I32 && operand.constant_bits();
+    const auto *bits = operand.constant_bits();
+    if (!bits)
+        return false;
+    switch (operand.type) {
+        case Type::I1:
+            return *bits <= 1;
+        case Type::I8:
+            return *bits <= 0xff;
+        case Type::I32:
+            return true;
+        default:
+            return false;
+    }
 }
 
-Function::Function(IRFunctionId id, std::string name, Signature signature,
-                   Linkage linkage)
-    : id(id), name(std::move(name)), linkage(linkage),
+// 保存函数身份、名称、签名和链接属性，并为参数预分配值 ID。
+Function::Function(IRFunctionId function_id, std::string name,
+                   Signature signature, Linkage linkage)
+    : id(function_id), name(std::move(name)), linkage(linkage),
       signature(std::move(signature)) {
     value_types.reserve(this->signature.parameters.size());
     parameters.reserve(this->signature.parameters.size());
@@ -91,22 +123,38 @@ bool Function::contains(const Operand &operand) const {
 }
 
 // 创建模块并为它分配唯一编号，用来区分不同模块中下标相同的函数。
-Module::Module(std::string module_name) : name(std::move(module_name)) {
-    // 用原子计数器保证并发创建的模块编号不重复；它不负责保护模块中的数据。
+// 用原子计数器保证并发创建模块时编号不重复；它不负责保护模块内部数据。
+Module::Module() {
     static std::atomic<uint64_t> next_identity{1};
     identity_ = next_identity.fetch_add(1, std::memory_order_relaxed);
 }
 
+namespace {
+
+// 判断字符能否作为符号名首字符；数字不能出现在首位。
+bool is_symbol_initial_character(char character) {
+    return (character >= 'a' && character <= 'z') ||
+           (character >= 'A' && character <= 'Z') || character == '-' ||
+           character == '$' || character == '.' || character == '_';
+}
+
+// 判断字符能否出现在符号名中；首字符之外还允许数字。
+bool is_symbol_character(char character) {
+    return is_symbol_initial_character(character) ||
+           (character >= '0' && character <= '9');
+}
+
+// 判断类型是否不能作为函数参数；void 和未知类型都不合法。
+bool invalid_parameter_type(Type type) {
+    return type == Type::Void || !is_known_type(type);
+}
+
+} // namespace
+
 // 检查函数名能否直接写入 LLVM 文本而不加引号；首字符不能是数字。
 bool valid_symbol_name(const std::string &name) {
-    const auto initial = [](char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' ||
-               c == '$' || c == '.' || c == '_';
-    };
-    return !name.empty() && initial(name.front()) &&
-           std::all_of(name.begin(), name.end(), [&](char c) {
-               return initial(c) || (c >= '0' && c <= '9');
-           });
+    return !name.empty() && is_symbol_initial_character(name.front()) &&
+           std::all_of(name.begin(), name.end(), is_symbol_character);
 }
 
 // 检查名称和参数、返回类型，创建函数并分配 ID，函数体随后再添加。
@@ -114,15 +162,14 @@ IRFunctionId Module::add_function(std::string function_name,
                                   Signature signature, Linkage linkage) {
     // 名称不能重复，参数不能是 void；检查失败时不向模块添加函数。
     if (!valid_symbol_name(function_name) || find_function(function_name) ||
-        !*type_name(signature.result) ||
-        std::any_of(
-            signature.parameters.begin(), signature.parameters.end(),
-            [](Type type) { return type == Type::Void || !*type_name(type); }))
+        !is_known_type(signature.result) ||
+        std::any_of(signature.parameters.begin(),
+                    signature.parameters.end(), invalid_parameter_type))
         throw std::logic_error("IR 函数名称重复、非法或签名无效");
     // 用模块编号和当前函数数量组成新函数的 ID。
-    const IRFunctionId id{identity_, functions_.size()};
-    auto function = std::make_unique<Function>(id, std::move(function_name),
-                                               std::move(signature), linkage);
+    const IRFunctionId function_id{identity_, functions_.size()};
+    auto function = std::make_unique<Function>(
+        function_id, std::move(function_name), std::move(signature), linkage);
     const auto &stored = functions_.emplace_back(std::move(function));
     try {
         functions_by_name_.emplace(stored->name, stored.get());
@@ -130,35 +177,36 @@ IRFunctionId Module::add_function(std::string function_name,
         functions_.pop_back();
         throw;
     }
-    return id;
+    return function_id;
 }
 
 // 按名称查找函数；找不到时返回 nullptr，不自动创建新函数。
 Function *Module::find_function(const std::string &function_name) {
-    const auto it = functions_by_name_.find(function_name);
-    return it == functions_by_name_.end() ? nullptr : it->second;
+    const auto found = functions_by_name_.find(function_name);
+    return found == functions_by_name_.end() ? nullptr : found->second;
 }
 // 在只读模块中按名称查找函数，找不到时返回 nullptr。
 const Function *Module::find_function(const std::string &function_name) const {
-    const auto it = functions_by_name_.find(function_name);
-    return it == functions_by_name_.end() ? nullptr : it->second;
+    const auto found = functions_by_name_.find(function_name);
+    return found == functions_by_name_.end() ? nullptr : found->second;
 }
 // 检查 ID 中的模块编号、函数下标和表中记录，判断函数是否属于本模块。
-bool Module::contains(IRFunctionId id) const {
-    return id.module == identity_ && id.index < functions_.size() &&
-           functions_[id.index]->id == id;
+bool Module::contains(IRFunctionId function_id) const {
+    return function_id.module == identity_ &&
+           function_id.index < functions_.size() &&
+           functions_[function_id.index]->id == function_id;
 }
 // 按 ID 返回可修改的函数；ID 无效或属于其他模块时抛出 logic_error。
-Function &Module::function(IRFunctionId id) {
-    if (!contains(id))
+Function &Module::function(IRFunctionId function_id) {
+    if (!contains(function_id))
         throw std::logic_error("IR 函数身份无效或不属于当前模块");
-    return *functions_[id.index];
+    return *functions_[function_id.index];
 }
 // 按 ID 返回只读函数，同样检查 ID 是否有效且属于本模块。
-const Function &Module::function(IRFunctionId id) const {
-    if (!contains(id))
+const Function &Module::function(IRFunctionId function_id) const {
+    if (!contains(function_id))
         throw std::logic_error("IR 函数身份无效或不属于当前模块");
-    return *functions_[id.index];
+    return *functions_[function_id.index];
 }
 
 } // namespace rx::ir

@@ -1,4 +1,4 @@
-// P2 独立验证：模型所有权、call/ret、结构检查与确定的文本输出。
+// P2/P3 独立验证：模型所有权、call/ret/存储/转换、结构检查和确定的文本输出。
 #include "ir/artifact.hpp"
 #include "ir/builder.hpp"
 #include <iomanip>
@@ -24,7 +24,7 @@ template <class F> void rejects(F operation) {
 }
 
 rx::IRArtifact make_module(bool invalid = false) {
-    rx::IRArtifact artifact("rx-p2-smoke");
+    rx::IRArtifact artifact;
     auto &module = artifact.module();
     IRBuilder builder(module);
     const auto source = module.add_function("__rx_fn_0", {Type::Void, {}}, Linkage::Internal);
@@ -72,6 +72,66 @@ void add_storage(Module &module) {
     builder.ret(builder.load(Type::I32, second, 4));
 }
 
+// 构造一个完整的 bool 往返函数，覆盖 i1 计算、i8 存取和 zext/trunc。
+void add_bool_scalar(Module &module) {
+    IRBuilder builder(module);
+    const auto id = module.add_function("bool_roundtrip", {Type::I1, {Type::I1}}, Linkage::Internal);
+    auto &function = module.function(id);
+    builder.set_insert_point(function.add_block());
+    const auto slot = builder.entry_alloca(Type::I8, 1);
+    const auto byte = builder.zext(Type::I8, function.argument(0));
+    builder.store(Type::I8, byte, slot, 1);
+    const auto loaded = builder.load(Type::I8, slot, 1);
+    const auto bit = builder.trunc(Type::I1, loaded);
+    builder.ret(bit);
+    const auto constant_id = module.add_function("bool_constant", {Type::I1, {}}, Linkage::Internal);
+    builder.set_insert_point(module.function(constant_id).add_block());
+    builder.ret(Operand::constant(Type::I1, 1));
+}
+
+// 手工构造 bool 真值驱动：把往返结果零扩展成 i32 后打印。
+// 这是模型层的观察手段，不表示源码已经支持把 bool 直接传给 println_i32。
+rx::IRArtifact make_bool_driver() {
+    rx::IRArtifact artifact;
+    auto &module = artifact.module();
+    IRBuilder builder(module);
+    module.add_function("println_i32", {Type::Void, {Type::I32}}, Linkage::External);
+    const auto roundtrip =
+        module.add_function("bool_roundtrip", {Type::I1, {Type::I1}}, Linkage::Internal);
+    auto &function = module.function(roundtrip);
+    builder.set_insert_point(function.add_block());
+    const auto slot = builder.entry_alloca(Type::I8, 1);
+    builder.store(Type::I8, builder.zext(Type::I8, function.argument(0)), slot, 1);
+    builder.ret(builder.trunc(Type::I1, builder.load(Type::I8, slot, 1)));
+    const auto source =
+        module.add_function("__rx_fn_0", {Type::Void, {}}, Linkage::Internal);
+    builder.set_insert_point(module.function(source).add_block());
+    const auto print = module.find_function("println_i32")->id;
+    // 先传 true 再传 false，期望打印 1、0，能发现两种真值被混同。
+    for (const unsigned bits : {1u, 0u}) {
+        const auto value =
+            builder.call(roundtrip, {Operand::constant(Type::I1, bits)});
+        builder.call(print, {builder.zext(Type::I32, *value)});
+    }
+    builder.ret();
+    const auto entry =
+        module.add_function("main", {Type::I32, {}}, Linkage::External);
+    builder.set_insert_point(module.function(entry).add_block());
+    builder.call(source);
+    builder.ret(Operand::constant(Type::I32, 0));
+    return artifact;
+}
+
+// 在 bool 正例上制造一处损坏，确认检查器拒绝且不输出部分文本。
+template <class F> void reject_scalar_model(F corrupt) {
+    auto artifact = make_module();
+    add_bool_scalar(artifact.module());
+    corrupt(artifact.module());
+    std::ostringstream text, diagnostics;
+    check(!artifact.verify_and_print(text, diagnostics) && text.str().empty() && !diagnostics.str().empty(),
+          "损坏的 bool 模型必须诊断且不得输出部分文本");
+}
+
 template <class F> void reject_model(F corrupt) {
     auto artifact = make_module();
     add_typed_calls(artifact.module());
@@ -105,7 +165,7 @@ void check_invalid_models() {
         call.function.index = invalid_index;
     });
     reject_model([](Module &m) {
-        Module foreign("foreign");
+        Module foreign;
         const auto id = foreign.add_function("other", {Type::Void, {Type::I32}}, Linkage::External);
         m.find_function("main")->blocks[0].terminator = Return{foreign.function(id).argument(0)};
     });
@@ -129,6 +189,24 @@ void check_invalid_models() {
     reject_model([](Module &m) { std::get<Store>(m.find_function("storage")->blocks[0].instructions[0].operation).alignment = 0; });
     reject_model([](Module &m) { m.find_function("storage")->blocks[0].instructions.push_back(m.find_function("storage")->entry_allocas[0]); });
     reject_model([](Module &m) { m.find_function("external_io")->entry_allocas.push_back(m.find_function("storage")->entry_allocas[0]); });
+    // bool 模型：i1 常量范围、zext/trunc 的源/目标/结果类型都必须一致。
+    reject_scalar_model([](Module &m) {
+        m.find_function("bool_constant")->blocks[0].terminator = Return{Operand::constant(Type::I1, 2)};
+    });
+    reject_scalar_model([](Module &m) {
+        auto &extension = std::get<ZExt>(
+            m.find_function("bool_roundtrip")->blocks[0].instructions[0].operation);
+        extension.target_type = Type::I1;
+    });
+    reject_scalar_model([](Module &m) {
+        auto &truncation = std::get<Trunc>(
+            m.find_function("bool_roundtrip")->blocks[0].instructions[3].operation);
+        truncation.value.type = Type::I1;
+    });
+    reject_scalar_model([](Module &m) {
+        m.find_function("bool_roundtrip")->blocks[0].instructions[2].type =
+            Type::I32;
+    });
 }
 
 struct GroupedDigits : std::numpunct<char> {
@@ -229,6 +307,47 @@ void run_tests() {
     memory.set_insert_point(block);
     rejects([&] { memory.entry_alloca(Type::I32, 4); });
     rejects([&] { memory.load(Type::I32, address, 4); });
+    auto scalars = make_module();
+    add_bool_scalar(scalars.module());
+    std::ostringstream scalar_text;
+    check(scalars.verify_and_print(scalar_text, diagnostics), "bool 标量模型必须通过检查");
+    const auto scalar_ir = scalar_text.str();
+    check(scalar_ir.find("define internal i1 @bool_roundtrip(i1 %v_0)") != std::string::npos &&
+              scalar_ir.find("alloca i8, align 1") != std::string::npos &&
+              scalar_ir.find("= zext i1 %v_0 to i8") != std::string::npos &&
+              scalar_ir.find("= trunc i8 %v_") != std::string::npos &&
+              scalar_ir.find("ret i1 true") != std::string::npos,
+          "bool 计算/参数/返回使用 i1，slot 使用 i8，并显式 zext/trunc");
+    IRBuilder scalar_builder(scalars.module());
+    const auto bool_errors_id = scalars.module().add_function(
+        "bool_errors", {Type::Void, {}}, Linkage::Internal);
+    auto &bool_errors = scalars.module().function(bool_errors_id);
+    const auto bool_block = bool_errors.add_block();
+    scalar_builder.set_insert_point(bool_block);
+    const auto scalar_values = bool_errors.value_types.size();
+    rejects([&] { scalar_builder.zext(Type::I8, Operand::constant(Type::I32, 1)); });
+    rejects([&] { scalar_builder.zext(Type::I1, Operand::constant(Type::I1, 1)); });
+    // 非整数目标和相等位宽都不能构造扩展/截断。
+    rejects([&] { scalar_builder.zext(Type::Ptr, Operand::constant(Type::I1, 1)); });
+    rejects([&] { scalar_builder.trunc(Type::I1, Operand::constant(Type::I1, 0)); });
+    rejects([&] { scalar_builder.trunc(Type::I8, Operand::constant(Type::I1, 0)); });
+    rejects([&] { scalar_builder.trunc(Type::I32, Operand::constant(Type::I32, 0)); });
+    rejects([&] { scalar_builder.entry_alloca(Type::I1, 1); });
+    rejects([&] { scalar_builder.entry_alloca(Type::I8, 3); });
+    check(bool_errors.value_types.size() == scalar_values &&
+              bool_errors.entry_allocas.empty() &&
+              bool_errors.blocks[0].instructions.empty() &&
+              scalar_builder.insert_point() == bool_block,
+          "无效 bool 转换或对齐不得产生部分指令");
+    scalar_builder.ret();
+    // 手工驱动必须把 bool 返回值扩展成 i32，再交给打印函数。
+    auto driver = make_bool_driver();
+    std::ostringstream driver_text;
+    check(driver.verify_and_print(driver_text, diagnostics), "bool 真值驱动必须通过检查");
+    check(driver_text.str().find("call i1 @bool_roundtrip(i1 true)") != std::string::npos &&
+              driver_text.str().find("call i1 @bool_roundtrip(i1 false)") != std::string::npos &&
+              driver_text.str().find("= zext i1 %v_") != std::string::npos,
+          "bool 真值驱动必须分别传递 true/false 并零扩展后打印");
 }
 }
 
@@ -239,12 +358,15 @@ int main(int argc, char **argv) {
             return 0;
         }
         const auto mode = argc == 2 ? std::string_view(argv[1]) : std::string_view{};
-        if (argc > 2 || (!mode.empty() && mode != "--invalid" && mode != "--emit-model"))
+        if (argc > 2 || (!mode.empty() && mode != "--invalid" &&
+                         mode != "--emit-model" && mode != "--emit-bool"))
             return 2;
-        auto artifact = make_module(mode == "--invalid");
+        auto artifact = mode == "--emit-bool" ? make_bool_driver()
+                                              : make_module(mode == "--invalid");
         if (mode == "--emit-model") {
             add_typed_calls(artifact.module());
             add_storage(artifact.module());
+            add_bool_scalar(artifact.module());
         }
         return artifact.verify_and_print(std::cout, std::cerr) ? 0 : 1;
     } catch (const std::exception &error) {

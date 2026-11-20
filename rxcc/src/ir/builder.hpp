@@ -1,4 +1,4 @@
-// 提供向基本块添加 call 和 ret 指令的接口，并检查参数和返回值的类型。
+// 提供向基本块添加指令的接口，并检查操作数、存储和返回值的类型。
 // 添加指令前先选择一个基本块；添加 ret 后，不再继续向该块添加指令。
 #pragma once
 #include "ir/model.hpp"
@@ -11,7 +11,7 @@ public:
     // 使用已有模块创建构建器，不负责释放模块，初始时没有选中的基本块。
     explicit IRBuilder(Module &module) : module_(module) {}
     // 选择后续指令要添加到的基本块；已经结束的块仍不能继续添加指令。
-    void set_insert_point(BlockId block);
+    void set_insert_point(BlockId block_id);
     // 取消当前选中的基本块，不删除已经添加的指令。
     void clear_insert_point() { insertion_.reset(); }
     // 返回当前选中块的 ID；没有选中块时返回空值。
@@ -25,16 +25,23 @@ public:
     bool can_use(const Operand &operand) const;
 
     // 添加函数调用并返回结果操作数；被调用函数返回 void 时返回空值。
-    std::optional<Operand> call(IRFunctionId function,
+    std::optional<Operand> call(IRFunctionId function_id,
                                 std::vector<Operand> arguments = {});
     // 在当前函数入口分配固定存储，不改变当前插入点。
     Operand entry_alloca(Type storage_type, uint32_t alignment);
+    // 从地址读取指定存储类型的值，并为结果分配值 ID。
     Operand load(Type storage_type, Operand address, uint32_t alignment);
+    // 把指定类型的值写入地址；store 有副作用，但不产生结果。
     void store(Type storage_type, Operand value, Operand address,
                uint32_t alignment);
+    // 省略显式存储类型，直接使用待写入值的类型。
     void store(Operand value, Operand address, uint32_t alignment) {
         store(value.type, value, address, alignment);
     }
+    // 把较窄整数零扩展成较宽整数，例如 bool 写入 i8 存储单元。
+    Operand zext(Type target_type, Operand value);
+    // 把较宽整数截断成较窄整数，例如从 i8 存储单元读回 bool。
+    Operand trunc(Type target_type, Operand value);
     // 添加与当前函数返回类型匹配的 ret 指令，然后取消选中的基本块。
     void ret(std::optional<Operand> value = std::nullopt);
 
@@ -43,8 +50,8 @@ private:
     Function &open_function() const;
     // 添加普通指令；有数据结果时分配值 ID，无结果时返回空操作数。
     Operand append(Type type, Operation operation);
-    // 设置当前块的终结指令，并取消选中的基本块。
-    void terminate(Terminator terminator);
+    // 设置当前块的 ret 指令，并取消选中的基本块。
+    void terminate(Return terminator);
     // 检查操作数能否用于当前函数；不符合条件时抛出 logic_error。
     void require_operand(const Operand &operand) const;
     // 正在构建的模块引用；使用构建器期间，调用方不能释放这个模块。

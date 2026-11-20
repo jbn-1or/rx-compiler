@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the P2/P3.1/P3.2 IR subset with external LLVM 22 tools."""
+"""Validate the implemented P2/P3 IR subset with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -11,16 +11,18 @@ import subprocess
 import tempfile
 
 
-def run(command, *, expected=0, timeout=60):
+def run(command, *, expected=0, timeout=60, stdin_data=None):
     try:
         process = subprocess.Popen(
-            command, text=True, stdin=subprocess.DEVNULL,
+            command, text=True,
+            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     except FileNotFoundError as error:
         raise RuntimeError(f"required executable not found: {command[0]}") from error
     with process:
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
+            input_text = stdin_data.decode("utf-8") if stdin_data is not None else None
+            stdout, stderr = process.communicate(input=input_text, timeout=timeout)
         except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
             # xmake may spawn REIMU; terminate the entire group, not just xmake.
             try:
@@ -101,7 +103,7 @@ def main():
             run([args.compiler, "--stage", "ir", str(source), "-o", str(repeated)])
             if repeated.read_bytes() != output.read_bytes():
                 raise RuntimeError("identical source must produce deterministic text")
-            modules.append((name, output, b""))
+            modules.append((name, output, b"", b""))
 
         if (temp / "plain-helper.ll").read_bytes() != (temp / "lifetime-helper.ll").read_bytes():
             raise RuntimeError("a helper's lifetime parameter must erase to the same P2 IR")
@@ -129,7 +131,26 @@ def main():
             run([args.compiler, "--stage", "ir", str(source), "-o", str(repeated)])
             if repeated.read_bytes() != output.read_bytes():
                 raise RuntimeError(f"{name}: nondeterministic LLVM text")
-            modules.append((name, output, expected))
+            modules.append((name, output, expected, b""))
+
+        unit_fixture = Path(__file__).resolve().parent / "ir" / "p03" / "unit_blocks.rx"
+        unit_source = temp / "unit-blocks.rx"
+        unit_output = temp / "unit-blocks.ll"
+        unit_source.write_bytes(unit_fixture.read_bytes())
+        run([args.compiler, "--stage", "ir", str(unit_source), "-o", str(unit_output)])
+        modules.append(("unit-blocks", unit_output,
+                        unit_fixture.with_suffix(".out").read_bytes(), b""))
+
+        recursive_source = temp / "recursive-main.rx"
+        recursive_output = temp / "recursive-main.ll"
+        recursive_source.write_text("fn main() { main(); }", encoding="utf-8")
+        run([args.compiler, "--stage", "ir", str(recursive_source), "-o",
+             str(recursive_output)])
+        recursive_ir = recursive_output.read_text(encoding="utf-8")
+        if "call void @__rx_fn_0()" not in recursive_ir or "call void @main()" in recursive_ir:
+            raise RuntimeError("source main call must target the internal source function")
+        run([args.llvm_as, str(recursive_output), "-o", str(temp / "recursive-main.bc")])
+        run([args.opt, "-passes=verify", "-disable-output", str(recursive_output)])
 
         for name, source_text, expected in (
             ("local-shadow", "fn main() { let x = 1; println_i32(x); "
@@ -158,16 +179,131 @@ def main():
             run([args.compiler, "--stage", "ir", str(source), "-o", str(repeated)])
             if repeated.read_bytes() != output.read_bytes():
                 raise RuntimeError(f"{name}: nondeterministic LLVM text")
-            modules.append((name, output, expected))
+            modules.append((name, output, expected, b""))
 
-        for name, command in (
-            ("model-smoke", [args.model_test]),
-            ("model-values", [args.model_test, "--emit-model"]),
+        p03 = Path(__file__).resolve().parent / "ir" / "p03"
+        for name, source_text, expected, stdin_data in (
+            ("scalar-calls", (p03 / "scalar_calls.rx").read_text(encoding="utf-8"),
+             b"1\n2\n7\n", b""),
+            ("literal-io", (p03 / "literal_io.rx").read_text(encoding="utf-8"),
+             b"1242\n", b""),
+            ("read-io", (p03 / "read_io.rx").read_text(encoding="utf-8"),
+             (p03 / "read_io.out").read_bytes(), (p03 / "read_io.in").read_bytes()),
+            ("read-single-negative", "fn main() { println_i32(get_i32()); }",
+             b"-12\n", b"-12\n"),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(source_text, encoding="utf-8")
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            repeated = temp / f"{name}-repeated.ll"
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(repeated)])
+            if repeated.read_bytes() != output.read_bytes():
+                raise RuntimeError(f"{name}: nondeterministic LLVM text")
+            modules.append((name, output, expected, stdin_data))
+
+        # Additional P3.4 boundaries: many scalar arguments, nested i32 blocks,
+        # and continuing to use a local after a value-returning call.
+        for name, source_text, expected in (
+            ("scalar-nine-args", "fn main() { println_i32(nine(1, 2, 3, 4, 5, 6, 7, 8, 9)); } "
+             "fn nine(a: i32, b: i32, c: i32, d: i32, e: i32, f: i32, g: i32, h: i32, i: i32) -> i32 { i }",
+             b"9\n"),
+            ("nested-integer-block", "fn main() { println_i32({ let value = 7; { value } }); }",
+             b"7\n"),
+            ("call-then-continue", "fn main() { let x = 4; println_i32(add_one(x)); println_i32(x); } "
+             "fn add_one(value: i32) -> i32 { value }", b"4\n4\n"),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(source_text, encoding="utf-8")
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            modules.append((name, output, expected, b""))
+
+        # P3.5：return 结束当前路径，后续语句、实参和尾值都不能再执行。
+        for name, source_text, expected, stdin_data in (
+            ("early-return", (p03 / "early_return.rx").read_text(encoding="utf-8"),
+             (p03 / "early_return.out").read_bytes(), b""),
+            ("shadowing", (p03 / "shadowing.rx").read_text(encoding="utf-8"),
+             (p03 / "shadowing.out").read_bytes(), b""),
+            ("bare-return", "fn main() { return; }", b"", b""),
+            ("never-let", "fn main() { let x = return; println_i32(99); }", b"", b""),
+            ("annotated-never-let", "fn main() { let x: i32 = return; println_i32(99); }",
+             b"", b""),
+            ("return-stops-arguments",
+             "fn main() { println_i32(pair(mark(1), return)); } "
+             "fn pair(a: i32, b: i32) -> i32 { a } "
+             "fn mark(value: i32) -> i32 { println_i32(value); value }",
+             b"1\n", b"9\n"),
+            # return 在第一个实参时，后面的输入调用和最终目标调用都不能生成。
+            ("return-stops-later-argument",
+             "fn main() { consume(return, get_i32()); println_i32(99); } "
+             "fn consume(a: i32, b: i32) { println_i32(a); }",
+             b"", b"9\n"),
+            ("return-nested-block", "fn main() { { return; } println_i32(99); }", b"", b""),
+            ("return-independence",
+             "fn first() -> i32 { return 1; } fn second() -> i32 { 2 } "
+             "fn main() { println_i32(first()); println_i32(second()); }",
+             b"1\n2\n", b""),
+            # P3.6：bool 参数/局部/返回用 i1，slot 用 i8；样例没有可见输出。
+            ("bool-boundary", (p03 / "bool_boundary.rx").read_text(encoding="utf-8"),
+             (p03 / "bool_boundary.out").read_bytes(), b""),
+            ("bool-constants",
+              "const YES: bool = true; fn main() { let a = YES; let b = { false }; "
+              "let c = a; let d = b; }", b"", b""),
+            ("unit-return-effects",
+             "fn finish() { return { println_i32(1); () }; println_i32(99); } "
+             "fn number() -> i32 { { let value: bool = { return 7; }; 99 } } "
+             "fn main() { finish(); println_i32(number()); return (); }",
+             b"1\n7\n", b""),
+            ("scalar-constant-bits",
+             "const MIN: i32 = -2147483648; const MAX: u32 = 4294967295u32; "
+             "const INDEX: usize = 4294967295usize; const OFFSET: isize = -1isize; "
+             "const NO: bool = false; fn main() { println_i32(MIN); "
+             "let maximum = MAX; let index = INDEX; let offset = OFFSET; let no = NO; }",
+             b"-2147483648\n", b""),
+            ("mixed-scalar-storage",
+             "fn mixed(number: i32, flag: bool, count: usize) -> bool { flag } "
+             "fn main() { let number = 7; let flag = true; "
+             "{ let number = false; let flag = 3i32; } "
+             "let copy = number; let saved = flag; "
+             "let result = mixed(copy, saved, 2usize); println_i32(number); }",
+             b"7\n", b""),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(source_text, encoding="utf-8")
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            modules.append((name, output, expected, stdin_data))
+
+        early_ir = (temp / "early-return.ll").read_text(encoding="utf-8")
+        if early_ir.count("call void @println_i32") != 2 or "i32 99" in early_ir:
+            raise RuntimeError("return must skip later statements in the same path")
+        never_ir = (temp / "never-let.ll").read_text(encoding="utf-8")
+        if "alloca i32" in never_ir or "println_i32" in never_ir:
+            raise RuntimeError("a never let must not allocate or emit later effects")
+        later_ir = (temp / "return-stops-later-argument.ll").read_text(encoding="utf-8")
+        # 只检查调用指令：未执行的源码不能留下 get_i32 或 consume 的调用。
+        if "call i32 @get_i32()" in later_ir or "call void @__rx_fn_1()" in later_ir:
+            raise RuntimeError("return must skip later arguments and the target call")
+        bool_ir = (temp / "bool-boundary.ll").read_text(encoding="utf-8")
+        if ("alloca i8, align 1" not in bool_ir or "zext i1" not in bool_ir or
+                "trunc i8" not in bool_ir or "call i1" not in bool_ir or
+                "alloca i32" in bool_ir):
+            raise RuntimeError("bool values must use i1, i8 slots, and zext/trunc")
+
+        for name, command, expected in (
+            ("model-smoke", [args.model_test], b""),
+            ("model-values", [args.model_test, "--emit-model"], b""),
+            # 手工把 bool 往返结果扩展成 i32 再打印，观察 true/false 为 1/0。
+            ("model-bool", [args.model_test, "--emit-bool"], b"1\n0\n"),
         ):
             output = temp / f"{name}.ll"
             output.write_text(run(command).stdout, encoding="utf-8")
-            modules.append((name, output, b""))
-        for name, output, _ in modules:
+            modules.append((name, output, expected, b""))
+        for name, output, _, _ in modules:
             run([args.llvm_as, str(output), "-o", str(temp / f"{name}.bc")])
             run([args.opt, "-passes=verify", "-disable-output", str(output)])
 
@@ -189,24 +325,18 @@ def main():
 
         # All are semantically valid. Reject unsupported lowering even in unused bodies.
         for index, contents in enumerate((
-            "fn main() { let x = true; }",
             "fn main() { let x = 1 + 2; }",
             "fn main() { let mut x = 1; x = 2; }",
-            "fn main() { print_i32(42); }",
-            "fn main() { println_i32(get_i32()); }",
-            "fn main() { println_i32(42) }",
             "fn main() { Box::<i32>::new(1); }",
             "fn main() { Vec::<i32>::new(); }",
-            "fn main() { main(); }",
-            "fn main() { return; }",
-            "fn main() { (); }",
-            "fn main() { true; }",
             "fn main() { 1 + 2; }",
-            "fn main() { { } }",
-            "fn main() { let x = return; }",
-            "fn main() {} fn unused() { println_i32(99); let x = true; }",
-            "fn main() {} fn unused(value: i32) {}",
-            "fn main() {} fn unused() -> i32 { 7 }",
+            "fn main() { let x = 1 == 1; }",
+            "fn main() { let x = { (); }; }",
+            "fn main() { let x = { [1, 2] }; }",
+            "fn main() { let x = loop {}; }",
+            "fn unused(value: &i32) {} fn main() {}",
+            "fn unused() -> [i32; 1] { [1] } fn main() {}",
+            "fn main() {} fn unused() { println_i32(99); let x = [1, 2]; }",
             "struct Data {} impl Data { fn unused(&self) {} } fn main() {}",
         )):
             unsupported = temp / f"unsupported-{index}.rx"
@@ -248,6 +378,9 @@ def main():
         if args.reimu:
             runtime = temp / "runtime.c"
             runtime.write_text('extern int printf(const char *, ...);\n'
+                               'extern int scanf(const char *, ...);\n'
+                               'int get_i32(void) { int value; (void)scanf("%d", &value); return value; }\n'
+                               'void print_i32(int value) { (void)printf("%d", value); }\n'
                                'void println_i32(int value) { (void)printf("%d\\n", value); }\n',
                                encoding="utf-8")
             runtime_assembly = temp / "runtime.s"
@@ -256,7 +389,7 @@ def main():
                  "-o", str(runtime_assembly)])
             run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
                  "-c", str(runtime_assembly), "-o", str(temp / "runtime.o")])
-            for name, ir_path, expected_stdout in modules:
+            for name, ir_path, expected_stdout, stdin_data in modules:
                 for optimization in ("O0", "O2"):
                     assembly = temp / f"{name}-{optimization}.s"
                     stdout = temp / f"{name}-{optimization}.out"
@@ -266,12 +399,13 @@ def main():
                     run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
                          "-c", str(assembly), "-o", str(temp / f"{name}-{optimization}.o")])
                     run(["xmake", "run", "-P", "vendor/REIMU", "reimu", "--memory=256M", "--stack=1M",
-                         "-f", f"{assembly},{runtime_assembly}", "-o", str(stdout), "-p", str(profile)])
+                         "-f", f"{assembly},{runtime_assembly}", "-o", str(stdout), "-p", str(profile)],
+                        stdin_data=stdin_data)
                     exits = [line for line in profile.read_bytes().splitlines() if line.startswith(b"Exit code:")]
                     if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
                         raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
                                            f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
-    print(f"P2/P3.1/P3.2 IR tests passed: {len(modules)} modules verified" +
+    print(f"P2/P3.1-P3.6 IR tests passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

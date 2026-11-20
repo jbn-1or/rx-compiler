@@ -4,53 +4,83 @@
 #include "ir/printer.hpp"
 #include <locale>
 #include <ostream>
+#include <sstream>
 
 namespace rx::ir {
 namespace {
 
 // 输出操作数的类型和值，例如 i32 42 或 i32 %v_0。
-void operand(std::ostream &out, const Operand &value) {
-    out << type_name(value.type) << ' ';
-    if (const auto *id = value.value_id()) {
-        out << "%v_" << id->index;
+void operand(std::ostream &output, const Operand &value) {
+    output << type_name(value.type) << ' ';
+    // 有值 ID 时输出 SSA 名称，否则输出整数常量。
+    if (const auto *value_id = value.value_id()) {
+        output << "%v_" << value_id->index;
     } else {
-        // 最高位为 1 时按负数输出，先转成 64 位再减 2^32，避免 32 位计算溢出。
         const auto bits = *value.constant_bits();
-        out << (bits >= 0x80000000u ? static_cast<int64_t>(bits) - 0x100000000LL
-                                    : static_cast<int64_t>(bits));
+        // i1 常量按 LLVM 的 true/false 输出。
+        if (value.type == Type::I1) {
+            output << (bits ? "true" : "false");
+        // i8 常量按无符号字节输出。
+        } else if (value.type == Type::I8) {
+            output << bits;
+        } else {
+            // i32 最高位为 1 时按负数输出，先转成 64 位再减 2^32，避免溢出。
+            const int64_t number =
+                bits >= 0x80000000u
+                    ? static_cast<int64_t>(bits) - 0x100000000LL
+                    : static_cast<int64_t>(bits);
+            output << number;
+        }
     }
 }
 
 // 输出指令；有结果时先输出 %v_<编号> =。
-void instruction(std::ostream &out, const Module &module,
+void instruction(std::ostream &output, const Module &module,
                  const Instruction &instruction) {
-    out << "  ";
+    output << "  ";
+    // 有结果的指令先打印 SSA 名字，再打印指令本身。
     if (instruction.result)
-        out << "%v_" << instruction.result->index << " = ";
+        output << "%v_" << instruction.result->index << " = ";
+    // alloca：打印存储类型和对齐。
     if (const auto *allocation = std::get_if<Alloca>(&instruction.operation)) {
-        out << "alloca " << type_name(allocation->storage_type) << ", align "
-            << allocation->alignment << '\n';
+        output << "alloca " << type_name(allocation->storage_type)
+               << ", align " << allocation->alignment << '\n';
+    // load：打印读取类型、地址和对齐。
     } else if (const auto *load = std::get_if<Load>(&instruction.operation)) {
-        out << "load " << type_name(load->storage_type) << ", ";
-        operand(out, load->address);
-        out << ", align " << load->alignment << '\n';
+        output << "load " << type_name(load->storage_type) << ", ";
+        operand(output, load->address);
+        output << ", align " << load->alignment << '\n';
+    // store：打印写入值、目标地址和对齐。
     } else if (const auto *store = std::get_if<Store>(&instruction.operation)) {
-        out << "store ";
-        operand(out, store->value);
-        out << ", ";
-        operand(out, store->address);
-        out << ", align " << store->alignment << '\n';
+        output << "store ";
+        operand(output, store->value);
+        output << ", ";
+        operand(output, store->address);
+        output << ", align " << store->alignment << '\n';
+    // zext：把较窄整数扩展成较宽整数。
+    } else if (const auto *extension = std::get_if<ZExt>(&instruction.operation)) {
+        output << "zext ";
+        operand(output, extension->value);
+        output << " to " << type_name(extension->target_type) << '\n';
+    // trunc：把较宽整数截断成较窄整数。
+    } else if (const auto *truncation = std::get_if<Trunc>(&instruction.operation)) {
+        output << "trunc ";
+        operand(output, truncation->value);
+        output << " to " << type_name(truncation->target_type) << '\n';
+    // call：打印返回类型、被调函数名和实参列表。
     } else {
         const auto &call = std::get<Call>(instruction.operation);
         const auto &function = module.function(call.function);
-        out << "call " << type_name(function.signature.result) << " @"
-            << function.name << '(';
-        for (std::size_t i = 0; i < call.arguments.size(); ++i) {
-            if (i)
-                out << ", ";
-            operand(out, call.arguments[i]);
+        output << "call " << type_name(function.signature.result) << " @"
+               << function.name << '(';
+        for (std::size_t argument_index = 0;
+             argument_index < call.arguments.size(); ++argument_index) {
+            // 只有第一个实参前不加分隔符。
+            if (argument_index)
+                output << ", ";
+            operand(output, call.arguments[argument_index]);
         }
-        out << ")\n";
+        output << ")\n";
     }
 }
 
@@ -58,58 +88,61 @@ void instruction(std::ostream &out, const Module &module,
 
 // 依次输出目标配置、函数和基本块，顺序与添加时一致，不使用内存地址命名。
 void print_module(const Module &module, std::ostream &destination) {
-    const std::ostream::sentry ready(destination);
-    if (!ready)
-        return;
-    // 独立的格式状态保证 LLVM 整数使用无分组的十进制。先设置
-    // locale，再借用缓冲区。
-    std::ostream out(nullptr);
-    out.imbue(std::locale::classic());
-    out.rdbuf(destination.rdbuf());
-    out << "target datalayout = \"" << module.data_layout << "\"\n"
+    // 先在独立缓冲区中生成完整文本，避免调用方的格式状态影响输出。
+    std::ostringstream buffer;
+    buffer.imbue(std::locale::classic());
+    std::ostream &output = buffer;
+    output << "target datalayout = \"" << module.data_layout << "\"\n"
         << "target triple = \"" << module.target_triple << "\"\n\n";
     for (const auto &owned : module.functions()) {
         const auto &function = *owned;
-        out << (function.is_declaration() ? "declare " : "define ");
+        output << (function.is_declaration() ? "declare " : "define ");
+        // 内部源函数加 internal，外部声明和机器入口不加。
         if (function.linkage == Linkage::Internal)
-            out << "internal ";
-        out << type_name(function.signature.result) << " @" << function.name
+            output << "internal ";
+        output << type_name(function.signature.result) << " @" << function.name
             << '(';
-        for (std::size_t i = 0; i < function.parameters.size(); ++i) {
-            if (i)
-                out << ", ";
+        for (std::size_t parameter_index = 0;
+             parameter_index < function.parameters.size(); ++parameter_index) {
+            // 只有第一个参数前不加分隔符。
+            if (parameter_index)
+                output << ", ";
             // 函数声明只打印参数类型，函数定义还要打印参数名，供函数体引用。
             if (function.is_declaration())
-                out << type_name(function.signature.parameters[i]);
+                output << type_name(
+                    function.signature.parameters[parameter_index]);
             else
-                operand(out, function.parameters[i]);
+                operand(output, function.parameters[parameter_index]);
         }
-        out << ')';
+        output << ')';
+        // 只有声明时到此结束，不打印块和结尾花括号。
         if (function.is_declaration()) {
-            out << "\n\n";
+            output << "\n\n";
             continue;
         }
-        out << " {\n";
+        output << " {\n";
         // 每个块都打印标签，包括唯一的入口块；先打印普通指令，最后打印 ret。
         for (const auto &block : function.blocks) {
-            out << "bb_" << block.id.index << ":\n";
+            output << "bb_" << block.id.index << ":\n";
+            // 入口分配只在第一个块开头输出，不属于任何普通指令位置。
             if (block.id.index == 0)
                 for (const auto &allocation : function.entry_allocas)
-                    instruction(out, module, allocation);
+                    instruction(output, module, allocation);
             for (const auto &operation : block.instructions)
-                instruction(out, module, operation);
-            const auto &ret = std::get<Return>(*block.terminator);
-            out << "  ret ";
-            if (ret.value)
-                operand(out, *ret.value);
+                instruction(output, module, operation);
+            const auto &return_instruction = *block.terminator;
+            output << "  ret ";
+            // 有返回值时打印操作数，裸返回打印 void。
+            if (return_instruction.value)
+                operand(output, *return_instruction.value);
             else
-                out << "void";
-            out << '\n';
+                output << "void";
+            output << '\n';
         }
-        out << "}\n\n";
+        output << "}\n\n";
     }
-    if (!out)
-        destination.setstate(out.rdstate());
+    const auto text = buffer.str();
+    destination.write(text.data(), static_cast<std::streamsize>(text.size()));
 }
 
 } // namespace rx::ir

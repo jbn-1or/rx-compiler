@@ -8,9 +8,8 @@
 
 namespace rx {
 
-// 创建指定名称的模块，供生成器通过 module() 添加函数和指令。
-IRArtifact::IRArtifact(const std::string &name)
-    : module_(std::make_unique<ir::Module>(name)) {}
+// 创建模块，供生成器通过 module() 添加函数和指令。
+IRArtifact::IRArtifact() : module_(std::make_unique<ir::Module>()) {}
 // 释放保存的模块，以及模块中的函数、基本块和指令。
 IRArtifact::~IRArtifact() = default;
 // 将模块指针移交给新对象，不改变模块地址，也不重新分配任何 ID。

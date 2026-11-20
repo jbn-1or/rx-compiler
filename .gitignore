@@ -36,3 +36,4 @@ chats/
 
 .clang-format
 llvm-ir-practice
+/rxcc/src/ir/README.md

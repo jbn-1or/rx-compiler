@@ -1,4 +1,4 @@
-// 实现存储、call 和 ret 指令的构建，同时检查类型并分配结果值的 ID。
+// 实现存储、扩展/截断、call 和 ret 指令的构建，同时检查类型并分配值 ID。
 // 无法添加指令时抛出 logic_error，由 generate_ir 捕获并输出错误信息。
 
 #include "ir/builder.hpp"
@@ -15,16 +15,16 @@ void require(bool condition, const char *message) {
 } // namespace
 
 // 检查块是否存在于当前模块，再将它选为后续指令的添加位置。
-void IRBuilder::set_insert_point(BlockId block) {
-    module_.function(block.function).block(block);
-    insertion_ = block;
+void IRBuilder::set_insert_point(BlockId block_id) {
+    module_.function(block_id.function).block(block_id);
+    insertion_ = block_id;
 }
 
 // 根据当前选中的块 ID 查找基本块；没有选中块时返回 nullptr。
 BasicBlock *IRBuilder::current_block() const {
-    return insertion_
-               ? &module_.function(insertion_->function).block(*insertion_)
-               : nullptr;
+    if (!insertion_)
+        return nullptr;
+    return &module_.function(insertion_->function).block(*insertion_);
 }
 
 // 判断当前是否选中了一个尚未结束、可以继续添加 IR 指令的基本块。
@@ -53,31 +53,38 @@ void IRBuilder::require_operand(const Operand &operand) const {
 // 向当前块添加普通指令；有数据结果时先分配值 ID 并记录类型。
 Operand IRBuilder::append(Type type, Operation operation) {
     auto &function = open_function();
-    const auto value =
-        type == Type::Void ? Operand{} : function.new_value(type);
+    Operand value;
+    std::optional<ValueId> result;
+    // 有结果时才分配值 ID；void 指令只记录操作本身。
+    if (type != Type::Void) {
+        value = function.new_value(type);
+        result = *value.value_id();
+    }
     current_block()->instructions.push_back(
-        {value.value_id() ? std::optional{*value.value_id()} : std::nullopt,
-         type, std::move(operation)});
+        {result, type, std::move(operation)});
     return value;
 }
 
 // 检查被调用函数是否存在、实参数量和类型是否匹配，再添加 call 指令。
-std::optional<Operand> IRBuilder::call(IRFunctionId id,
+std::optional<Operand> IRBuilder::call(IRFunctionId function_id,
                                        std::vector<Operand> arguments) {
     open_function();
-    const auto &signature = module_.function(id).signature;
+    const auto &signature = module_.function(function_id).signature;
     require(arguments.size() == signature.parameters.size(),
             "IR call 参数数量不匹配");
-    for (std::size_t i = 0; i < arguments.size(); ++i) {
-        require_operand(arguments[i]);
-        require(arguments[i].type == signature.parameters[i],
+    for (std::size_t argument_index = 0;
+         argument_index < arguments.size(); ++argument_index) {
+        require_operand(arguments[argument_index]);
+        require(arguments[argument_index].type ==
+                    signature.parameters[argument_index],
                 "IR call 参数类型不匹配");
     }
     // 返回 void 的调用也要添加到块中，但没有可供后续指令使用的结果值。
-    const auto result =
-        append(signature.result, Call{id, std::move(arguments)});
-    return signature.result == Type::Void ? std::nullopt
-                                          : std::optional{result};
+    const auto result = append(signature.result,
+                               Call{function_id, std::move(arguments)});
+    if (signature.result == Type::Void)
+        return std::nullopt;
+    return result;
 }
 
 // 在函数入口分配固定存储，返回可用于后续读写的地址。
@@ -92,7 +99,7 @@ Operand IRBuilder::entry_alloca(Type storage_type, uint32_t alignment) {
     return result;
 }
 
-// 从地址读取指定存储类型的值，并为读取结果分配 SSA 身份。
+// 从地址读取指定存储类型的值，并为读取结果分配值 ID。
 Operand IRBuilder::load(Type storage_type, Operand address,
                         uint32_t alignment) {
     open_function();
@@ -118,8 +125,30 @@ void IRBuilder::store(Type storage_type, Operand value, Operand address,
     append(Type::Void, Store{storage_type, value, address, alignment});
 }
 
-// 给当前块添加终结指令，然后取消选中的块，防止继续向它添加指令。
-void IRBuilder::terminate(Terminator terminator) {
+// 只允许把较窄整数无符号扩展成较宽整数，失败时不改变块或值表。
+Operand IRBuilder::zext(Type target_type, Operand value) {
+    open_function();
+    require_operand(value);
+    // 位宽必须严格变大，例如 i1→i8、i1→i32 或 i8→i32。
+    require(integer_width(value.type) != 0 &&
+                integer_width(target_type) > integer_width(value.type),
+            "IR zext 只支持较窄整数到较宽整数");
+    return append(target_type, ZExt{value, target_type});
+}
+
+// 只允许把较宽整数截断成较窄整数，失败时不改变块或值表。
+Operand IRBuilder::trunc(Type target_type, Operand value) {
+    open_function();
+    require_operand(value);
+    // 位宽必须严格变小，例如 i32→i8、i8→i1 或 i32→i1。
+    require(integer_width(value.type) != 0 &&
+                integer_width(target_type) < integer_width(value.type),
+            "IR trunc 只支持较宽整数到较窄整数");
+    return append(target_type, Trunc{value, target_type});
+}
+
+// 给当前块添加 ret 指令，然后取消选中的块，防止继续向它添加指令。
+void IRBuilder::terminate(Return terminator) {
     open_function();
     current_block()->terminator = std::move(terminator);
     clear_insert_point();
@@ -128,10 +157,11 @@ void IRBuilder::terminate(Terminator terminator) {
 // 检查返回值是否匹配函数返回类型，再添加 ret void 或带值的 ret 指令。
 void IRBuilder::ret(std::optional<Operand> value) {
     const auto result = open_function().signature.result;
+    // 有返回值时先检查它属于当前函数，再比较类型是否匹配。
     if (value)
         require_operand(*value);
-    require(value ? value->type == result : result == Type::Void,
-            "IR ret 与函数结果类型不匹配");
+    const bool valid = value ? value->type == result : result == Type::Void;
+    require(valid, "IR ret 与函数结果类型不匹配");
     terminate(Return{value});
 }
 

@@ -5,15 +5,14 @@
 #include "ir/model.hpp"
 #include <iosfwd>
 #include <memory>
-#include <string>
 
 namespace rx {
 
 // 保存一次生成得到的模块，负责释放模块，并提供检查和输出接口。
 class IRArtifact {
 public:
-    // 创建指定名称的模块，由 Module 构造函数分配模块编号。
-    explicit IRArtifact(const std::string &name);
+    // 创建模块，由 Module 构造函数分配模块编号。
+    IRArtifact();
     ~IRArtifact();
     IRArtifact(const IRArtifact &) = delete;
     IRArtifact &operator=(const IRArtifact &) = delete;

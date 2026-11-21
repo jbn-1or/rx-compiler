@@ -2,6 +2,7 @@
 #include "RxLexer.h"
 #include "RxParser.h"
 #include "ast_builder.hpp"
+#include "ir/builder.hpp"
 #include "ir/generator.hpp"
 #include "sema/sema.hpp"
 #include <iostream>
@@ -9,6 +10,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace rx::ir;
@@ -255,7 +258,7 @@ void check_integer_calls_and_returns() {
     )");
     const auto sema = analyze(*crate);
     check_semantic_rejected("fn main() { println_i32(true); }");
-    check_lowering_rejected("fn main() { let x: bool = 1 == 1; }");
+    check_lowering_rejected("fn main() { let mut x = 1; x = 2; }");
     const auto artifact = generate(sema);
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
@@ -450,6 +453,262 @@ void check_mixed_scalar_storage() {
     check(found_mixed_call, "必须生成混合标量调用");
 }
 
+// P4.1：按源类型选择有符号/无符号运算和比较，bool 使用 i1 的位运算。
+void check_scalar_operations() {
+    const auto crate = parse_crate(R"(
+        fn main() {
+            let max = 2147483647i32;
+            let min = -2147483648i32;
+            println_i32(max + 1);
+            println_i32(min - 1);
+            println_i32(65536i32 * 65536i32);
+            println_i32(-min);
+            println_i32(-7i32 / 3i32);
+            println_i32(-7i32 % 3i32);
+            println_i32(6i32 & 3i32);
+            println_i32(6i32 | 3i32);
+            println_i32(6i32 ^ 3i32);
+            println_i32(!0i32);
+            let u = 4294967295u32;
+            let two = 2u32;
+            let q = u / two;
+            let r = u % two;
+            let lt = u < two;
+            let bt = false < true;
+            let same = bt == false;
+            let notb = !bt;
+            let andb = bt & same;
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) &&
+              diagnostics.str().empty(),
+          "标量运算模块必须通过 IR 自检");
+    const auto ir = text.str();
+    check(ir.find("add i32") != std::string::npos &&
+              ir.find("sub i32 0, -2147483648") != std::string::npos &&
+              ir.find("mul i32 65536, 65536") != std::string::npos &&
+              ir.find("sdiv i32") != std::string::npos &&
+              ir.find("srem i32") != std::string::npos &&
+              ir.find("udiv i32") != std::string::npos &&
+              ir.find("urem i32") != std::string::npos &&
+              ir.find("icmp ult i32") != std::string::npos &&
+              ir.find("icmp ult i1 false, true") != std::string::npos &&
+              ir.find("and i1") != std::string::npos &&
+              ir.find("xor i1") != std::string::npos &&
+              ir.find("xor i32 0, -1") != std::string::npos,
+          "有符号除法/余数、无符号高位比较和 bool 位运算必须选择各自指令");
+    check(ir.find(" nsw ") == std::string::npos &&
+              ir.find(" nuw ") == std::string::npos &&
+              ir.find(" exact") == std::string::npos &&
+              ir.find("noalias") == std::string::npos &&
+              ir.find("inbounds") == std::string::npos &&
+              ir.find("nonnull") == std::string::npos,
+          "P4.3 baseline 不能附加不溢出、精确性或别名承诺");
+    check(ir.find("icmp slt i1") == std::string::npos &&
+              ir.find("icmp sgt i1") == std::string::npos,
+          "bool 排序不能使用有符号谓词");
+
+    // 二元运算必须先求值左操作数，再求值右操作数。
+    const auto ordered = parse_crate(
+        "fn mark(tag: i32, value: i32) -> i32 { println_i32(tag); value } "
+        "fn main() { println_i32(mark(1, 40) + mark(2, 2)); }");
+    const auto ordered_sema = analyze(*ordered);
+    const auto ordered_artifact = generate(ordered_sema);
+    std::ostringstream ordered_text, ordered_diagnostics;
+    check(ordered_artifact.verify_and_print(ordered_text,
+                                            ordered_diagnostics) &&
+              ordered_diagnostics.str().empty(),
+          "带副作用的二元运算模块必须通过 IR 自检");
+    const auto ordered_ir = ordered_text.str();
+    const auto left_mark = ordered_ir.find("i32 1, i32 40)");
+    const auto right_mark = ordered_ir.find("i32 2, i32 2)");
+    const auto addition = ordered_ir.find("add i32");
+    check(left_mark != std::string::npos && right_mark != std::string::npos &&
+              addition != std::string::npos && left_mark < right_mark &&
+              right_mark < addition,
+          "普通二元运算必须先求值左操作数，再求值右操作数");
+}
+
+// 用真实源码生成各类标量运算，再用手工 IR 驱动打印结果；不依赖源码 cast。
+rx::IRArtifact make_scalar_operation_driver() {
+    using Arguments = std::vector<std::pair<uint32_t, uint32_t>>;
+    std::vector<Arguments> arguments;
+    std::ostringstream source;
+    // 每个函数使用参数而非直接折叠字面量；参数组与函数按相同顺序保存。
+    const auto add_function = [&](const std::string &type,
+                                  const std::string &expression,
+                                  bool comparison, const Arguments &inputs) {
+        source << "fn operation_" << arguments.size() << "(a: " << type
+               << ", b: " << type << ") -> "
+               << (comparison ? "bool" : type) << " { " << expression << " }\n";
+        arguments.push_back(inputs);
+    };
+    for (const std::string type : {"i32", "u32", "isize", "usize", "bool"}) {
+        const bool boolean = type == "bool";
+        const bool signed_integer = type == "i32" || type == "isize";
+        // 整数覆盖小于、相等、大于；高位为 1 时，有符号和无符号解释相反。
+        const Arguments comparisons = boolean
+            ? Arguments{{0, 0}, {0, 1}, {1, 0}, {1, 1}}
+            : Arguments{{0xffffffffu, 0}, {1, 1}, {0, 0xffffffffu}};
+        for (const std::string operation : {"==", "!=", "<", "<=", ">", ">="})
+            add_function(type, "a " + operation + " b", true, comparisons);
+        if (boolean) {
+            for (const std::string operation : {"&", "|", "^"})
+                add_function(type, "a " + operation + " b", false, comparisons);
+            add_function(type, "!a", false, comparisons);
+            continue;
+        }
+        // 除数非零，且不含 MIN/-1；加减乘覆盖正负边界和 32 位回绕。
+        const Arguments arithmetic = signed_integer
+            ? Arguments{{0xfffffff9u, 3}, {0x7fffffffu, 1}, {0x80000000u, 2}}
+            : Arguments{{0xffffffffu, 2}, {0, 1}, {65536, 65536}};
+        for (const std::string operation : {"+", "-", "*", "/", "%"})
+            add_function(type, "a " + operation + " b", false, arithmetic);
+        add_function(type, "!a", false, arithmetic);
+        if (signed_integer)
+            add_function(type, "-a", false, arithmetic);
+    }
+    source << "fn main() {}\n";
+    const auto crate = parse_crate(source.str());
+    const auto sema = analyze(*crate);
+    auto artifact = generate(sema);
+    auto &module = artifact.module();
+    const auto names = rx::assign_function_names(sema);
+    const auto print = module.add_function(
+        "println_i32", {Type::Void, {Type::I32}}, Linkage::External);
+    // 保留原入口调用，仅在 ret 前追加驱动；整数直接打印相同的 32 位模式。
+    const auto entry = module.find_function("main")->id;
+    module.function(entry).blocks[0].terminator.reset();
+    IRBuilder builder(module);
+    builder.set_insert_point(module.function(entry).blocks[0].id);
+    for (std::size_t index = 0; index < arguments.size(); ++index) {
+        const auto function = module.find_function(names[index])->id;
+        const auto signature = module.function(function).signature;
+        for (const auto &[left, right] : arguments[index]) {
+            auto value = *builder.call(function, {
+                Operand::constant(signature.parameters[0], left),
+                Operand::constant(signature.parameters[1], right)});
+            if (value.type == Type::I1)
+                value = builder.zext(Type::I32, value);
+            builder.call(print, {value});
+        }
+    }
+    builder.ret(Operand::constant(Type::I32, 0));
+    return artifact;
+}
+
+// 追踪每条移位计数的定义，确认实际使用的是前面 count & 31 的结果。
+bool shifts_use_masked_counts(const Module &module) {
+    for (const auto &owned : module.functions()) {
+        const auto &function = *owned;
+        std::vector<const Instruction *> definitions(function.value_types.size());
+        for (const auto &block : function.blocks) {
+            for (const auto &instruction : block.instructions) {
+                const auto *binary =
+                    std::get_if<BinaryOperation>(&instruction.operation);
+                if (binary && (binary->operation == BinaryOp::ShiftLeft ||
+                               binary->operation == BinaryOp::ArithmeticShiftRight ||
+                               binary->operation == BinaryOp::LogicalShiftRight)) {
+                    const auto *count = binary->right.value_id();
+                    if (!count || count->function != function.id)
+                        return false;
+                    const auto *definition = definitions.at(count->index);
+                    const auto *mask = definition
+                        ? std::get_if<BinaryOperation>(&definition->operation)
+                        : nullptr;
+                    // 仅仅存在 and 不够：移位必须引用它的结果，且掩码必须为 31。
+                    if (!mask || mask->operation != BinaryOp::And ||
+                        mask->right != Operand::constant(Type::I32, 31))
+                        return false;
+                }
+                if (instruction.result)
+                    definitions.at(instruction.result->index) = &instruction;
+            }
+        }
+    }
+    return true;
+}
+
+// P4.2：移位量先掩码低五位，cast 只换源类型或把 bool 零扩展。
+void check_shifts_and_casts() {
+    const auto crate = parse_crate(R"(
+        fn main() {
+            let zero = 0u32;
+            let edge = 31usize;
+            let wrap = 32i32;
+            let next = 33isize;
+            let negative = -1i32;
+            println_i32(1i32 << zero);
+            println_i32(1i32 << edge);
+            println_i32(1i32 << wrap);
+            println_i32(1i32 << next);
+            println_i32(1i32 << negative);
+            println_i32(-8i32 >> 1u32);
+            println_i32((4294967288u32 >> 1isize) as i32);
+            println_i32((-1i32 as u32) as i32);
+            println_i32(2147483648u32 as i32);
+            println_i32(true as i32);
+            println_i32((true as u32) as i32);
+            println_i32((false as isize) as i32);
+            println_i32((false as usize) as i32);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) &&
+              diagnostics.str().empty(),
+          "移位和 cast 模块必须通过 IR 自检");
+    const auto ir = text.str();
+    // 每个移位都必须先出现 and i32 ..., 31，即使右侧是编译期字面量。
+    std::size_t shift_count = 0;
+    for (auto found = ir.find("shl i32"); found != std::string::npos;
+         found = ir.find("shl i32", found + 1))
+        ++shift_count;
+    check(shift_count == 5, "普通左移必须生成 shl i32");
+    check(shifts_use_masked_counts(artifact.module()),
+          "每条移位必须使用前面 count & 31 的结果，不能绕过掩码");
+    check(ir.find("ashr i32") != std::string::npos &&
+              ir.find("lshr i32") != std::string::npos,
+          "有符号右移使用 ashr，无符号右移使用 lshr");
+    check(ir.find("zext i1 true to i32") != std::string::npos &&
+              ir.find("zext i1 false to i32") != std::string::npos &&
+              ir.find("sext") == std::string::npos,
+          "bool 到整数必须零扩展，不能符号扩展");
+    check(ir.find(" exact") == std::string::npos &&
+              ir.find(" nsw ") == std::string::npos &&
+              ir.find(" nuw ") == std::string::npos,
+          "移位不能附加未经证明的精确性或不溢出承诺");
+    // 整数 cast 不生成指令：-1 和 0x80000000 的位模式直接交给打印。
+    check(ir.find("sub i32 0, 1") != std::string::npos &&
+              ir.find("i32 -2147483648)") != std::string::npos,
+          "整数 cast 必须保留 32 位位模式");
+    // 保持指令数量不变，分别制造错误掩码和绕过掩码的三种移位。
+    for (const auto operation : {BinaryOp::And, BinaryOp::ShiftLeft,
+                                 BinaryOp::ArithmeticShiftRight,
+                                 BinaryOp::LogicalShiftRight}) {
+        auto corrupted = generate(sema);
+        bool changed = false;
+        for (const auto &owned : corrupted.module().functions()) {
+            for (auto &block : owned->blocks) {
+                for (auto &instruction : block.instructions) {
+                    auto *binary = std::get_if<BinaryOperation>(&instruction.operation);
+                    if (!changed && binary && binary->operation == operation) {
+                        binary->right = Operand::constant(
+                            Type::I32, operation == BinaryOp::And ? 30 : 1);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        check(changed && !shifts_use_masked_counts(corrupted.module()),
+              "掩码错误或移位未使用掩码结果时，数据依赖检查必须失败");
+    }
+}
+
 void run_tests() {
     check_function_names();
     check_println();
@@ -460,17 +719,21 @@ void run_tests() {
     check_early_return();
     check_bool_boundary();
     check_mixed_scalar_storage();
+    check_scalar_operations();
+    check_shifts_and_casts();
     check_entry("fn main() {}");
     check_entry("fn main() -> () {}");
     check_entry("fn __rx_fn_1() {} fn main() {} fn helper() {}");
     check_entry("const LEN: usize = 2; struct Data { values: [i32; LEN] } impl Data { const VALUE: i32 = 7; } fn main() {}");
     for (const auto &source : {
-             "fn main() { let x = 1 + 2; }",
+             "fn main() { let x = true && false; }",
+             "fn main() { let x = false && { return; true }; println_i32(7); }",
+             "fn main() { let x = true || { return; false }; println_i32(7); }",
+             "fn main() { let x = { return; true } && false; }",
+             "fn main() { let x = { return; false } || true; }",
              "fn main() { let mut x = 1; x = 2; }",
              "fn main() { Box::<i32>::new(1); }",
              "fn main() { Vec::<i32>::new(); }",
-             "fn main() { 1 + 2; }",
-             "fn main() { let x = 1 == 1; }",
              "fn main() { let x = { (); }; }",
              "fn main() { let x = { [1, 2] }; }",
              "fn main() { let x = loop {}; }",
@@ -504,6 +767,10 @@ int main(int argc, char **argv) {
             const auto crate = parse_crate("fn main() {}");
             const auto sema = analyze(*crate);
             const auto artifact = generate(sema);
+            return artifact.verify_and_print(std::cout, std::cerr) ? 0 : 1;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--emit-operations") {
+            const auto artifact = make_scalar_operation_driver();
             return artifact.verify_and_print(std::cout, std::cerr) ? 0 : 1;
         }
         return 2;

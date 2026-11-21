@@ -9,19 +9,18 @@
 namespace rx::ir {
 namespace {
 
-// 输出操作数的类型和值，例如 i32 42 或 i32 %v_0。
-void operand(std::ostream &output, const Operand &value) {
-    output << type_name(value.type) << ' ';
+// 只输出操作数的值，用于同一条指令只打印一次类型的位置。
+void value(std::ostream &output, const Operand &operand) {
     // 有值 ID 时输出 SSA 名称，否则输出整数常量。
-    if (const auto *value_id = value.value_id()) {
+    if (const auto *value_id = operand.value_id()) {
         output << "%v_" << value_id->index;
     } else {
-        const auto bits = *value.constant_bits();
+        const auto bits = *operand.constant_bits();
         // i1 常量按 LLVM 的 true/false 输出。
-        if (value.type == Type::I1) {
+        if (operand.type == Type::I1) {
             output << (bits ? "true" : "false");
         // i8 常量按无符号字节输出。
-        } else if (value.type == Type::I8) {
+        } else if (operand.type == Type::I8) {
             output << bits;
         } else {
             // i32 最高位为 1 时按负数输出，先转成 64 位再减 2^32，避免溢出。
@@ -32,6 +31,12 @@ void operand(std::ostream &output, const Operand &value) {
             output << number;
         }
     }
+}
+
+// 输出操作数的类型和值，例如 i32 42 或 i32 %v_0。
+void operand(std::ostream &output, const Operand &operand) {
+    output << type_name(operand.type) << ' ';
+    value(output, operand);
 }
 
 // 输出指令；有结果时先输出 %v_<编号> =。
@@ -57,6 +62,25 @@ void instruction(std::ostream &output, const Module &module,
         output << ", ";
         operand(output, store->address);
         output << ", align " << store->alignment << '\n';
+    // 二元运算：只打印普通指令，不附加 nsw/nuw/exact 等语义承诺。
+    // 类型只打印一次，两个操作数用逗号分隔。
+    } else if (const auto *binary =
+                   std::get_if<BinaryOperation>(&instruction.operation)) {
+        output << binary_op_name(binary->operation) << ' '
+               << type_name(binary->left.type) << ' ';
+        value(output, binary->left);
+        output << ", ";
+        value(output, binary->right);
+        output << '\n';
+    // 比较：先打印 icmp 谓词和操作数类型，再打印两个操作数。
+    } else if (const auto *comparison =
+                   std::get_if<Compare>(&instruction.operation)) {
+        output << "icmp " << comparison_name(comparison->predicate) << ' '
+               << type_name(comparison->left.type) << ' ';
+        value(output, comparison->left);
+        output << ", ";
+        value(output, comparison->right);
+        output << '\n';
     // zext：把较窄整数扩展成较宽整数。
     } else if (const auto *extension = std::get_if<ZExt>(&instruction.operation)) {
         output << "zext ";

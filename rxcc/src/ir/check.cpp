@@ -131,6 +131,27 @@ bool check_instruction(const Module &module, const Function &function,
             !value_available(function, available, store->address))
             return report_error(diagnostics, function,
                                 "store 类型、地址、对齐或结果无效");
+    } else if (const auto *binary =
+                   std::get_if<BinaryOperation>(&instruction.operation)) {
+        // 两侧类型必须一致且适合该指令，结果类型与操作数类型相同。
+        if (binary->left.type != binary->right.type ||
+            !valid_binary_type(binary->operation, binary->left.type) ||
+            instruction.type != binary->left.type || !instruction.result ||
+            !value_available(function, available, binary->left) ||
+            !value_available(function, available, binary->right))
+            return report_error(diagnostics, function,
+                                "二元运算的操作数或结果类型无效");
+    } else if (const auto *comparison =
+                   std::get_if<Compare>(&instruction.operation)) {
+        // 比较的两侧类型一致，结果固定为 i1，有符号谓词不能用于 bool。
+        if (comparison->left.type != comparison->right.type ||
+            !valid_comparison(comparison->predicate,
+                              comparison->left.type) ||
+            instruction.type != Type::I1 || !instruction.result ||
+            !value_available(function, available, comparison->left) ||
+            !value_available(function, available, comparison->right))
+            return report_error(diagnostics, function,
+                                "比较谓词、操作数或结果类型无效");
     } else if (const auto *extension = std::get_if<ZExt>(&instruction.operation)) {
         // zext 只允许较窄整数到较宽整数，输入属于当前块，结果类型等于目标类型。
         if (integer_width(extension->value.type) == 0 ||
@@ -141,8 +162,9 @@ bool check_instruction(const Module &module, const Function &function,
             return report_error(diagnostics, function,
                                 "zext 类型、操作数或结果无效");
     } else if (const auto *truncation = std::get_if<Trunc>(&instruction.operation)) {
-        // trunc 只允许较宽整数到较窄整数，输入属于当前块，结果类型等于目标类型。
+        // 源和目标都必须是整数；非整数的位宽 0 不能当作合法截断目标。
         if (integer_width(truncation->value.type) == 0 ||
+            integer_width(truncation->target_type) == 0 ||
             integer_width(truncation->target_type) >=
                 integer_width(truncation->value.type) ||
             instruction.type != truncation->target_type || !instruction.result ||

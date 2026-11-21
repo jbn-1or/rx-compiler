@@ -125,6 +125,29 @@ void IRBuilder::store(Type storage_type, Operand value, Operand address,
     append(Type::Void, Store{storage_type, value, address, alignment});
 }
 
+// 添加二元运算；两侧类型必须相同，并且是该指令允许的 i1/i32。
+Operand IRBuilder::binary(BinaryOp operation, Operand left, Operand right) {
+    open_function();
+    require_operand(left);
+    require_operand(right);
+    require(left.type == right.type &&
+                valid_binary_type(operation, left.type),
+            "IR 二元运算的操作数类型无效");
+    return append(left.type, BinaryOperation{operation, left, right});
+}
+
+// 添加比较指令；两侧类型相同，结果固定为 i1，谓词必须适合该类型。
+Operand IRBuilder::compare(Comparison comparison, Operand left,
+                           Operand right) {
+    open_function();
+    require_operand(left);
+    require_operand(right);
+    require(left.type == right.type &&
+                valid_comparison(comparison, left.type),
+            "IR 比较的操作数类型或谓词无效");
+    return append(Type::I1, Compare{comparison, left, right});
+}
+
 // 只允许把较窄整数无符号扩展成较宽整数，失败时不改变块或值表。
 Operand IRBuilder::zext(Type target_type, Operand value) {
     open_function();
@@ -140,8 +163,9 @@ Operand IRBuilder::zext(Type target_type, Operand value) {
 Operand IRBuilder::trunc(Type target_type, Operand value) {
     open_function();
     require_operand(value);
-    // 位宽必须严格变小，例如 i32→i8、i8→i1 或 i32→i1。
+    // 源和目标都必须是整数，且位宽严格变小；非整数的位宽 0 不能当作窄整数。
     require(integer_width(value.type) != 0 &&
+                integer_width(target_type) != 0 &&
                 integer_width(target_type) < integer_width(value.type),
             "IR trunc 只支持较宽整数到较窄整数");
     return append(target_type, Trunc{value, target_type});

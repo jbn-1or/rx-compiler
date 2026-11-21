@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the implemented P2/P3 IR subset with external LLVM 22 tools."""
+"""Validate the implemented P2/P3/P4 IR subset with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -294,6 +294,156 @@ def main():
                 "alloca i32" in bool_ir):
             raise RuntimeError("bool values must use i1, i8 slots, and zext/trunc")
 
+        # P4.1：按源类型选择有符号/无符号指令；二元运算先左后右求值。
+        for name, source_text, expected in (
+            ("p41-wrapping",
+             "fn main() { let max = 2147483647i32; let min = -2147483648i32; "
+             "println_i32(max + 1); println_i32(min - 1); "
+             "println_i32(65536i32 * 65536i32); println_i32(-min); }",
+             b"-2147483648\n2147483647\n0\n-2147483648\n"),
+            ("p41-signed-division",
+             "fn main() { println_i32(-7i32 / 3i32); println_i32(-7i32 % 3i32); "
+             "println_i32(7i32 / -3i32); println_i32(7i32 % -3i32); }",
+             b"-2\n-1\n-2\n1\n"),
+            ("p41-integer-bitwise",
+             "fn main() { println_i32(6i32 & 3i32); println_i32(6i32 | 3i32); "
+             "println_i32(6i32 ^ 3i32); println_i32(!0i32); }",
+             b"2\n7\n5\n-1\n"),
+            ("p41-evaluation-order",
+             "fn mark(tag: i32, value: i32) -> i32 { println_i32(tag); value } "
+             "fn main() { println_i32(mark(1, 40) + mark(2, 2)); }",
+             b"1\n2\n42\n"),
+            # 两侧都必须执行，输出标记证明 bool 位运算没有复用短路逻辑。
+            ("p41-bool-bitwise-order",
+             "fn mark(tag: i32, value: bool) -> bool { println_i32(tag); value } "
+             "fn main() { let a = mark(1, false) & mark(2, true); "
+             "let b = mark(3, true) | mark(4, false); "
+             "let c = mark(5, true) ^ mark(6, true); "
+             "let d = !mark(7, false); }",
+             b"1\n2\n3\n4\n5\n6\n7\n"),
+            # 无符号运算、bool 位运算和 bool 排序只检查 IR 指令，不借 cast 打印。
+            ("p41-type-directed",
+             "fn main() { let a = -7i32; let b = 3i32; "
+             "let signed_q = a / b; let signed_r = a % b; let signed_less = a < b; "
+             "let u = 4294967295u32; let two = 2u32; "
+             "let wrapped = u + 1u32; let unsigned_q = u / two; "
+             "let unsigned_r = u % two; let unsigned_less = u < two; "
+             "let bool_less = false < true; let bool_equal = !false == true; "
+             "let bool_and = true & false; }",
+             b""),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(source_text, encoding="utf-8")
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            modules.append((name, output, expected, b""))
+
+        wrapping_ir = (temp / "p41-wrapping.ll").read_text(encoding="utf-8")
+        if (wrapping_ir.find("add i32") == -1 or
+                wrapping_ir.find("sub i32") == -1 or
+                wrapping_ir.find("mul i32") == -1 or
+                " nsw " in wrapping_ir or " nuw " in wrapping_ir or
+                " exact" in wrapping_ir):
+            raise RuntimeError("P4.1 算术必须回绕且不能附加不溢出/精确性承诺")
+        directed_ir = (temp / "p41-type-directed.ll").read_text(encoding="utf-8")
+        for instruction in ("sdiv i32", "srem i32", "udiv i32", "urem i32",
+                            "icmp slt i32", "icmp ult i32", "icmp ult i1",
+                            "and i1", "xor i1"):
+            if instruction not in directed_ir:
+                raise RuntimeError(f"P4.1 缺少按源类型选择的指令：{instruction}")
+        if "icmp slt i1" in directed_ir or "icmp sgt i1" in directed_ir:
+            raise RuntimeError("P4.1 的 bool 排序必须使用无符号比较")
+        order_ir = (temp / "p41-evaluation-order.ll").read_text(encoding="utf-8")
+        if (order_ir.find("i32 1, i32 40)") >
+                order_ir.find("i32 2, i32 2)") or
+                order_ir.find("i32 2, i32 2)") >
+                order_ir.find("add i32")):
+            raise RuntimeError("P4.1 二元运算必须先求值左操作数，再求值右操作数")
+
+        # 与 entry_test 的源码运算驱动同序：六类比较、算术、取反和有符号取负。
+        # 期望值独立列出，不能只凭出现某条指令或空 stdout 判断运算结果正确。
+        expected_values = []
+        for signed in (True, False, True, False):
+            expected_values.extend((0, 1, 0, 1, 0, 1))  # ==、!=
+            expected_values.extend(
+                (1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1) if signed else
+                (0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0))  # <、<=、>、>=
+            if signed:
+                expected_values.extend((
+                    -4, -2147483648, -2147483646,  # +
+                    -10, 2147483646, 2147483646,   # -
+                    -21, 2147483647, 0,            # *
+                    -2, 2147483647, -1073741824,   # /
+                    -1, 0, 0,                     # %
+                    6, -2147483648, 2147483647,    # !
+                    7, -2147483647, -2147483648))  # 一元 -
+            else:
+                expected_values.extend((
+                    1, 1, 131072, -3, -1, 0, -2, 0, 0,
+                    2147483647, 0, 1, 1, 0, 0, 0, -1, -65537))
+        expected_values.extend((
+            1, 0, 0, 1, 0, 1, 1, 0,  # bool ==、!=
+            0, 1, 0, 0, 1, 1, 0, 1,  # bool <、<=
+            0, 0, 1, 0, 1, 0, 1, 1,  # bool >、>=
+            0, 0, 0, 1, 0, 1, 1, 1,  # bool &、|
+            0, 1, 1, 0, 1, 1, 0, 0)) # bool ^、!
+        operation_output = temp / "p41-operation-results.ll"
+        operation_output.write_text(
+            run([args.ir_test, "--emit-operations"]).stdout, encoding="utf-8")
+        expected_stdout = "".join(f"{value}\n" for value in expected_values).encode("ascii")
+        modules.append(("p41-operation-results", operation_output, expected_stdout, b""))
+
+        # P4.2：先掩码低五位再移位；cast 只换源类型或把 bool 零扩展。
+        for name, source_text, expected, stdin_data in (
+            ("p42-dynamic-shift-32",
+             "fn main() { let count = get_i32(); println_i32(1i32 << count); }",
+             b"1\n", b"32\n"),
+            ("p42-dynamic-shift-33",
+             "fn main() { let count = get_i32(); println_i32(1i32 << count); }",
+             b"2\n", b"33\n"),
+            ("p42-dynamic-shift-negative",
+             "fn main() { let count = get_i32(); println_i32(1i32 << count); }",
+             b"-2147483648\n", b"-1\n"),
+            # P4.3：运行期输入跨过 i32/u32 边界，O0/O2 必须得到相同回绕结果。
+            ("p43-dynamic-overflow",
+             "fn main() { let x = get_i32(); println_i32(x + 1); "
+             "let y = get_i32(); println_i32(y * 2); }",
+             b"-2147483648\n-2\n", b"2147483647\n2147483647\n"),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(source_text, encoding="utf-8")
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            modules.append((name, output, expected, stdin_data))
+
+        # P4 种子全部进入 O0/O2 执行；cast 让 bool 比较和 u32 结果可用于 I/O。
+        p04 = Path(__file__).resolve().parent / "ir" / "p04"
+        for name in ("wrapping", "division", "comparison", "bitwise",
+                     "shifts", "casts"):
+            source = temp / f"p04-{name}.rx"
+            output = temp / f"p04-{name}.ll"
+            source.write_bytes((p04 / f"{name}.rx").read_bytes())
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            modules.append((f"p04-{name}", output,
+                            (p04 / f"{name}.out").read_bytes(), b""))
+
+        shifts_ir = (temp / "p04-shifts.ll").read_text(encoding="utf-8")
+        if (shifts_ir.count("shl i32") != 5 or
+                shifts_ir.count("ashr i32") != 1 or
+                shifts_ir.count("lshr i32") != 1 or
+                shifts_ir.count("and i32") != 7):
+            raise RuntimeError("P4.2 每个移位都必须先与 31 相与")
+        if " exact" in shifts_ir or " nsw " in shifts_ir or " nuw " in shifts_ir:
+            raise RuntimeError("P4.2 移位不能附加不溢出/精确性承诺")
+        casts_ir = (temp / "p04-casts.ll").read_text(encoding="utf-8")
+        if casts_ir.count("zext i1") != 8 or "sext" in casts_ir:
+            raise RuntimeError("P4.2 bool 到整数必须零扩展")
+        if "sub i32 0, 1" not in casts_ir or "i32 -2147483648)" not in casts_ir:
+            raise RuntimeError("P4.2 整数 cast 必须保留 32 位位模式")
+
         for name, command, expected in (
             ("model-smoke", [args.model_test], b""),
             ("model-values", [args.model_test, "--emit-model"], b""),
@@ -304,6 +454,14 @@ def main():
             output.write_text(run(command).stdout, encoding="utf-8")
             modules.append((name, output, expected, b""))
         for name, output, _, _ in modules:
+            # P4.3：自有 baseline 不附加不溢出、精确性或别名承诺。
+            # 检查生成文本，而不是依赖 LLVM verifier 事后接受错误承诺。
+            text = output.read_text(encoding="utf-8")
+            for forbidden in (" nsw ", " nuw ", " exact", "noalias",
+                              "inbounds", "nonnull"):
+                if forbidden in text:
+                    raise RuntimeError(
+                        f"{name}: baseline IR must not contain {forbidden.strip()}")
             run([args.llvm_as, str(output), "-o", str(temp / f"{name}.bc")])
             run([args.opt, "-passes=verify", "-disable-output", str(output)])
 
@@ -325,12 +483,14 @@ def main():
 
         # All are semantically valid. Reject unsupported lowering even in unused bodies.
         for index, contents in enumerate((
-            "fn main() { let x = 1 + 2; }",
             "fn main() { let mut x = 1; x = 2; }",
             "fn main() { Box::<i32>::new(1); }",
             "fn main() { Vec::<i32>::new(); }",
-            "fn main() { 1 + 2; }",
-            "fn main() { let x = 1 == 1; }",
+            "fn main() { let x = true && false; }",
+            "fn main() { let x = false && { return; true }; println_i32(7); }",
+            "fn main() { let x = true || { return; false }; println_i32(7); }",
+            "fn main() { let x = { return; true } && false; }",
+            "fn main() { let x = { return; false } || true; }",
             "fn main() { let x = { (); }; }",
             "fn main() { let x = { [1, 2] }; }",
             "fn main() { let x = loop {}; }",
@@ -405,7 +565,7 @@ def main():
                     if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
                         raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
                                            f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
-    print(f"P2/P3.1-P3.6 IR tests passed: {len(modules)} modules verified" +
+    print(f"P2/P3/P4 IR tests passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

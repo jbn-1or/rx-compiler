@@ -1,7 +1,7 @@
 // 定义保存 IR 所需的模块、函数、基本块、操作数和指令，不依赖 LLVM 开发库。
 // 一个模块保存多个函数，每个函数保存自己的基本块，以及参数和指令结果的类型。
-// 当前支持整数、布尔和指针，以及调用、存储、整数扩展/截断和返回指令，
-// 不推导源程序类型。
+// 当前支持整数、布尔和指针，以及调用、存储、二元运算、比较、
+// 整数扩展/截断和返回指令，不推导源程序类型。
 #pragma once
 
 #include <cstddef>
@@ -33,38 +33,30 @@ inline constexpr std::size_t invalid_index =
 // 通过模块编号和函数下标找到一个 IR 函数，不是语义分析中的 FunctionId。
 // 同时保存模块编号，防止把另一个模块中下标相同的函数当成当前模块的函数。
 struct IRFunctionId {
-    // 所属模块的唯一编号；0 表示还没有指定有效模块。
-    uint64_t module = 0;
-    // 函数在模块函数表中的下标；invalid_index 表示尚未分配。
-    std::size_t index = invalid_index;
+    uint64_t module = 0; // 所属模块的唯一编号；0 表示还没有指定有效模块。
+    std::size_t index = invalid_index; // 函数在模块函数表中的下标；invalid_index 表示尚未分配。
     bool operator==(const IRFunctionId &) const = default;
 };
 // 标识函数中的一个 SSA 值，即只定义一次的参数或指令结果，不是源变量的 LocalId。
 struct ValueId {
-    // 定义这个值的函数 ID，其中也记录了所属模块。
-    IRFunctionId function;
-    // 在所属函数 value_types 中的下标；invalid_index 表示尚未分配。
-    std::size_t index = invalid_index;
+    IRFunctionId function; // 定义这个值的函数 ID，其中也记录了所属模块。
+    std::size_t index = invalid_index; // 在所属函数 value_types 中的下标；invalid_index 表示尚未分配。
     bool operator==(const ValueId &) const = default;
 };
 // 通过函数 ID 和块下标找到一个基本块；块编号与值编号分别计算。
 struct BlockId {
-    // 所属函数的 ID，用来检查是否误用了其他函数的块。
-    IRFunctionId function;
-    // 在所属函数 blocks 中的下标；invalid_index 表示尚未分配。
-    std::size_t index = invalid_index;
+    IRFunctionId function; // 所属函数的 ID，用来检查是否误用了其他函数的块。
+    std::size_t index = invalid_index; // 在所属函数 blocks 中的下标；invalid_index 表示尚未分配。
     bool operator==(const BlockId &) const = default;
 };
 
 // 保存一条指令使用的输入，可以是整数常量，也可以是参数或前面指令的结果。
 struct Operand {
-    // 这个操作数的 IR 类型；默认 Void 表示还没有可用的数据值。
-    Type type = Type::Void;
-    // monostate 表示空值，uint32_t保存常量的 32 个二进制位，ValueId 引用 SSA值。
-    std::variant<std::monostate, uint32_t, ValueId> value;
+    Type type = Type::Void; // 这个操作数的 IR 类型；默认 Void 表示还没有可用的数据值。
+    std::variant<std::monostate, uint32_t, ValueId> value; // 保存空值、常量位模式或 SSA 值 ID。
 
-    // 用类型和常量的二进制位创建操作数，不分配值 ID；
-    // i1 只使用最低位，i8 只使用低 8 位。
+    // 用类型和常量的二进制位创建操作数，不分配值 ID，也不截断位模式。
+    // 调用方应提供符合类型范围的位模式；i1 为 0/1，i8 不超过 0xff。
     static Operand constant(Type type, uint32_t bits);
     // 用类型和已有的值 ID 创建操作数，不在这里检查值是否已经定义。
     static Operand local(Type type, ValueId value_id);
@@ -83,88 +75,118 @@ bool valid_constant(const Operand &operand);
 enum class Linkage { Internal, External };
 // 保存函数的返回类型和参数类型，用来检查函数定义、调用和返回指令。
 struct Signature {
-    // 函数的返回类型；Void 表示没有返回数据。
-    Type result = Type::Void;
-    // 按声明顺序排列的参数类型，不允许 Void 参数。
-    std::vector<Type> parameters;
+    Type result = Type::Void; // 函数的返回类型；Void 表示没有返回数据。
+    std::vector<Type> parameters; // 按声明顺序排列的参数类型，不允许 Void 参数。
     bool operator==(const Signature &) const = default;
 };
 
 // 保存 call 指令要调用哪个函数、传入哪些参数，不保存调用结果。
 struct Call {
-    // 被调用函数的 IR ID，通过模块查询函数名、返回类型和参数类型。
-    IRFunctionId function;
-    // 按形参顺序保存的实参，数量和类型必须与被调用函数匹配。
-    std::vector<Operand> arguments;
+    IRFunctionId function; // 被调用函数的 IR ID，通过模块查询函数名、返回类型和参数类型。
+    std::vector<Operand> arguments; // 按形参顺序保存的实参，数量和类型必须与被调用函数匹配。
 };
 // 保存 alloca 指令要分配的存储类型和对齐值。
 struct Alloca {
-    // 分配出的存储单元保存的 IR 类型；当前支持 i32 和 bool 的 i8。
-    Type storage_type;
-    // 分配地址的对齐字节数，必须是非零的 2 的幂。
-    uint32_t alignment;
+    Type storage_type; // 分配出的存储单元保存的 IR 类型；当前支持 i32 和 bool 的 i8。
+    uint32_t alignment; // 分配地址的对齐字节数，必须是非零的 2 的幂。
 };
 // 保存 load 指令从哪个地址读取哪种类型。
 struct Load {
-    // 读取的 IR 类型；当前支持 i32 和 i8。
-    Type storage_type;
-    // 要读取的地址操作数，类型必须是 ptr。
-    Operand address;
-    // 地址的对齐字节数，必须是非零的 2 的幂。
-    uint32_t alignment;
+    Type storage_type; // 读取的 IR 类型；当前支持 i32 和 i8。
+    Operand address; // 要读取的地址操作数，类型必须是 ptr。
+    uint32_t alignment; // 地址的对齐字节数，必须是非零的 2 的幂。
 };
 // 保存 store 指令把哪个值写到哪个地址。
 struct Store {
-    // 写入的 IR 类型；当前支持 i32 和 i8。
-    Type storage_type;
-    // 要写入的值。
-    Operand value;
-    // 目标地址操作数，类型必须是 ptr。
-    Operand address;
-    // 地址的对齐字节数，必须是非零的 2 的幂。
-    uint32_t alignment;
+    Type storage_type; // 写入的 IR 类型；当前支持 i32 和 i8。
+    Operand value; // 要写入的值。
+    Operand address; // 目标地址操作数，类型必须是 ptr。
+    uint32_t alignment; // 地址的对齐字节数，必须是非零的 2 的幂。
 };
 // 存储类型支持 i32 和 i8；对齐必须是非零的 2 的幂。
 bool valid_storage(Type type, uint32_t alignment);
 // 保存 zext 指令：把较窄整数的无符号位模式扩展成较宽整数。
 struct ZExt {
-    // 要扩展的输入值，类型必须是整数。
-    Operand value;
-    // 扩展后的结果类型，位宽必须大于输入类型。
-    Type target_type;
+    Operand value; // 要扩展的输入值，类型必须是整数。
+    Type target_type; // 扩展后的结果类型，位宽必须大于输入类型。
 };
 // 保存 trunc 指令：把较宽整数截断成较窄整数。
 struct Trunc {
-    // 要截断的输入值，类型必须是整数。
-    Operand value;
-    // 截断后的结果类型，位宽必须小于输入类型。
-    Type target_type;
+    Operand value; // 要截断的输入值，类型必须是整数。
+    Type target_type; // 截断后的结果类型，位宽必须小于输入类型。
 };
-// 普通指令的具体操作：调用、入口分配、读写和整数扩展/截断。
-using Operation = std::variant<Call, Alloca, Load, Store, ZExt, Trunc>;
+// 整数和 bool 的二元运算指令；移位操作数需要先掩码低 5 位。
+enum class BinaryOp {
+    Add,               // add
+    Subtract,          // sub
+    Multiply,          // mul
+    SignedDivide,      // sdiv
+    SignedRemainder,   // srem
+    UnsignedDivide,    // udiv
+    UnsignedRemainder, // urem
+    And,               // and
+    Or,                // or
+    Xor,               // xor
+    ShiftLeft,         // shl
+    ArithmeticShiftRight, // ashr
+    LogicalShiftRight, // lshr
+};
+// 二元指令在 LLVM 文本中的拼写。
+const char *binary_op_name(BinaryOp operation);
+// 判断二元指令允许的操作数和结果类型：算术/移位只接受 i32，位运算接受 i1/i32。
+bool valid_binary_type(BinaryOp operation, Type type);
+
+// 比较谓词区分有符号和无符号；选择依据是源类型，而不是 IR 中的 i32。
+enum class Comparison {
+    Equal,                     // eq
+    NotEqual,                  // ne
+    SignedLessThan,            // slt
+    SignedLessThanOrEqual,     // sle
+    SignedGreaterThan,         // sgt
+    SignedGreaterThanOrEqual,  // sge
+    UnsignedLessThan,          // ult
+    UnsignedLessThanOrEqual,   // ule
+    UnsignedGreaterThan,       // ugt
+    UnsignedGreaterThanOrEqual // uge
+};
+// 比较谓词在 LLVM icmp 文本中的拼写，例如 slt 或 uge。
+const char *comparison_name(Comparison comparison);
+// 判断比较谓词能否用于该操作数类型：有符号谓词只用于 i32，bool 只能相等或无符号比较。
+bool valid_comparison(Comparison comparison, Type operand_type);
+
+// 保存一条二元运算的两个操作数；结果类型与操作数类型相同。
+// 这里故意不保存 nsw/nuw/exact 等承诺：标量 baseline 按回绕执行，
+// 没有证明时不能把这些源语义之外的假设写进 IR。
+struct BinaryOperation {
+    BinaryOp operation; // 要执行的 add/sub/mul/div/rem/and/or/xor/移位指令
+    Operand left;       // 先求值的左操作数
+    Operand right;      // 后求值的右操作数
+};
+// 保存一条比较指令；两侧类型相同，结果类型固定为 i1。
+struct Compare {
+    Comparison predicate; // 决定使用 eq/slt/ult 等哪一种比较
+    Operand left;         // 先求值的左操作数
+    Operand right;        // 后求值的右操作数
+};
+// 普通指令的具体操作：调用、入口分配、读写、二元运算、移位、比较和整数扩展/截断。
+using Operation = std::variant<Call, Alloca, Load, Store, ZExt, Trunc,
+                               BinaryOperation, Compare>;
 // 保存一条普通指令的操作、结果类型，以及有返回数据时分配的结果 ID。
 struct Instruction {
-    // 结果值的 ID；无结果指令为空。
-    std::optional<ValueId> result;
-    // 结果的 IR 类型，无结果指令为 Void。
-    Type type;
-    // 这条指令的具体操作及操作数。
-    Operation operation;
+    std::optional<ValueId> result; // 结果值的 ID；无结果指令为空。
+    Type type; // 结果的 IR 类型，无结果指令为 Void。
+    Operation operation; // 这条指令的具体操作及操作数。
 };
 
 // 表示 ret 指令，结束当前函数，并返回一个值或不返回数据。
 struct Return {
-    // 要返回的操作数，类型必须匹配函数返回类型；空值表示 ret void。
-    std::optional<Operand> value;
+    std::optional<Operand> value; // 要返回的操作数，类型必须匹配函数返回类型；空值表示 ret void。
 };
 // 保存一段顺序执行的指令，最后必须有一条结束该块的 ret 指令。
 struct BasicBlock {
-    // 这个块的 ID，用来查找块，并生成 bb_<下标> 形式的标签。
-    BlockId id;
-    // 按执行顺序排列的普通指令，不包含末尾的终结指令。
-    std::vector<Instruction> instructions;
-    // 结束这个块的指令；构建时可以暂缺，但模块检查通过前必须补上。
-    std::optional<Return> terminator;
+    BlockId id; // 这个块的 ID，用来查找块，并生成 bb_<下标> 形式的标签。
+    std::vector<Instruction> instructions; // 按执行顺序排列的普通指令，不包含末尾的终结指令。
+    std::optional<Return> terminator; // 结束这个块的指令；构建时可以暂缺，但模块检查通过前必须补上。
 };
 
 // 保存一个函数的名称、参数、返回类型和函数体；没有基本块时只有声明。
@@ -173,22 +195,14 @@ struct Function {
     // 保存函数身份、名称、签名和链接属性，并为参数预分配值 ID。
     Function(IRFunctionId function_id, std::string name, Signature signature,
              Linkage linkage);
-    // 这个函数的 IR ID，在添加到模块时分配，不直接使用语义分析的 FunctionId。
-    IRFunctionId id;
-    // 这个不可变的 LLVM 全局符号名同时用于函数表的名称索引。
-    const std::string name;
-    // 符号链接属性，决定是否仅在模块内部可见。
-    Linkage linkage;
-    // 函数的返回类型和参数类型，供调用和返回检查使用。
-    Signature signature;
-    // 按声明顺序保存的参数操作数，它们占用本函数最前面的值编号。
-    std::vector<Operand> parameters;
-    // 记录每个参数和指令结果的类型，ValueId.index 是这张表的下标。
-    std::vector<Type> value_types;
-    // 固定分配总是在入口正文之前输出，不改变正文的求值顺序。
-    std::vector<Instruction> entry_allocas;
-    // 按创建顺序保存的基本块；定义的第一个块为入口块。
-    std::vector<BasicBlock> blocks;
+    IRFunctionId id; // 这个函数的 IR ID，在添加到模块时分配，不直接使用语义分析的 FunctionId。
+    const std::string name; // 这个不可变的 LLVM 全局符号名同时用于函数表的名称索引。
+    Linkage linkage; // 符号链接属性，决定是否仅在模块内部可见。
+    Signature signature; // 函数的返回类型和参数类型，供调用和返回检查使用。
+    std::vector<Operand> parameters; // 按声明顺序保存的参数操作数，它们占用本函数最前面的值编号。
+    std::vector<Type> value_types; // 记录每个参数和指令结果的类型，ValueId.index 是这张表的下标。
+    std::vector<Instruction> entry_allocas; // 固定分配总是在入口正文之前输出，不改变正文的求值顺序。
+    std::vector<BasicBlock> blocks; // 按创建顺序保存的基本块；定义的第一个块为入口块。
 
     // 判断函数是否只有声明、没有函数体；内部函数不能一直保持声明状态。
     bool is_declaration() const { return blocks.empty(); }
@@ -239,18 +253,14 @@ public:
     // 返回按添加顺序保存的函数表，不允许通过这个接口修改函数表本身。
     const auto &functions() const { return functions_; }
 
-    // LLVM 目标三元组，指定生成代码使用的架构和目标环境。
-    std::string target_triple = rv32_triple;
-    // LLVM 数据布局字符串，描述目标的字节序、指针宽度和对齐规则。
-    std::string data_layout = rv32_data_layout;
+    std::string target_triple = rv32_triple; // LLVM 目标三元组，指定生成代码使用的架构和目标环境。
+    std::string data_layout = rv32_data_layout; // LLVM 数据布局字符串，描述目标的字节序、指针宽度和对齐规则。
 
 private:
-    // 当前进程内唯一的模块编号，用来区分不同模块中下标相同的函数。
-    uint64_t identity_;
-    // 按添加顺序保存函数指针，并负责释放函数；IRFunctionId.index 对应表下标。
-    // vector 扩容只会移动指针，不会移动函数对象，因此已有函数引用仍然有效。
-    std::vector<std::unique_ptr<Function>> functions_;
-    std::unordered_map<std::string, Function *> functions_by_name_;
+    uint64_t identity_; // 当前进程内唯一的模块编号，用来区分不同模块中下标相同的函数。
+    std::vector<std::unique_ptr<Function>> functions_; // 按添加顺序保存并拥有函数；IRFunctionId.index 对应表下标。
+                                                     // vector 扩容只移动指针，不移动函数对象，已有函数引用仍有效。
+    std::unordered_map<std::string, Function *> functions_by_name_; // 函数名到函数对象的索引，不拥有函数对象。
 };
 
 // 判断函数名是否可以不加引号，直接写入 LLVM 文本。

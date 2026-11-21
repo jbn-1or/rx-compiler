@@ -104,10 +104,189 @@ ir::Operand GenerationContext::load_scalar(const ir::Operand &address,
     return builder.load(ir::Type::I32, address, 4);
 }
 
+// 先求值左操作数，再求值右操作数，最后按源类型选择运算指令。
+std::optional<EmitResult>
+GenerationContext::emit_binary(const BinaryExpression &expression,
+                               LocalPlaces &locals) {
+    // 短路运算不能沿用两侧必求值的流程；必须在任一侧 return 前拒绝。
+    if (expression.operation == BinaryOperator::LogicalAnd ||
+        expression.operation == BinaryOperator::LogicalOr) {
+        diagnostics << "IR 生成尚未支持短路逻辑（P6）\n";
+        return std::nullopt;
+    }
+    auto left = emit_value(*expression.left, locals);
+    if (!left)
+        return std::nullopt;
+    // 左操作数提前 return 时，右操作数和运算本身都不能再生成。
+    if (path_ended(*left))
+        return EmitResult{NoContinuation{}};
+    auto right = emit_value(*expression.right, locals);
+    if (!right)
+        return std::nullopt;
+    if (path_ended(*right))
+        return EmitResult{NoContinuation{}};
+    // 源操作数类型决定有符号/无符号除法以及比较谓词，不能从 i32 猜回来。
+    const auto &operand_type =
+        semantics.expressions.at(expression.left.get()).type;
+    auto result = emit_binary_operation(
+        expression.operation, operand_type, std::get<ir::Operand>(*left),
+        std::get<ir::Operand>(*right));
+    if (!result)
+        return std::nullopt;
+    return EmitResult{*result};
+}
+
+// 只接收已求好的标量操作数，按源类型选择具体指令。
+std::optional<ir::Operand> GenerationContext::emit_binary_operation(
+    BinaryOperator operation, const SemanticType &operand_type,
+    ir::Operand left, ir::Operand right) {
+    // 只有 i32 和 isize 是有符号整数；bool 不是整数，不能沿用默认的 int_kind。
+    const bool is_signed =
+        operand_type.is_int() &&
+        (operand_type.int_kind == SemanticType::IntKind::I32 ||
+         operand_type.int_kind == SemanticType::IntKind::Isize);
+    // 有符号比较只用于有符号整数；bool 和常见无符号整数都走无符号谓词。
+    const auto ordered_comparison = [&](ir::Comparison signed_comparison,
+                                        ir::Comparison unsigned_comparison) {
+        return is_signed ? signed_comparison : unsigned_comparison;
+    };
+    switch (operation) {
+    case BinaryOperator::Add:
+        return builder.binary(ir::BinaryOp::Add, left, right);
+    case BinaryOperator::Subtract:
+        return builder.binary(ir::BinaryOp::Subtract, left, right);
+    case BinaryOperator::Multiply:
+        return builder.binary(ir::BinaryOp::Multiply, left, right);
+    case BinaryOperator::Divide:
+        return builder.binary(is_signed ? ir::BinaryOp::SignedDivide
+                                        : ir::BinaryOp::UnsignedDivide,
+                              left, right);
+    case BinaryOperator::Remainder:
+        return builder.binary(is_signed ? ir::BinaryOp::SignedRemainder
+                                        : ir::BinaryOp::UnsignedRemainder,
+                              left, right);
+    case BinaryOperator::BitwiseAnd:
+        return builder.binary(ir::BinaryOp::And, left, right);
+    case BinaryOperator::BitwiseOr:
+        return builder.binary(ir::BinaryOp::Or, left, right);
+    case BinaryOperator::BitwiseXor:
+        return builder.binary(ir::BinaryOp::Xor, left, right);
+    case BinaryOperator::Equal:
+        return builder.compare(ir::Comparison::Equal, left, right);
+    case BinaryOperator::NotEqual:
+        return builder.compare(ir::Comparison::NotEqual, left, right);
+    // bool 只能用无符号比较，避免把 i1 的 true 当成有符号的 -1。
+    case BinaryOperator::LessThan:
+        return builder.compare(
+            ordered_comparison(ir::Comparison::SignedLessThan,
+                               ir::Comparison::UnsignedLessThan),
+            left, right);
+    case BinaryOperator::LessThanOrEqual:
+        return builder.compare(
+            ordered_comparison(ir::Comparison::SignedLessThanOrEqual,
+                               ir::Comparison::UnsignedLessThanOrEqual),
+            left, right);
+    case BinaryOperator::GreaterThan:
+        return builder.compare(
+            ordered_comparison(ir::Comparison::SignedGreaterThan,
+                               ir::Comparison::UnsignedGreaterThan),
+            left, right);
+    case BinaryOperator::GreaterThanOrEqual:
+        return builder.compare(
+            ordered_comparison(ir::Comparison::SignedGreaterThanOrEqual,
+                               ir::Comparison::UnsignedGreaterThanOrEqual),
+            left, right);
+    // 移位量只保留低 5 位；即使右侧是字面量也保留这条掩码指令。
+    case BinaryOperator::ShiftLeft:
+    case BinaryOperator::ShiftRight: {
+        const auto count = builder.binary(
+            ir::BinaryOp::And, right,
+            ir::Operand::constant(ir::Type::I32, 31));
+        const auto shift =
+            operation == BinaryOperator::ShiftLeft
+                ? ir::BinaryOp::ShiftLeft
+                : is_signed ? ir::BinaryOp::ArithmeticShiftRight
+                            : ir::BinaryOp::LogicalShiftRight;
+        return builder.binary(shift, left, count);
+    }
+    // 短路逻辑已在求值入口拒绝，不属于标量运算发射接口。
+    case BinaryOperator::LogicalAnd:
+    case BinaryOperator::LogicalOr:
+        break;
+    }
+    diagnostics << "IR 生成尚未支持此二元运算\n";
+    return std::nullopt;
+}
+
+// 生成一元取负或按位取反；借用和解引用留到后续阶段。
+std::optional<EmitResult>
+GenerationContext::emit_unary(const UnaryExpression &expression,
+                              LocalPlaces &locals) {
+    auto operand = emit_value(*expression.operand, locals);
+    if (!operand)
+        return std::nullopt;
+    // 操作数提前结束路径时，外层运算也不能再生成。
+    if (path_ended(*operand))
+        return EmitResult{NoContinuation{}};
+    const auto &type = semantics.expressions.at(&expression).type;
+    const auto value = std::get<ir::Operand>(*operand);
+    switch (expression.operation) {
+    // 语义阶段已保证取负结果为整数；按 32 位回绕用 0 减操作数，不附加不溢出承诺。
+    case UnaryOperator::Negative:
+        return EmitResult{
+            builder.binary(ir::BinaryOp::Subtract,
+                           ir::Operand::constant(ir::Type::I32, 0), value)};
+    // bool 与 true 异或；整数与全 1 位模式异或，不套用布尔真值规则。
+    case UnaryOperator::Not:
+        if (type.kind == SemanticType::Kind::Bool)
+            return EmitResult{builder.binary(
+                ir::BinaryOp::Xor, value,
+                ir::Operand::constant(ir::Type::I1, 1))};
+        // 语义阶段已保证取反结果只能是 bool 或整数，排除 bool 后直接生成整数取反。
+        return EmitResult{builder.binary(
+            ir::BinaryOp::Xor, value,
+            ir::Operand::constant(ir::Type::I32, 0xffffffffu))};
+    default:
+        diagnostics << "IR 生成尚未支持此一元运算\n";
+        return std::nullopt;
+    }
+}
+
+// 生成 as 转换：整数之间只换源类型，bool 到整数先零扩展成 i32。
+std::optional<EmitResult>
+GenerationContext::emit_cast(const CastExpression &expression,
+                             LocalPlaces &locals) {
+    auto operand = emit_value(*expression.operand, locals);
+    if (!operand)
+        return std::nullopt;
+    // 操作数提前结束路径时，cast 也不能再生成。
+    if (path_ended(*operand))
+        return EmitResult{NoContinuation{}};
+    const auto value = std::get<ir::Operand>(*operand);
+    // 语义阶段只允许整数到整数和 bool 到整数；整数 cast 保留 i32 位模式，
+    // 因此不生成指令。目标源类型已记录在 cast 表达式的语义结果中，
+    // 后续运算会按该类型选择有符号或无符号指令。
+    const auto &source_type =
+        semantics.expressions.at(expression.operand.get()).type;
+    if (source_type.kind == SemanticType::Kind::Bool)
+        return EmitResult{builder.zext(ir::Type::I32, value)};
+    return EmitResult{value};
+}
+
 // 生成需要数据值的表达式；路径已结束时返回 NoContinuation 而不是伪造值。
 std::optional<EmitResult>
 GenerationContext::emit_value(const Expression &expression,
                               LocalPlaces &locals) {
+    // 二元运算先求值两侧，再按源类型选择指令。
+    if (const auto *binary =
+            dynamic_cast<const BinaryExpression *>(&expression))
+        return emit_binary(*binary, locals);
+    // 一元取负和取反不嵌套求值顺序问题，单独生成。
+    if (const auto *unary = dynamic_cast<const UnaryExpression *>(&expression))
+        return emit_unary(*unary, locals);
+    // as 转换只改源类型或把 bool 零扩展，不引入数值转换。
+    if (const auto *cast = dynamic_cast<const CastExpression *>(&expression))
+        return emit_cast(*cast, locals);
     // 字面量和路径不产生嵌套求值，复用基础标量读取逻辑。
     if (dynamic_cast<const IntegerLiteral *>(&expression) ||
         dynamic_cast<const BooleanLiteral *>(&expression) ||

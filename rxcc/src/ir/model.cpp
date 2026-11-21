@@ -39,6 +39,88 @@ unsigned integer_width(Type type) {
     }
 }
 
+// 返回二元运算在 LLVM 文本中的指令名，例如 add、sdiv、urem 或 xor。
+const char *binary_op_name(BinaryOp operation) {
+    switch (operation) {
+        case BinaryOp::Add: return "add";
+        case BinaryOp::Subtract: return "sub";
+        case BinaryOp::Multiply: return "mul";
+        case BinaryOp::SignedDivide: return "sdiv";
+        case BinaryOp::SignedRemainder: return "srem";
+        case BinaryOp::UnsignedDivide: return "udiv";
+        case BinaryOp::UnsignedRemainder: return "urem";
+        case BinaryOp::And: return "and";
+        case BinaryOp::Or: return "or";
+        case BinaryOp::Xor: return "xor";
+        case BinaryOp::ShiftLeft: return "shl";
+        case BinaryOp::ArithmeticShiftRight: return "ashr";
+        case BinaryOp::LogicalShiftRight: return "lshr";
+    }
+    return "";
+}
+
+// 判断二元指令是否允许该操作数类型：算术/移位只用于 i32，位运算用于 i1 和 i32。
+bool valid_binary_type(BinaryOp operation, Type type) {
+    switch (operation) {
+        case BinaryOp::Add:
+        case BinaryOp::Subtract:
+        case BinaryOp::Multiply:
+        case BinaryOp::SignedDivide:
+        case BinaryOp::SignedRemainder:
+        case BinaryOp::UnsignedDivide:
+        case BinaryOp::UnsignedRemainder:
+        case BinaryOp::ShiftLeft:
+        case BinaryOp::ArithmeticShiftRight:
+        case BinaryOp::LogicalShiftRight:
+            return type == Type::I32;
+        case BinaryOp::And:
+        case BinaryOp::Or:
+        case BinaryOp::Xor:
+            return type == Type::I1 || type == Type::I32;
+    }
+    return false;
+}
+
+// 返回比较谓词在 LLVM icmp 文本中的拼写，例如 slt 或 uge。
+const char *comparison_name(Comparison comparison) {
+    switch (comparison) {
+        case Comparison::Equal: return "eq";
+        case Comparison::NotEqual: return "ne";
+        case Comparison::SignedLessThan: return "slt";
+        case Comparison::SignedLessThanOrEqual: return "sle";
+        case Comparison::SignedGreaterThan: return "sgt";
+        case Comparison::SignedGreaterThanOrEqual: return "sge";
+        case Comparison::UnsignedLessThan: return "ult";
+        case Comparison::UnsignedLessThanOrEqual: return "ule";
+        case Comparison::UnsignedGreaterThan: return "ugt";
+        case Comparison::UnsignedGreaterThanOrEqual: return "uge";
+    }
+    return "";
+}
+
+// 判断比较谓词能否用于该操作数类型：bool 只有相等和无符号比较，
+// 避免把 i1 的 true 当成有符号的 -1。
+bool valid_comparison(Comparison comparison, Type operand_type) {
+    if (operand_type != Type::I1 && operand_type != Type::I32)
+        return false;
+    switch (comparison) {
+        case Comparison::SignedLessThan:
+        case Comparison::SignedLessThanOrEqual:
+        case Comparison::SignedGreaterThan:
+        case Comparison::SignedGreaterThanOrEqual:
+            return operand_type == Type::I32;
+        case Comparison::Equal:
+        case Comparison::NotEqual:
+        case Comparison::UnsignedLessThan:
+        case Comparison::UnsignedLessThanOrEqual:
+        case Comparison::UnsignedGreaterThan:
+        case Comparison::UnsignedGreaterThanOrEqual:
+            return true;
+    }
+    // 未知谓词不能进入输出器，否则会生成缺少谓词的 icmp。
+    return false;
+}
+
 // 检查存储类型和对齐是否合法：类型为 i32 或 i8，且对齐值是 2 的幂。
 bool valid_storage(Type type, uint32_t alignment) {
     return (type == Type::I32 || type == Type::I8) && alignment != 0 &&
@@ -111,7 +193,7 @@ const BasicBlock &Function::block(BlockId block_id) const {
     return blocks.at(block_id.index);
 }
 
-// 判断值 ID 是否属于本函数、类型是否与记录一致；常量只需检查是否为 i32。
+// 判断值 ID 是否属于本函数、类型是否与记录一致；常量检查类型和位模式是否合法。
 // 值类型表中有记录，不代表参数表或指令中已经定义了这个值。
 bool Function::contains(const Operand &operand) const {
     if (const auto *value = operand.value_id())

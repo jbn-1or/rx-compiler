@@ -28,8 +28,7 @@ public:
                           std::ostream &diagnostics) const;
 
 private:
-    // 保存模块的唯一指针，负责释放它；移动 IRArtifact 不会改变模块地址或 ID。
-    std::unique_ptr<ir::Module> module_;
+    std::unique_ptr<ir::Module> module_; // 保存并拥有模块；移动 IRArtifact 不会改变模块地址或 ID。
 };
 
 } // namespace rx

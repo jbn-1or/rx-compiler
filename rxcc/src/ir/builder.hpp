@@ -38,6 +38,10 @@ public:
     void store(Operand value, Operand address, uint32_t alignment) {
         store(value.type, value, address, alignment);
     }
+    // 添加二元运算；两侧类型必须相同，结果类型也与操作数相同。
+    Operand binary(BinaryOp operation, Operand left, Operand right);
+    // 添加比较指令；两侧类型必须相同，结果类型固定为 i1。
+    Operand compare(Comparison comparison, Operand left, Operand right);
     // 把较窄整数零扩展成较宽整数，例如 bool 写入 i8 存储单元。
     Operand zext(Type target_type, Operand value);
     // 把较宽整数截断成较窄整数，例如从 i8 存储单元读回 bool。
@@ -54,10 +58,8 @@ private:
     void terminate(Return terminator);
     // 检查操作数能否用于当前函数；不符合条件时抛出 logic_error。
     void require_operand(const Operand &operand) const;
-    // 正在构建的模块引用；使用构建器期间，调用方不能释放这个模块。
-    Module &module_;
-    // 当前选中块的 ID；未选择块或添加终结指令后为空。
-    std::optional<BlockId> insertion_;
+    Module &module_; // 正在构建的模块引用；使用构建器期间，调用方不能释放这个模块。
+    std::optional<BlockId> insertion_; // 当前选中块的 ID；未选择块或添加终结指令后为空。
 };
 
 } // namespace rx::ir

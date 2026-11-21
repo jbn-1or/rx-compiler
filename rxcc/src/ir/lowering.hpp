@@ -64,6 +64,20 @@ private:
     // 计算整数、bool 字面量以及局部变量或常量路径。
     ir::Operand emit_scalar(const Expression &expression,
                             const LocalPlaces &locals);
+    // 先求值左操作数，再求值右操作数，最后按源类型选择二元指令。
+    std::optional<EmitResult> emit_binary(const BinaryExpression &expression,
+                                          LocalPlaces &locals);
+    // 生成一元取负或按位取反；借用和解引用留到后续阶段。
+    std::optional<EmitResult> emit_unary(const UnaryExpression &expression,
+                                         LocalPlaces &locals);
+    // 生成 as 转换：整数换源类型，bool 到整数先零扩展。
+    std::optional<EmitResult> emit_cast(const CastExpression &expression,
+                                        LocalPlaces &locals);
+    // 只接收已求好的标量操作数，按源类型选择 add/sdiv/udiv/icmp/移位等指令。
+    std::optional<ir::Operand>
+    emit_binary_operation(BinaryOperator operation,
+                          const SemanticType &operand_type,
+                          ir::Operand left, ir::Operand right);
     // 从存储单元读回标量；bool 读取 i8 后再截断成 i1。
     ir::Operand load_scalar(const ir::Operand &address,
                             const SemanticType &type);
@@ -79,16 +93,11 @@ private:
     std::optional<EmitResult> emit_return(const ReturnExpression &expression,
                                           LocalPlaces &locals);
 
-    // 语义分析结果，提供表达式、路径和调用的记录。
-    const SemanticResult &semantics;
-    // 源 FunctionId 下标到已登记 IRFunctionId 的映射。
-    const std::vector<ir::IRFunctionId> &functions;
-    // 正在构建的 IR 模块。
-    ir::Module &module;
-    // 向当前基本块添加指令的构建器。
-    ir::IRBuilder &builder;
-    // 收集 IR 生成期间错误信息的输出流。
-    std::ostream &diagnostics;
+    const SemanticResult &semantics; // 语义分析结果，提供表达式、路径和调用的记录。
+    const std::vector<ir::IRFunctionId> &functions; // 源 FunctionId 下标到已登记 IRFunctionId 的映射。
+    ir::Module &module; // 正在构建的 IR 模块。
+    ir::IRBuilder &builder; // 向当前基本块添加指令的构建器。
+    std::ostream &diagnostics; // 收集 IR 生成期间错误信息的输出流。
 };
 
 } // namespace rx

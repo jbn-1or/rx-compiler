@@ -89,6 +89,44 @@ void add_bool_scalar(Module &module) {
     builder.ret(Operand::constant(Type::I1, 1));
 }
 
+// 构造 i32 和 bool 的二元运算与比较，覆盖 builder/checker/printer 的类型规则。
+void add_operations(Module &module) {
+    IRBuilder builder(module);
+    const auto id = module.add_function(
+        "operations", {Type::I32, {Type::I32, Type::I32}}, Linkage::Internal);
+    auto &function = module.function(id);
+    builder.set_insert_point(function.add_block());
+    const auto left = function.argument(0);
+    const auto right = function.argument(1);
+    // 依次生成全部整数指令；结果可以暂时不被使用，检查器只验证类型和定义顺序。
+    builder.binary(BinaryOp::Add, left, right);
+    builder.binary(BinaryOp::Subtract, left, right);
+    builder.binary(BinaryOp::Multiply, left, right);
+    builder.binary(BinaryOp::SignedDivide, left, right);
+    builder.binary(BinaryOp::SignedRemainder, left, right);
+    builder.binary(BinaryOp::UnsignedDivide, left, right);
+    builder.binary(BinaryOp::UnsignedRemainder, left, right);
+    builder.binary(BinaryOp::And, left, right);
+    builder.binary(BinaryOp::Or, left, right);
+    builder.binary(BinaryOp::Xor, left, right);
+    builder.binary(BinaryOp::ShiftLeft, left, right);
+    builder.binary(BinaryOp::ArithmeticShiftRight, left, right);
+    builder.binary(BinaryOp::LogicalShiftRight, left, right);
+    builder.compare(Comparison::SignedLessThan, left, right);
+    builder.ret(left);
+    // bool 只能使用 i1 位运算和相等/无符号比较。
+    const auto bool_id = module.add_function(
+        "bool_operations", {Type::I1, {Type::I1, Type::I1}},
+        Linkage::Internal);
+    auto &bool_function = module.function(bool_id);
+    builder.set_insert_point(bool_function.add_block());
+    const auto bool_left = bool_function.argument(0);
+    const auto bool_right = bool_function.argument(1);
+    const auto both = builder.binary(BinaryOp::And, bool_left, bool_right);
+    builder.compare(Comparison::UnsignedLessThan, bool_left, bool_right);
+    builder.ret(both);
+}
+
 // 手工构造 bool 真值驱动：把往返结果零扩展成 i32 后打印。
 // 这是模型层的观察手段，不表示源码已经支持把 bool 直接传给 println_i32。
 rx::IRArtifact make_bool_driver() {
@@ -136,6 +174,7 @@ template <class F> void reject_model(F corrupt) {
     auto artifact = make_module();
     add_typed_calls(artifact.module());
     add_storage(artifact.module());
+    add_operations(artifact.module());
     corrupt(artifact.module());
     std::ostringstream text, diagnostics;
     check(!artifact.verify_and_print(text, diagnostics) && text.str().empty() && !diagnostics.str().empty(),
@@ -203,9 +242,55 @@ void check_invalid_models() {
             m.find_function("bool_roundtrip")->blocks[0].instructions[3].operation);
         truncation.value.type = Type::I1;
     });
+    // 指针不是较窄整数；即使结果类型和值表一致，也必须拒绝这条 trunc。
+    reject_scalar_model([](Module &m) {
+        auto &function = *m.find_function("bool_roundtrip");
+        const auto result = function.new_value(Type::Ptr);
+        function.blocks[0].instructions.push_back({
+            *result.value_id(), Type::Ptr,
+            Trunc{Operand::constant(Type::I32, 1), Type::Ptr}});
+    });
     reject_scalar_model([](Module &m) {
         m.find_function("bool_roundtrip")->blocks[0].instructions[2].type =
             Type::I32;
+    });
+    // 二元/比较：结果类型、操作数类型和 bool 谓词都必须符合指令规则。
+    reject_model([](Module &m) {
+        m.find_function("operations")->blocks[0].instructions[0].type = Type::I1;
+    });
+    reject_model([](Module &m) {
+        auto &binary = std::get<BinaryOperation>(
+            m.find_function("operations")->blocks[0].instructions[0].operation);
+        binary.right.type = Type::I1;
+    });
+    reject_model([](Module &m) {
+        m.find_function("operations")->blocks[0].instructions[13].type =
+            Type::I32;
+    });
+    reject_model([](Module &m) {
+        auto &comparison = std::get<Compare>(
+            m.find_function("bool_operations")->blocks[0].instructions[1].operation);
+        comparison.predicate = Comparison::SignedLessThan;
+    });
+    // 未知谓词必须在文本输出前拒绝，不能打印缺少谓词的 icmp。
+    for (const auto *name : {"operations", "bool_operations"}) {
+        reject_model([&](Module &m) {
+            const auto index = std::string_view(name) == "operations" ? 13u : 1u;
+            auto &comparison = std::get<Compare>(
+                m.find_function(name)->blocks[0].instructions[index].operation);
+            comparison.predicate = static_cast<Comparison>(999);
+        });
+    }
+    reject_model([](Module &m) {
+        auto &binary = std::get<BinaryOperation>(
+            m.find_function("bool_operations")->blocks[0].instructions[0].operation);
+        binary.operation = BinaryOp::Add;
+    });
+    // 移位只允许 i32，bool 上的 shl/ashr/lshr 必须在发射前拒绝。
+    reject_model([](Module &m) {
+        auto &binary = std::get<BinaryOperation>(
+            m.find_function("bool_operations")->blocks[0].instructions[0].operation);
+        binary.operation = BinaryOp::ShiftLeft;
     });
 }
 
@@ -222,6 +307,7 @@ void run_tests() {
     rx::IRArtifact moved(std::move(artifact));
     check(&moved.module() == original && moved.module().contains(main_id), "移动 artifact 不改变模块或身份");
     add_typed_calls(moved.module());
+    add_operations(moved.module());
     std::ostringstream text, again, diagnostics;
     check(moved.verify_and_print(text, diagnostics) && diagnostics.str().empty(), "合法模型必须通过检查");
     check(moved.verify_and_print(again, diagnostics) && text.str() == again.str(), "重复输出必须确定");
@@ -235,12 +321,30 @@ void run_tests() {
     check(formatted.flags() == flags && formatted.width() == 40 && formatted.fill() == '#' &&
               formatted.getloc() == locale && formatted.rdbuf()->getloc() == locale,
           "输出后应保留调用方的流和缓冲区格式");
+    check(text.str().find("add i32") != std::string::npos &&
+              text.str().find("sdiv i32") != std::string::npos &&
+              text.str().find("udiv i32") != std::string::npos &&
+              text.str().find("icmp slt i32") != std::string::npos &&
+              text.str().find("and i1") != std::string::npos &&
+              text.str().find("icmp ult i1") != std::string::npos &&
+              text.str().find("shl i32") != std::string::npos &&
+              text.str().find("ashr i32") != std::string::npos &&
+              text.str().find("lshr i32") != std::string::npos,
+          "二元/比较指令必须按类型正确输出");
+    check(text.str().find(" nsw ") == std::string::npos &&
+              text.str().find(" nuw ") == std::string::npos &&
+              text.str().find(" exact") == std::string::npos &&
+              text.str().find("noalias") == std::string::npos &&
+              text.str().find("inbounds") == std::string::npos &&
+              text.str().find("nonnull") == std::string::npos,
+          "二元指令不能附加不溢出、精确性或别名承诺");
     check(text.str().find("ret i32 -2147483648") == std::string::npos &&
               text.str().find("i32 -2147483648") != std::string::npos &&
               text.str().find("ret i32 -1") != std::string::npos,
           "32 位常量位模式必须正确输出，调用结果不能被替换为常量");
     auto independent = make_module();
     add_typed_calls(independent.module());
+    add_operations(independent.module());
     std::ostringstream other;
     check(independent.verify_and_print(other, diagnostics) && other.str() == text.str(),
           "模块归属标记不参与文本命名");
@@ -325,10 +429,23 @@ void run_tests() {
     const auto bool_block = bool_errors.add_block();
     scalar_builder.set_insert_point(bool_block);
     const auto scalar_values = bool_errors.value_types.size();
+    // builder 拒绝未知谓词时，也不能新增结果值或部分指令。
+    for (const auto type : {Type::I1, Type::I32}) {
+        rejects([&] {
+            scalar_builder.compare(static_cast<Comparison>(999),
+                                   Operand::constant(type, 0),
+                                   Operand::constant(type, 1));
+        });
+    }
     rejects([&] { scalar_builder.zext(Type::I8, Operand::constant(Type::I32, 1)); });
     rejects([&] { scalar_builder.zext(Type::I1, Operand::constant(Type::I1, 1)); });
     // 非整数目标和相等位宽都不能构造扩展/截断。
     rejects([&] { scalar_builder.zext(Type::Ptr, Operand::constant(Type::I1, 1)); });
+    for (const auto target : {Type::Void, Type::Ptr, static_cast<Type>(999)}) {
+        rejects([&] {
+            scalar_builder.trunc(target, Operand::constant(Type::I32, 1));
+        });
+    }
     rejects([&] { scalar_builder.trunc(Type::I1, Operand::constant(Type::I1, 0)); });
     rejects([&] { scalar_builder.trunc(Type::I8, Operand::constant(Type::I1, 0)); });
     rejects([&] { scalar_builder.trunc(Type::I32, Operand::constant(Type::I32, 0)); });
@@ -367,6 +484,7 @@ int main(int argc, char **argv) {
             add_typed_calls(artifact.module());
             add_storage(artifact.module());
             add_bool_scalar(artifact.module());
+            add_operations(artifact.module());
         }
         return artifact.verify_and_print(std::cout, std::cerr) ? 0 : 1;
     } catch (const std::exception &error) {

@@ -66,6 +66,28 @@ struct UseAdjustment {
     SemanticType target_type;
 };
 
+// 引用调整路径中的一步内置解引用；每步只读取一次该层保存的指针。
+enum class CoercionStepKind {
+    Reference, // 读取 &T / &mut T 保存的目标地址
+    Box,       // 读取 Box<T> 保存的指针；执行路径在 P9 补全
+};
+
+// 一步调整只需要种类：地址读取本身不依赖源层的可变性。
+struct CoercionStep {
+    CoercionStepKind kind; // 这一层是引用还是 Box
+};
+
+// 一个固定使用位置已经选定的引用调整路径。
+// 它描述源表达式、要执行的逐层指针读取、到达的目标类型和最终借用方式；
+// 不携带任何 LLVM 指令或生成期对象。
+struct CoercionPlan {
+    SemanticType source_type; // 源表达式自身的类型，调整前的事实
+    SemanticType target_type; // 该使用位置要求的目标类型
+    std::vector<CoercionStep> steps; // 从源引用内层走到目标内层的指针读取步骤
+    bool target_is_mut = false; // 目标是否要求可变引用；非引用目标为 false
+    bool reborrow = false; // 同类型 &mut T 在此使用位置按重借用处理
+};
+
 // 结果独立持有符号，移动结果不会改变符号地址，类型和关联项中的指针仍然有效。
 // 结果中的 AST 指针不拥有节点；调用方使用结果期间必须保持 Crate 存活。
 // LLVM 对象及生成期间的映射不放在这里。
@@ -95,6 +117,8 @@ struct SemanticResult {
     std::unordered_map<const Expression *, ExpressionResult> expressions;
     // 当前语义检查不会填写此表；后续阶段应在确定调整后按使用位置记录。
     std::map<UseSite, UseAdjustment> use_adjustments;
+    // 固定使用位置实际选定的引用调整路径；与表达式自身事实分开保存。
+    std::map<UseSite, CoercionPlan> coercion_plans;
     std::unordered_map<const PathExpression *, PathTarget> paths;
     std::unordered_map<const IntegerLiteral *, IntegerLiteralFact> integer_literals;
     std::unordered_map<const CallExpression *, CallTarget> ordinary_calls;

@@ -137,7 +137,8 @@ ExpressionResult BodyChecker::check_method_call(const MethodCallExpression &call
         check_method_receiver(receiver, *method, call.receiver->span);
     bool arguments_diverge = false;
     const bool arguments_ok = check_arguments(
-        method->signature.parameters, call.arguments, call.span, arguments_diverge);
+        &call, method->signature.parameters, call.arguments, call.span,
+        arguments_diverge);
     if (!receiver_ok || !arguments_ok)
         return ExpressionResult::error();
     return ExpressionResult::value(method->signature.return_type,

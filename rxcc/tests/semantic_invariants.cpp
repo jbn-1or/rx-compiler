@@ -6,6 +6,7 @@
 #include "sema/body/context.hpp"
 #include "sema/sema.hpp"
 #include <array>
+#include <initializer_list>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -57,6 +58,27 @@ rx::SemanticResult analyze_fixture(const rx::Crate &crate) {
 const rx::Expression &statement_expression(const rx::BlockExpression &block,
                                           std::size_t index) {
     return *checked_ast<rx::ExpressionStatement>(block.statements.at(index)).expression;
+}
+
+// 核对固定使用位置保存的转换路径，同时确认原表达式仍保留转换前的类型。
+void check_coercion_plan(const rx::SemanticResult &result, rx::UseSite site,
+                         const rx::Expression &expression,
+                         const rx::SemanticType &source,
+                         const rx::SemanticType &target,
+                         std::initializer_list<rx::CoercionStepKind> steps,
+                         bool reborrow = false) {
+    const auto &plan = result.coercion_plans.at(site);
+    check(plan.source_type.same_type(source) && plan.target_type.same_type(target) &&
+              result.expressions.at(&expression).type.same_type(source),
+          "coercion plans must retain source/target types without rewriting expressions");
+    check(plan.target_is_mut ==
+              (target.kind == rx::SemanticType::Kind::Reference && target.is_mut) &&
+              plan.reborrow == reborrow && plan.steps.size() == steps.size(),
+          "coercion plans must retain final borrow mode and exact pointer-read count");
+    std::size_t index = 0;
+    for (const auto step : steps)
+        check(plan.steps.at(index++).kind == step,
+              "coercion pointer reads must follow the source's outer-to-inner order");
 }
 
 void check_binding_and_call_queries() {
@@ -397,30 +419,17 @@ void check_expression_queries() {
               result.locals.at(result.let_bindings.at(&shared).index).type.same_type(
                   rx::SemanticType::reference(false, i32)) && !original.place.is_place,
           "fixed-target reference coercion must not overwrite the original &mut fact");
-    // 当前阶段不推导具体调整；在测试中写入记录，验证与原始表达式结果分开。
-    check(result.use_adjustments.empty(), "semantic analysis must not invent adjustments");
+    // 旧的预留表仍不填写；具体转换改由 coercion_plans 保存。
+    check(result.use_adjustments.empty(), "legacy adjustment placeholders must remain empty");
     const rx::UseSite initializer{&shared, rx::UseKind::Initializer, 0};
-    const rx::UseSite second{&shared, rx::UseKind::Argument, 0};
-    const rx::UseSite third{&shared, rx::UseKind::Argument, 1};
-    const rx::UseSite other_parent{&borrow, rx::UseKind::Initializer, 0};
-    result.use_adjustments.emplace(initializer,
-                                   rx::UseAdjustment{rx::SemanticType::reference(false, i32)});
-    result.use_adjustments.emplace(second, rx::UseAdjustment{i32});
-    result.use_adjustments.emplace(third, rx::UseAdjustment{rx::SemanticType::bool_()});
-    result.use_adjustments.emplace(other_parent, rx::UseAdjustment{i32});
-    check(result.use_adjustments.size() == 4 &&
-              result.use_adjustments.at(initializer).target_type.same_type(
-                  rx::SemanticType::reference(false, i32)) &&
-              result.use_adjustments.at(second).target_type.same_type(i32) &&
-              result.use_adjustments.at(third).target_type.same_type(rx::SemanticType::bool_()) &&
-              result.use_adjustments.at(other_parent).target_type.same_type(i32) &&
-              result.expressions.at(&borrow).type.same_type(
-                  rx::SemanticType::reference(true, i32)),
-          "use positions must stay distinct and not overwrite expression facts");
+    check_coercion_plan(result, initializer, borrow,
+                        rx::SemanticType::reference(true, i32),
+                        rx::SemanticType::reference(false, i32), {});
     result.expressions.at(&borrow) = rx::ExpressionResult::value(i32);
-    check(result.use_adjustments.at(initializer).target_type.same_type(
-              rx::SemanticType::reference(false, i32)),
-          "changing expression facts must not overwrite use adjustments");
+    check(result.coercion_plans.at(initializer).source_type.same_type(original.type) &&
+              result.coercion_plans.at(initializer).target_type.same_type(
+                  rx::SemanticType::reference(false, i32)),
+          "changing expression facts must not overwrite retained coercion plans");
     result.expressions.at(&borrow) = original;
     const auto &x = result.expressions.at(borrow.operand.get());
     const auto &read = checked_ast<rx::LetStatement>(body.statements.at(1));
@@ -501,6 +510,256 @@ void check_expression_queries() {
               result.locals.size() == 8 && result.let_bindings.size() == 6 &&
               result.function_locals.size() == 4 && result.expressions.size() == 31,
           "all function bodies need facts without duplicate checks or local allocations");
+}
+
+// 检查 P5.4 标量引用运算的结果，并确认操作数保留原类型、不伪造固定目标转换。
+void check_scalar_reference_operator_queries() {
+    const auto crate = parse_crate(R"(
+        fn facts(value: u32, shared: &u32, count: &isize, flag: &bool,
+                 deep: &&u32, writable: &mut u32, outer: &mut &u32) {
+            value + shared;
+            shared - value;
+            shared * shared;
+            value / shared;
+            shared % value;
+            shared << count;
+            shared >> count;
+            value < value;
+            deep <= deep;
+            shared < writable;
+            deep >= outer;
+            -count;
+            !flag;
+        }
+        fn main() {}
+    )");
+    const auto result = analyze_fixture(*crate);
+    using T = rx::SemanticType;
+    const auto u32 = T::int_(T::IntKind::U32);
+    const auto isize = T::int_(T::IntKind::Isize);
+    const auto boolean = T::bool_();
+    const auto shared = T::reference(false, u32);
+    const auto count = T::reference(false, isize);
+    const auto deep = T::reference(false, shared);
+    const auto &function = checked_ast<rx::Function>(crate->items.at(0));
+    // 每行依次列出左操作数、右操作数和结果类型；排序只放宽最外层的右侧可变性。
+    const std::array<std::array<T, 3>, 11> binary_types{{
+        {u32, shared, u32}, {shared, u32, u32}, {shared, shared, u32},
+        {u32, shared, u32}, {shared, u32, u32},
+        {shared, count, u32}, {shared, count, u32},
+        {u32, u32, boolean}, {deep, deep, boolean},
+        {shared, T::reference(true, u32), boolean},
+        {deep, T::reference(true, shared), boolean},
+    }};
+    for (std::size_t i = 0; i < binary_types.size(); ++i) {
+        const auto &expression = checked_ast<rx::BinaryExpression>(
+            &statement_expression(*function.body, i));
+        const auto &types = binary_types.at(i);
+        const auto &fact = result.expressions.at(&expression);
+        check(result.expressions.at(expression.left.get()).type.same_type(types.at(0)) &&
+                  result.expressions.at(expression.right.get()).type.same_type(types.at(1)) &&
+                  fact.type.same_type(types.at(2)) && !fact.place.is_place && !fact.diverges,
+              "reference operators must retain operand types and produce scalar values");
+    }
+    const std::array unary_types{std::pair{count, isize},
+                                 std::pair{T::reference(false, boolean), boolean}};
+    for (std::size_t i = 0; i < unary_types.size(); ++i) {
+        const auto &expression = checked_ast<rx::UnaryExpression>(
+            &statement_expression(*function.body, binary_types.size() + i));
+        const auto &[operand, type] = unary_types.at(i);
+        const auto &fact = result.expressions.at(&expression);
+        check(result.expressions.at(expression.operand.get()).type.same_type(operand) &&
+                  fact.type.same_type(type) && !fact.place.is_place && !fact.diverges,
+              "unary reference operators must retain operands and produce signed/bool values");
+    }
+    const auto &main = checked_ast<rx::Function>(crate->items.at(1));
+    // 函数体自身可以有固定目标记录，但运算符及其操作数不能冒充这种使用位置。
+    for (const auto &[site, plan] : result.coercion_plans)
+        check(site.kind == rx::UseKind::FunctionBody && site.index == 0 &&
+                  (site.parent == &function || site.parent == &main),
+              "operator-specific reference matching must not invent coercion plans");
+    check(result.use_adjustments.empty(),
+          "reference operators must not invent legacy use adjustments");
+}
+
+// 检查 let、调用和返回的固定目标，区分引用链读取、同类型重借用和无标注移动。
+void check_reference_coercion_queries() {
+    const auto crate = parse_crate(R"(
+        fn shared(value: &&&i32) -> &i32 { { value } }
+        fn returned(value: &&i32) -> &i32 { return { value }; }
+        fn reborrow(value: &mut i32) -> &mut i32 { value }
+        fn accept(first: &i32, second: &&i32, third: &mut i32) {}
+        fn facts(value: &&&i32, writable: &mut i32) {
+            let nested: &i32 = { { value } };
+            let shorter: &&i32 = value;
+            let readonly: &i32 = writable;
+            {
+                let again: &mut i32 = writable;
+                accept(value, { value }, again);
+            };
+            accept(value, value, writable);
+            let moved = writable;
+        }
+        fn main() {}
+    )");
+    const auto result = analyze_fixture(*crate);
+    using T = rx::SemanticType;
+    using Step = rx::CoercionStepKind;
+    const auto i32 = T::int_(T::IntKind::I32);
+    const auto shared = T::reference(false, i32);
+    const auto twice = T::reference(false, shared);
+    const auto thrice = T::reference(false, twice);
+    const auto writable = T::reference(true, i32);
+    const auto &tail = checked_ast<rx::Function>(crate->items.at(0));
+    check_coercion_plan(result, {&tail, rx::UseKind::FunctionBody, 0},
+                        *tail.body, thrice, shared,
+                        {Step::Reference, Step::Reference});
+    const auto &returned = checked_ast<rx::Function>(crate->items.at(1));
+    const auto &jump = checked_ast<rx::ReturnExpression>(
+        &statement_expression(*returned.body, 0));
+    check_coercion_plan(result, {&jump, rx::UseKind::ReturnValue, 0},
+                        *jump.value, twice, shared, {Step::Reference});
+    check_coercion_plan(result, {&returned, rx::UseKind::FunctionBody, 0},
+                        *returned.body, T::never(), shared, {});
+    const auto &reborrow = checked_ast<rx::Function>(crate->items.at(2));
+    check_coercion_plan(result, {&reborrow, rx::UseKind::FunctionBody, 0},
+                        *reborrow.body, writable, writable, {}, true);
+    const auto &function = checked_ast<rx::Function>(crate->items.at(4));
+    const auto &body = *function.body;
+    const auto &nested = checked_ast<rx::LetStatement>(body.statements.at(0));
+    const auto &shorter = checked_ast<rx::LetStatement>(body.statements.at(1));
+    const auto &readonly = checked_ast<rx::LetStatement>(body.statements.at(2));
+    check_coercion_plan(result, {&nested, rx::UseKind::Initializer, 0},
+                        *nested.initializer, thrice, shared,
+                        {Step::Reference, Step::Reference});
+    check_coercion_plan(result, {&shorter, rx::UseKind::Initializer, 0},
+                        *shorter.initializer, thrice, twice, {Step::Reference});
+    check_coercion_plan(result, {&readonly, rx::UseKind::Initializer, 0},
+                        *readonly.initializer, writable, shared, {});
+    // 固定目标穿过多层块，但块和最终路径的原始类型都不能提前变成 &i32。
+    for (const auto *expression : std::array<const rx::Expression *, 3>{
+             tail.body.get(), nested.initializer.get(), jump.value.get()}) {
+        const auto &source = expression == jump.value.get() ? twice : thrice;
+        for (;;) {
+            check(result.expressions.at(expression).type.same_type(source),
+                  "nested blocks and their tails must retain unadjusted reference types");
+            const auto *block = dynamic_cast<const rx::BlockExpression *>(expression);
+            if (!block)
+                break;
+            expression = block->tail.get();
+        }
+    }
+    const auto &scope = checked_ast<rx::BlockExpression>(&statement_expression(body, 3));
+    const auto &again = checked_ast<rx::LetStatement>(scope.statements.at(0));
+    check_coercion_plan(result, {&again, rx::UseKind::Initializer, 0},
+                        *again.initializer, writable, writable, {}, true);
+    const auto &inner_call = checked_ast<rx::CallExpression>(&statement_expression(scope, 1));
+    const auto &outer_call = checked_ast<rx::CallExpression>(&statement_expression(body, 4));
+    for (const auto *call : {&inner_call, &outer_call}) {
+        check_coercion_plan(result, {call, rx::UseKind::Argument, 0},
+                            *call->arguments.at(0), thrice, shared,
+                            {Step::Reference, Step::Reference});
+        check_coercion_plan(result, {call, rx::UseKind::Argument, 1},
+                            *call->arguments.at(1), thrice, twice, {Step::Reference});
+        check_coercion_plan(result, {call, rx::UseKind::Argument, 2},
+                            *call->arguments.at(2), writable, writable, {}, true);
+    }
+    const auto &argument_block = checked_ast<rx::BlockExpression>(inner_call.arguments.at(1));
+    check(result.expressions.at(argument_block.tail.get()).type.same_type(thrice),
+          "argument block tails must not be rewritten to the parameter type");
+    const auto &moved = checked_ast<rx::LetStatement>(body.statements.at(5));
+    check(!result.coercion_plans.contains({&moved, rx::UseKind::Initializer, 0}) &&
+              result.expressions.at(moved.initializer.get()).type.same_type(writable) &&
+              result.locals.at(result.let_bindings.at(&moved).index).type.same_type(writable),
+          "an unannotated let must move &mut without acquiring a reborrow plan");
+    check(!result.coercion_plans.contains({&again, rx::UseKind::Argument, 0}) &&
+              !result.coercion_plans.contains({&outer_call, rx::UseKind::Argument, 3}) &&
+              result.use_adjustments.empty(),
+          "coercion keys must distinguish parent, use kind and argument index");
+}
+
+// 只检查语义记录：赋值、字段、方法实参和 Box 路径的执行分别留给后续 lowering。
+void check_aggregate_coercion_queries() {
+    const auto crate = parse_crate(R"(
+        struct Holder { first: &i32, second: &&i32 }
+        impl Holder {
+            fn inspect(&self, value: &i32, other: &&i32) {}
+            fn inspect_mut(&mut self, value: &mut i32) {}
+        }
+        fn facts(value: &&&i32, writable: &mut i32,
+                 boxes: &Box<Box<i32>>, mixed: &Box<&i32>,
+                 reversed: &&Box<i32>, mutable_boxes: &mut Box<i32>) {
+            let mut assigned: &i32 = value;
+            assigned = value;
+            let mut holder = Holder { second: value, first: value };
+            holder.inspect(value, value);
+            holder.inspect_mut(writable);
+            Holder::inspect(&holder, value, value);
+            let unboxed: &i32 = boxes;
+            let mixed_unboxed: &i32 = mixed;
+            let reversed_unboxed: &i32 = reversed;
+            let mutable_unboxed: &mut i32 = mutable_boxes;
+        }
+        fn main() {}
+    )");
+    const auto result = analyze_fixture(*crate);
+    using T = rx::SemanticType;
+    using Step = rx::CoercionStepKind;
+    const auto i32 = T::int_(T::IntKind::I32);
+    const auto shared = T::reference(false, i32);
+    const auto twice = T::reference(false, shared);
+    const auto thrice = T::reference(false, twice);
+    const auto writable = T::reference(true, i32);
+    const auto &function = checked_ast<rx::Function>(crate->items.at(2));
+    const auto &body = *function.body;
+    const auto &assignment = checked_ast<rx::AssignmentExpression>(
+        &statement_expression(body, 1));
+    check_coercion_plan(result, {&assignment, rx::UseKind::AssignmentValue, 0},
+                        *assignment.right, thrice, shared,
+                        {Step::Reference, Step::Reference});
+    const auto &holder = checked_ast<rx::LetStatement>(body.statements.at(2));
+    const auto &constructed = checked_ast<rx::StructExpression>(holder.initializer);
+    check_coercion_plan(result, {&constructed, rx::UseKind::Field, 0},
+                        *constructed.fields.at(0).value, thrice, twice, {Step::Reference});
+    check_coercion_plan(result, {&constructed, rx::UseKind::Field, 1},
+                        *constructed.fields.at(1).value, thrice, shared,
+                        {Step::Reference, Step::Reference});
+    const auto &method = checked_ast<rx::MethodCallExpression>(&statement_expression(body, 3));
+    check_coercion_plan(result, {&method, rx::UseKind::Argument, 0},
+                        *method.arguments.at(0), thrice, shared,
+                        {Step::Reference, Step::Reference});
+    check_coercion_plan(result, {&method, rx::UseKind::Argument, 1},
+                        *method.arguments.at(1), thrice, twice, {Step::Reference});
+    const auto &mutable_method = checked_ast<rx::MethodCallExpression>(
+        &statement_expression(body, 4));
+    check_coercion_plan(result, {&mutable_method, rx::UseKind::Argument, 0},
+                        *mutable_method.arguments.at(0), writable, writable, {}, true);
+    const auto &qualified = checked_ast<rx::CallExpression>(&statement_expression(body, 5));
+    const auto receiver = T::reference(false, T::struct_(result.structs.at(0).get()));
+    check_coercion_plan(result, {&qualified, rx::UseKind::Argument, 0},
+                        *qualified.arguments.at(0), receiver, receiver, {});
+    check_coercion_plan(result, {&qualified, rx::UseKind::Argument, 1},
+                        *qualified.arguments.at(1), thrice, shared,
+                        {Step::Reference, Step::Reference});
+    check_coercion_plan(result, {&qualified, rx::UseKind::Argument, 2},
+                        *qualified.arguments.at(2), thrice, twice, {Step::Reference});
+    const auto &unboxed = checked_ast<rx::LetStatement>(body.statements.at(6));
+    check_coercion_plan(result, {&unboxed, rx::UseKind::Initializer, 0},
+                        *unboxed.initializer, T::reference(false, T::boxed(T::boxed(i32))),
+                        shared, {Step::Box, Step::Box});
+    const auto &mixed = checked_ast<rx::LetStatement>(body.statements.at(7));
+    check_coercion_plan(result, {&mixed, rx::UseKind::Initializer, 0},
+                        *mixed.initializer, T::reference(false, T::boxed(shared)),
+                        shared, {Step::Box, Step::Reference});
+    const auto &reversed = checked_ast<rx::LetStatement>(body.statements.at(8));
+    check_coercion_plan(result, {&reversed, rx::UseKind::Initializer, 0},
+                        *reversed.initializer,
+                        T::reference(false, T::reference(false, T::boxed(i32))),
+                        shared, {Step::Reference, Step::Box});
+    const auto &mutable_box = checked_ast<rx::LetStatement>(body.statements.at(9));
+    check_coercion_plan(result, {&mutable_box, rx::UseKind::Initializer, 0},
+                        *mutable_box.initializer, T::reference(true, T::boxed(i32)),
+                        writable, {Step::Box});
 }
 
 void check_semantic_result_ownership() {
@@ -586,7 +845,25 @@ void check_failed_semantic_result() {
              "struct S {}", // 缺少 main。
              "const BAD: i32 = true; fn main() {}",
              "struct S { value: Missing } fn main() {}",
-             "fn main() { let value: bool = 1; }"}) {
+             "fn main() { let value: bool = 1; }",
+             // 共享引用不能提升为可变引用，路径内部的共享引用也不能跨过。
+             "fn bad(x: &i32) { let r: &mut i32 = x; } fn main() {}",
+             "fn bad(x: &mut &i32) { let r: &mut i32 = x; } fn main() {}",
+             // 块不能抹掉共享访问权限，转换也不能改变内部引用的可变性。
+             "fn bad(x: &&mut i32) { let r: &mut i32 = { *x }; } fn main() {}",
+             "fn bad(x: &mut &mut i32) { let r: &mut &i32 = x; } fn main() {}",
+             // 算术只读取一层共享引用，不能接受深层引用或可变引用。
+             "fn bad(x: &&i32, y: &i32) { x + y; } fn main() {}",
+             "fn bad(x: &mut i32, y: i32) { x + y; } fn main() {}",
+             // 排序不能反向放宽、改写内部可变性、混比值和引用，或穿过 Box。
+             "fn bad(x: &mut i32, y: &i32) { x < y; } fn main() {}",
+             "fn bad(x: &&i32, y: &&mut i32) { x < y; } fn main() {}",
+             "fn bad(x: i32, y: &i32) { x < y; } fn main() {}",
+             "fn bad(x: Box<i32>, y: Box<i32>) { x < y; } fn main() {}",
+             "fn bad(x: &Box<i32>, y: &Box<i32>) { x < y; } fn main() {}",
+             // 两种短路运算都要求直接 bool，左右两侧都不能使用引用变体。
+             "fn bad(x: &bool) { x && true; } fn main() {}",
+             "fn bad(x: &bool) { false || x; } fn main() {}"}) {
         const auto crate = parse_crate(source);
         rx::Diagnostics diagnostics;
         const auto result = rx::SemanticAnalyzer(diagnostics).analyze(*crate);
@@ -793,6 +1070,9 @@ int main() {
     check_symbol_and_constant_queries();
     check_integer_queries();
     check_expression_queries();
+    check_scalar_reference_operator_queries();
+    check_reference_coercion_queries();
+    check_aggregate_coercion_queries();
     check_semantic_result_ownership();
     check_failed_semantic_result();
     check_block_tail_reborrow();

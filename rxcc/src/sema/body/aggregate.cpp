@@ -67,7 +67,8 @@ ExpressionResult BodyChecker::check_struct_expression(
     bool ok = true;
     bool diverges = false;
     std::unordered_set<std::string> initialized;
-    for (const StructExpressionField &field : expression.fields) {
+    for (std::size_t index = 0; index < expression.fields.size(); ++index) {
+        const StructExpressionField &field = expression.fields[index];
         const auto type = structure->field_types.find(field.name);
         // 写了一个结构体里没有的字段名。
         if (type == structure->field_types.end()) {
@@ -98,7 +99,9 @@ ExpressionResult BodyChecker::check_struct_expression(
         const ExpressionResult value =
             check_expression(*field.value, &type->second);
         diverges = diverges || value.diverges;
-        if (!require_coerce(value, type->second, field.value->span))
+        // 构造字段是固定使用位置；P7 按同一序号读取转换路径。
+        if (!require_coerce_at(UseSite{&expression, UseKind::Field, index},
+                               value, type->second, field.value->span))
             ok = false;
     }
 

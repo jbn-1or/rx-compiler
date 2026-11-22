@@ -1,12 +1,14 @@
-// 声明函数体 lowering 共用的标量结果、局部存储映射和生成上下文。
-// crate 级的函数登记、签名和机器入口仍由 generator.cpp 负责。
+// 声明函数体 lowering 共用的结果、place 和生成上下文；成员实现按职责分在 lowering/。
+// lowering.cpp 保留分派和函数体入口，crate 级编排仍由 generator.cpp 负责。
 #pragma once
 
+#include "ir/lowering/value.hpp"
 #include "ir/model.hpp"
 #include "sema/result.hpp"
 #include <map>
 #include <optional>
 #include <ostream>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -19,12 +21,6 @@ class IRBuilder;
 class Module;
 } // namespace ir
 
-// 判断源类型是否是当前 lowering 支持的标量（整数或 bool）。
-bool is_scalar(const SemanticType &type);
-
-// 计算标量值使用的 IR 类型：bool 为 i1，整数为 i32。
-ir::Type lower_scalar_type(const SemanticType &type);
-
 // 保存每个局部绑定在入口分配中的地址；名称解析仍来自语义结果。
 using LocalPlaces = std::map<LocalId, ir::Operand>;
 
@@ -35,8 +31,19 @@ struct NoContinuation {};
 // 一条表达式或语句的生成结果；生成失败仍用外层 std::nullopt 表示。
 using EmitResult = std::variant<ir::Operand, UnitResult, NoContinuation>;
 
+// 保存一次 place 求值得到的地址和该位置中保存的源类型。
+// 引用变量自身的 slot 保存指针；读取 slot 与读取目标内容是两次不同的 load。
+struct Place {
+    ir::Operand address; // 位置地址，IR 类型必须为 ptr。
+    const SemanticType *type; // 位置中保存的源类型，决定后续如何读取。
+};
+// place 求值结果；路径已经结束时不再产生地址。
+using PlaceResult = std::variant<Place, NoContinuation>;
+
 // 判断一次生成结果是否已经结束当前路径。
 bool path_ended(const EmitResult &result);
+// 判断一次 place 生成是否已经结束当前路径。
+bool path_ended(const PlaceResult &result);
 
 // 保存一次函数体生成过程中不变的环境；局部变量表按函数和块作用域单独传递。
 class GenerationContext {
@@ -52,22 +59,56 @@ public:
     bool emit_function_body(const FunctionSymbol &function, ir::IRFunctionId id);
 
 private:
+    // lowering.cpp：表达式和语句分派。
     // 生成一条 let 或表达式语句。
     std::optional<EmitResult> emit_statement(const Statement &statement,
                                              LocalPlaces &locals);
-    // 计算标量值表达式（整数或 bool）。
+    // 计算需要数据值的表达式，包括整数、bool 和引用。
     std::optional<EmitResult> emit_value(const Expression &expression,
                                          LocalPlaces &locals);
     // 只生成能正常完成并产生 unit 的表达式。
     std::optional<EmitResult> emit_unit_expression(const Expression &expression,
-                                                   LocalPlaces &locals);
-    // 计算整数、bool 字面量以及局部变量或常量路径。
-    ir::Operand emit_scalar(const Expression &expression,
-                            const LocalPlaces &locals);
+                                                    LocalPlaces &locals);
+
+    // lowering/value.cpp：基础值、存储表示和固定临时 slot。
+    // 选择局部 slot 的存储类型，供 let 与函数形参共同使用。
+    static ir::Type slot_type(const SemanticType &type);
+    // bool 按字节对齐，整数和引用按 RV32 的四字节对齐。
+    static uint32_t slot_alignment(const SemanticType &type);
+    // 计算字面量、路径以及引用本地读取；引用路径只加载保存的指针。
+    ir::Operand emit_leaf(const Expression &expression,
+                           const LocalPlaces &locals);
+    // 从存储单元读回普通值；bool 读取 i8 后再截断成 i1，引用读取 ptr，整数读取 i32。
+    ir::Operand load_value(const ir::Operand &address,
+                           const SemanticType &type);
+    // 把普通值写入它的存储单元；bool 先扩展成 i8，引用写 ptr，整数写 i32。
+    void store_value(const ir::Operand &value, const ir::Operand &address);
+    // 把已求得的值写入以 AST 静态位置为键的固定临时 slot，并返回地址。
+    // 同一位置重复执行时复用入口分配，初始化 store 留在当前求值位置。
+    ir::Operand materialize_once(const Expression &position, ir::Operand value);
+
+    // lowering/reference.cpp：地址投影、借用、解引用和使用位置转换。
+    // 计算位置表达式的地址；引用本身不在这里读取目标内容。
+    std::optional<PlaceResult> emit_place(const Expression &expression,
+                                          LocalPlaces &locals);
+    // 生成 & / &mut：已有 place 直接取地址，值表达式只物化一次。
+    std::optional<EmitResult> emit_borrow(const UnaryExpression &expression,
+                                          LocalPlaces &locals);
+    // 生成一次内置解引用：先得到地址，再按目标源类型读取值。
+    std::optional<EmitResult>
+    emit_dereference(const UnaryExpression &expression, LocalPlaces &locals);
+    // 按 sema 已选定的路径执行引用调整；每步只读取一层指针。
+    std::optional<ir::Operand> emit_coercion(ir::Operand value,
+                                             const CoercionPlan &plan);
+    // 读取某个固定使用位置的调整路径，并把准备好的值调整到目标类型。
+    std::optional<ir::Operand> emit_coercion_at(const UseSite &site,
+                                                 ir::Operand value);
+
+    // lowering/operators.cpp：操作数读取时机和标量运算。
     // 先求值左操作数，再求值右操作数，最后按源类型选择二元指令。
     std::optional<EmitResult> emit_binary(const BinaryExpression &expression,
                                           LocalPlaces &locals);
-    // 生成一元取负或按位取反；借用和解引用留到后续阶段。
+    // 生成一元取负或按位取反；共享引用操作数在求值后读取目标。
     std::optional<EmitResult> emit_unary(const UnaryExpression &expression,
                                          LocalPlaces &locals);
     // 生成 as 转换：整数换源类型，bool 到整数先零扩展。
@@ -78,26 +119,34 @@ private:
     emit_binary_operation(BinaryOperator operation,
                           const SemanticType &operand_type,
                           ir::Operand left, ir::Operand right);
-    // 从存储单元读回标量；bool 读取 i8 后再截断成 i1。
-    ir::Operand load_scalar(const ir::Operand &address,
-                            const SemanticType &type);
-    // 把标量写入它的存储单元；bool 先扩展成 i8，整数直接写 i32。
-    void store_scalar(const ir::Operand &value, const ir::Operand &address);
-    // 根据普通调用目标生成函数或 builtin 调用。
-    std::optional<EmitResult> emit_call(const CallExpression &call,
-                                        LocalPlaces &locals);
+    // 完成标量操作数：直接标量已可用；一层共享引用此时才读取目标。
+    ir::Operand finish_scalar_operand(ir::Operand value,
+                                       const SemanticType &type);
+
+    // lowering/statements.cpp：绑定、写入和返回。
     // 先生成初始化器，再为 LocalId 分配并登记存储位置。
     std::optional<EmitResult> emit_let(const LetStatement &statement,
                                        LocalPlaces &locals);
     // 生成 return：先求值操作数，再发 ret 并结束当前路径。
     std::optional<EmitResult> emit_return(const ReturnExpression &expression,
                                           LocalPlaces &locals);
+    // 生成普通或复合赋值：RHS 优先，目标地址只求一次，最后写入。
+    std::optional<EmitResult>
+    emit_assignment(const AssignmentExpression &expression,
+                     LocalPlaces &locals);
+
+    // lowering/call.cpp：普通调用与 builtin 调用。
+    // 根据语义目标准备实参并生成调用。
+    std::optional<EmitResult> emit_call(const CallExpression &call,
+                                        LocalPlaces &locals);
 
     const SemanticResult &semantics; // 语义分析结果，提供表达式、路径和调用的记录。
     const std::vector<ir::IRFunctionId> &functions; // 源 FunctionId 下标到已登记 IRFunctionId 的映射。
     ir::Module &module; // 正在构建的 IR 模块。
     ir::IRBuilder &builder; // 向当前基本块添加指令的构建器。
     std::ostream &diagnostics; // 收集 IR 生成期间错误信息的输出流。
+    // 当前函数内按 AST 静态位置缓存的临时 slot；切换函数时清空，避免跨函数共用。
+    std::unordered_map<const Expression *, ir::Operand> temporary_slots;
 };
 
 } // namespace rx

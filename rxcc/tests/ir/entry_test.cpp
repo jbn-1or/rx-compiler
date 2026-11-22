@@ -1,4 +1,4 @@
-// P2/P3：真实源码的入口、整数打印、局部存储与失败边界。
+// P2–P5.4：真实源码的入口、标量运算、引用转换、赋值顺序与失败边界。
 #include "RxLexer.h"
 #include "RxParser.h"
 #include "ast_builder.hpp"
@@ -94,15 +94,6 @@ void check_semantic_rejected(const std::string &source) {
     rx::Diagnostics diagnostics;
     const auto result = rx::SemanticAnalyzer(diagnostics).analyze(*crate);
     check(!result || !diagnostics.ok(), "非法源码必须由语义分析拒绝");
-}
-
-void check_lowering_rejected(const std::string &source) {
-    const auto crate = parse_crate(source);
-    const auto sema = analyze(*crate);
-    std::ostringstream diagnostics;
-    check(!rx::generate_ir(sema, diagnostics) &&
-              diagnostics.str().find("尚未支持") != std::string::npos,
-          "有效源码的缺失能力必须报告 lowering 尚未支持");
 }
 
 void check_function_names() {
@@ -258,7 +249,6 @@ void check_integer_calls_and_returns() {
     )");
     const auto sema = analyze(*crate);
     check_semantic_rejected("fn main() { println_i32(true); }");
-    check_lowering_rejected("fn main() { let mut x = 1; x = 2; }");
     const auto artifact = generate(sema);
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
@@ -709,6 +699,756 @@ void check_shifts_and_casts() {
     }
 }
 
+// 检查借用保留原位置，多层引用逐层读取，引用参数和返回值只传递地址。
+void check_reference_places() {
+    const auto crate = parse_crate(R"(
+        fn identity(p: &i32) -> &i32 { p }
+        fn explicit(p: &mut i32) -> &mut i32 { return p; }
+        fn unused(value: &i32) {}
+        fn main() {
+            let x = 7;
+            let r = &x;
+            let rr = &r;
+            println_i32(**rr);
+            let again = &*r;
+            println_i32(*again);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics),
+          "引用存取模块必须通过结构检查");
+    const auto &module = artifact.module();
+    for (const auto *name : {"__rx_fn_0", "__rx_fn_1"}) {
+        const auto &function = *module.find_function(name);
+        check(function.signature == Signature{Type::Ptr, {Type::Ptr}} &&
+                  function.entry_allocas.size() == 1 &&
+                  std::get<Alloca>(function.entry_allocas[0].operation).storage_type == Type::Ptr,
+              "共享和可变引用的参数 slot、参数值及返回值都必须使用 ptr");
+        const auto &instructions = function.blocks[0].instructions;
+        check(instructions.size() == 2, "引用返回不得额外读取目标内容");
+        const auto &store = std::get<Store>(instructions[0].operation);
+        const auto &load = std::get<Load>(instructions[1].operation);
+        check(store.storage_type == Type::Ptr && store.value == function.argument(0) &&
+                  load.storage_type == Type::Ptr && load.address == store.address &&
+                  function.blocks[0].terminator->value ==
+                      Operand::local(Type::Ptr, *instructions[1].result),
+              "尾返回和显式 return 都须返回参数保存的地址，而不是参数 slot 的地址");
+    }
+    const auto &main = *module.find_function("__rx_fn_3");
+    check(main.entry_allocas.size() == 4,
+          "借用已有位置不得额外分配内容副本，&*r 也应复用原位置");
+    const auto &instructions = main.blocks[0].instructions;
+    const auto x_address = Operand::local(Type::Ptr, *main.entry_allocas[0].result);
+    const auto r_address = Operand::local(Type::Ptr, *main.entry_allocas[1].result);
+    const auto rr_address = Operand::local(Type::Ptr, *main.entry_allocas[2].result);
+    const auto &borrow_x = std::get<Store>(instructions[1].operation);
+    const auto &borrow_r = std::get<Store>(instructions[2].operation);
+    check(borrow_x.value == x_address && borrow_x.address == r_address &&
+              borrow_r.value == r_address && borrow_r.address == rr_address,
+          "&x 保存 x 的原地址，&r 保存引用变量自身 slot 的地址");
+    auto address = rr_address;
+    for (std::size_t index = 3; index < 6; ++index) {
+        const auto &load = std::get<Load>(instructions[index].operation);
+        const auto expected_type = index == 5 ? Type::I32 : Type::Ptr;
+        check(load.address == address && load.storage_type == expected_type &&
+                  load.alignment == 4,
+              "**rr 必须先逐层 load ptr，最后才能 load i32");
+        address = Operand::local(expected_type, *instructions[index].result);
+    }
+    check(std::get<Call>(instructions[6].operation).arguments ==
+              std::vector<Operand>{address}, "打印应使用最终读取的整数");
+    const auto &reborrow = std::get<Load>(instructions[7].operation);
+    check(reborrow.storage_type == Type::Ptr && reborrow.address == r_address &&
+              std::get<Store>(instructions[8].operation).value ==
+                  Operand::local(Type::Ptr, *instructions[7].result),
+          "&*r 只读取 r 保存的指针，不得读取或复制整数目标");
+}
+
+// 检查临时 slot 全部位于入口，调用只生成一次，初始化仍跟在对应调用之后。
+void check_reference_temporaries() {
+    const auto crate = parse_crate(R"(
+        fn first() -> i32 { let p = &3; *p }
+        fn second() -> i32 { let p = &4; *p }
+        fn make(value: i32) -> i32 { println_i32(value); value }
+        fn main() {
+            println_i32(0);
+            let a = &mut make(3);
+            let b = &make(4);
+            println_i32(*a);
+            println_i32(*b);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics),
+          "不同函数和不同静态位置的临时物化必须通过结构检查");
+    const auto &module = artifact.module();
+    for (const auto *name : {"__rx_fn_0", "__rx_fn_1"}) {
+        const auto &function = *module.find_function(name);
+        check(function.entry_allocas.size() == 2,
+              "不同函数必须分别持有自己的临时 slot 和引用绑定 slot");
+    }
+    const auto &main = *module.find_function("__rx_fn_3");
+    check(main.entry_allocas.size() == 4,
+          "两个借用位置各需一个临时 slot 和一个引用绑定 slot");
+    const auto &instructions = main.blocks[0].instructions;
+    std::vector<Operand> temporary_addresses;
+    for (std::size_t index = 0; index < instructions.size(); ++index) {
+        check(!std::holds_alternative<Alloca>(instructions[index].operation),
+              "临时 alloca 不得混入求值正文");
+        const auto *call = std::get_if<Call>(&instructions[index].operation);
+        if (!call || call->function != module.find_function("__rx_fn_2")->id)
+            continue;
+        check(index + 2 < instructions.size(), "临时调用后必须初始化并保存借用地址");
+        const auto &initialize = std::get<Store>(instructions[index + 1].operation);
+        const auto &borrow = std::get<Store>(instructions[index + 2].operation);
+        check(initialize.storage_type == Type::I32 && initialize.value ==
+                  Operand::local(Type::I32, *instructions[index].result) &&
+                  borrow.storage_type == Type::Ptr && borrow.value == initialize.address,
+              "先调用一次，再把结果写入临时 slot，最后保存该 slot 的地址");
+        temporary_addresses.push_back(initialize.address);
+    }
+    check(temporary_addresses.size() == 2 &&
+              temporary_addresses[0] != temporary_addresses[1],
+          "不同借用位置必须各调用一次，并使用不同临时存储");
+    const auto ir = text.str();
+    const auto body = ir.find("define internal void @__rx_fn_3()");
+    const auto first_allocation = ir.find("alloca", body);
+    const auto first_effect = ir.find("call void @println_i32(i32 0)", body);
+    check(body != std::string::npos && first_allocation != std::string::npos &&
+              first_effect != std::string::npos && first_allocation < first_effect &&
+              ir.find("alloca", first_effect) == std::string::npos,
+          "即使临时借用出现在副作用之后，打印出的 alloca 仍全部位于入口");
+}
+
+// 检查借用或地址求值中的 return 会跳过物化、目标读取和后续副作用。
+void check_reference_early_return() {
+    for (const auto &source : {
+             "fn main() { let p = &{ return; 3 }; println_i32(*p); }",
+             "fn main() { let p = &mut { return; 3 }; println_i32(*p); }",
+             "fn main() { println_i32(*{ return; &3 }); }",
+             "fn main() { let p = &*{ return; &3 }; println_i32(*p); }"}) {
+        const auto crate = parse_crate(source);
+        const auto sema = analyze(*crate);
+        const auto artifact = generate(sema);
+        const auto &main = *artifact.module().find_function("__rx_fn_0");
+        check(main.entry_allocas.empty() && main.blocks[0].instructions.empty() &&
+                  main.blocks[0].terminator && !main.blocks[0].terminator->value,
+              "引用求值提前 return 后不得分配 slot、读取目标或调用打印");
+    }
+}
+
+// 检查引用转换只读取所需中间指针；嵌套块和显式 return 不得重复调整。
+void check_reference_coercions() {
+    const auto crate = parse_crate(R"(
+        fn shared(p: &mut i32) -> &i32 { p }
+        fn one(p: &&i32) -> &i32 { p }
+        fn nested(p: &&&i32) -> &i32 { { { p } } }
+        fn explicit(p: &&&i32) -> &i32 { return { { p } }; }
+        fn mutable(p: &mut &mut i32) -> &mut i32 { p }
+        fn partial(p: &&&i32) -> &&i32 { p }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto names = rx::assign_function_names(sema);
+    const std::vector<std::size_t> steps{0, 1, 2, 2, 1, 1};
+    for (std::size_t index = 0; index < steps.size(); ++index) {
+        const auto &function = *artifact.module().find_function(names[index]);
+        const auto &instructions = function.blocks[0].instructions;
+        check(function.signature == Signature{Type::Ptr, {Type::Ptr}} &&
+                  function.entry_allocas.size() == 1 &&
+                  instructions.size() == 2 + steps[index],
+              "引用转换不得分配目标副本，也不得多读或漏读中间指针");
+        const auto &store = std::get<Store>(instructions[0].operation);
+        check(store.value == function.argument(0), "引用形参应先保存原地址");
+        auto address = store.address;
+        // 第一次读取参数 slot；之后每个 load 对应计划中的一次引用解引用。
+        for (std::size_t load_index = 1; load_index < instructions.size(); ++load_index) {
+            const auto &load = std::get<Load>(instructions[load_index].operation);
+            check(load.storage_type == Type::Ptr && load.address == address &&
+                      load.alignment == 4,
+                  "转换必须逐层读取上一个指针，不能读取最终 i32 内容");
+            address = Operand::local(Type::Ptr, *instructions[load_index].result);
+        }
+        check(function.blocks[0].terminator->value == address,
+              "转换必须返回最后到达的位置地址，包括尚保留引用层级的目标");
+    }
+
+    // 带标注 let 的多层转换应在初始化完成后执行一次，再保存最终引用。
+    const auto let_crate = parse_crate(R"(
+        fn main() {
+            let x = 7;
+            let r = &x;
+            let rr = &r;
+            let flat: &i32 = { { rr } };
+        }
+    )");
+    const auto let_sema = analyze(*let_crate);
+    const auto let_artifact = generate(let_sema);
+    const auto &main = *let_artifact.module().find_function("__rx_fn_0");
+    const auto &instructions = main.blocks[0].instructions;
+    check(main.entry_allocas.size() == 4 && instructions.size() == 6,
+          "有标注 let 的嵌套块转换只需读取绑定指针和一层中间指针");
+    const auto &read_binding = std::get<Load>(instructions[3].operation);
+    const auto &adjust = std::get<Load>(instructions[4].operation);
+    const auto &save = std::get<Store>(instructions[5].operation);
+    check(read_binding.storage_type == Type::Ptr &&
+              read_binding.address == Operand::local(Type::Ptr, *main.entry_allocas[2].result) &&
+              adjust.storage_type == Type::Ptr &&
+              adjust.address == Operand::local(Type::Ptr, *instructions[3].result) &&
+              save.storage_type == Type::Ptr &&
+              save.value == Operand::local(Type::Ptr, *instructions[4].result),
+          "let 保存的必须是调整后的引用，而不是外层引用的地址");
+}
+
+// 检查每个实参求值后立即完成自身转换，再开始下一个实参，且调用只执行一次。
+void check_coercion_argument_order() {
+    const auto crate = parse_crate(R"(
+        fn first(p: &&i32) -> &&i32 { println_i32(1); p }
+        fn second(p: &i32) -> &i32 { println_i32(2); p }
+        fn consume(a: &i32, b: &i32) -> i32 { *a + *b }
+        fn main() {
+            let x = 7;
+            let r = &x;
+            println_i32(consume(first(&r), second(&x)));
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto first = module.find_function(names[0])->id;
+    const auto second = module.find_function(names[1])->id;
+    const auto consume = module.find_function(names[2])->id;
+    const auto &instructions = module.find_function(names[3])->blocks[0].instructions;
+    std::size_t first_calls = 0;
+    for (std::size_t index = 0; index < instructions.size(); ++index) {
+        const auto *call = std::get_if<Call>(&instructions[index].operation);
+        if (!call || call->function != first)
+            continue;
+        ++first_calls;
+        check(index + 3 < instructions.size(), "实参调用后应完成转换和目标调用");
+        const auto &adjust = std::get<Load>(instructions[index + 1].operation);
+        const auto &next_call = std::get<Call>(instructions[index + 2].operation);
+        const auto &target_call = std::get<Call>(instructions[index + 3].operation);
+        check(adjust.storage_type == Type::Ptr &&
+                  adjust.address == Operand::local(Type::Ptr, *instructions[index].result) &&
+                  next_call.function == second && target_call.function == consume &&
+                  target_call.arguments == std::vector<Operand>{
+                      Operand::local(Type::Ptr, *instructions[index + 1].result),
+                      Operand::local(Type::Ptr, *instructions[index + 2].result)},
+              "第一个实参转换必须先于第二个实参求值，最终调用使用两个已准备好的地址");
+    }
+    check(first_calls == 1, "为取得转换后的地址不得再次调用源函数");
+}
+
+// 找到指定函数唯一的一次调用，供顺序检查使用，不依赖打印出的 SSA 编号。
+std::size_t unique_call_index(const std::vector<Instruction> &instructions,
+                              IRFunctionId function) {
+    std::size_t found = instructions.size();
+    for (std::size_t index = 0; index < instructions.size(); ++index) {
+        const auto *call = std::get_if<Call>(&instructions[index].operation);
+        if (call && call->function == function) {
+            check(found == instructions.size(), "求值同一操作数或赋值目标不得重复调用");
+            found = index;
+        }
+    }
+    check(found != instructions.size(), "必须生成预期的操作数或赋值目标调用");
+    return found;
+}
+
+// 引用先从左到右各求值一次，两个目标内容都要等右侧调用完成后再读取。
+void check_reference_binary_order() {
+    for (const auto &[operation, expected] :
+         std::vector<std::pair<std::string, BinaryOp>>{
+             {"-", BinaryOp::Subtract}, {"^", BinaryOp::Xor}}) {
+        const auto crate = parse_crate(
+            "fn left(p: &i32) -> &i32 { println_i32(1); p } "
+            "fn right(p: &i32) -> &i32 { println_i32(2); p } "
+            "fn calculate(a: &i32, b: &i32) -> i32 { left(a) " + operation +
+            " right(b) } fn main() {}");
+        const auto sema = analyze(*crate);
+        const auto artifact = generate(sema);
+        std::ostringstream text, diagnostics;
+        check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+              "共享引用算术和位运算必须通过 IR 自检");
+        const auto names = rx::assign_function_names(sema);
+        const auto &module = artifact.module();
+        const auto &function = *module.find_function(names[2]);
+        const auto &instructions = function.blocks[0].instructions;
+        const auto left = unique_call_index(instructions, module.find_function(names[0])->id);
+        const auto right = unique_call_index(instructions, module.find_function(names[1])->id);
+        std::vector<std::size_t> loads;
+        for (std::size_t index = 0; index < instructions.size(); ++index) {
+            if (const auto *load = std::get_if<Load>(&instructions[index].operation);
+                load && load->storage_type == Type::I32)
+                loads.push_back(index);
+        }
+        check(left < right && loads.size() == 2 && right < loads[0] &&
+                  loads[0] < loads[1] && loads[1] + 2 == instructions.size(),
+              "左右调用必须各一次且按顺序发生，所有整数内容读取都晚于两个调用");
+        check(std::get<Load>(instructions[loads[0]].operation).address ==
+                  Operand::local(Type::Ptr, *instructions[left].result) &&
+                  std::get<Load>(instructions[loads[1]].operation).address ==
+                  Operand::local(Type::Ptr, *instructions[right].result),
+              "两次内容读取必须分别使用左右调用返回的引用");
+        const auto &result = instructions.back();
+        const auto &binary = std::get<BinaryOperation>(result.operation);
+        check(binary.operation == expected && result.type == Type::I32 &&
+                  binary.left == Operand::local(Type::I32, *instructions[loads[0]].result) &&
+                  binary.right == Operand::local(Type::I32, *instructions[loads[1]].result) &&
+                  function.blocks[0].terminator->value ==
+                      Operand::local(Type::I32, *result.result),
+              "标量结果必须使用两次最终读取，且不能交换左右操作数");
+    }
+}
+
+// 混合操作数只延后引用目标读取；直接局部值必须在自身求值时固定，数据互不别名。
+void check_mixed_reference_operand_order() {
+    const auto crate = parse_crate(R"(
+        fn reference(p: &i32) -> &i32 { println_i32(1); p }
+        fn direct_left() -> i32 {
+            let value = 7; let other = 3;
+            ({ println_i32(2); value }) - reference(&other)
+        }
+        fn direct_right() -> i32 {
+            let value = 7; let other = 3;
+            reference(&other) - { println_i32(2); value }
+        }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "直接标量与引用的混合运算必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    for (std::size_t side = 0; side < 2; ++side) {
+        const auto &function = *module.find_function(names[1 + side]);
+        const auto &instructions = function.blocks[0].instructions;
+        const auto call = unique_call_index(instructions, module.find_function(names[0])->id);
+        const auto mark = unique_call_index(instructions, module.find_function("println_i32")->id);
+        std::vector<std::size_t> loads;
+        for (std::size_t index = 0; index < instructions.size(); ++index) {
+            if (std::holds_alternative<Load>(instructions[index].operation))
+                loads.push_back(index);
+        }
+        check(loads.size() == 2 && mark < loads[0] &&
+                  (side == 0 ? loads[0] < call : call < mark) &&
+                  call < loads[1] && loads[1] + 2 == instructions.size(),
+              "直接值在自身副作用后立即读取；左直接值不能拖到右侧引用调用后");
+        const auto &direct = std::get<Load>(instructions[loads[0]].operation);
+        const auto &reference = std::get<Load>(instructions[loads[1]].operation);
+        check(direct.storage_type == Type::I32 && direct.address ==
+                  Operand::local(Type::Ptr, *function.entry_allocas[0].result) &&
+                  reference.storage_type == Type::I32 && reference.address ==
+                      Operand::local(Type::Ptr, *instructions[call].result),
+              "直接值来自自身局部 slot，引用内容来自独立数据的调用返回地址");
+        const auto direct_value = Operand::local(Type::I32, *instructions[loads[0]].result);
+        const auto reference_value = Operand::local(Type::I32, *instructions[loads[1]].result);
+        const auto &binary = std::get<BinaryOperation>(instructions.back().operation);
+        check(binary.operation == BinaryOp::Subtract &&
+                  binary.left == (side == 0 ? direct_value : reference_value) &&
+                  binary.right == (side == 0 ? reference_value : direct_value) &&
+                  function.blocks[0].terminator->value ==
+                      Operand::local(Type::I32, *instructions.back().result),
+              "Direct+Ref 和 Ref+Direct 都必须使用各自时刻已固定的值");
+    }
+}
+
+// 一元引用运算先完成调用；整数读取 i32，布尔读取 i8 并截断为 i1 后再取反。
+void check_reference_unary_operations() {
+    const auto crate = parse_crate(R"(
+        fn integer(p: &i32) -> &i32 { println_i32(1); p }
+        fn boolean(p: &bool) -> &bool { println_i32(2); p }
+        fn negative(p: &i32) -> i32 { -integer(p) }
+        fn inverted(p: &bool) -> bool { !boolean(p) }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "一元共享引用运算必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    for (std::size_t kind = 0; kind < 2; ++kind) {
+        const auto &function = *module.find_function(names[2 + kind]);
+        const auto &instructions = function.blocks[0].instructions;
+        const auto call = unique_call_index(instructions, module.find_function(names[kind])->id);
+        check(instructions.size() == call + 3 + kind,
+              "一元运算在调用后只读取一次内容，bool 额外截断一次");
+        const auto &load = std::get<Load>(instructions[call + 1].operation);
+        check(load.storage_type == (kind == 0 ? Type::I32 : Type::I8) &&
+                  load.alignment == (kind == 0 ? 4u : 1u) &&
+                  load.address == Operand::local(Type::Ptr, *instructions[call].result),
+              "一元运算必须使用调用返回的引用，按最终标量的存储类型读取");
+        auto value = Operand::local(instructions[call + 1].type,
+                                    *instructions[call + 1].result);
+        if (kind == 1) {
+            const auto &trunc = std::get<Trunc>(instructions[call + 2].operation);
+            check(trunc.value == value && trunc.target_type == Type::I1,
+                  "布尔内容必须从 i8 截断为 i1，不能直接用存储字节运算");
+            value = Operand::local(Type::I1, *instructions[call + 2].result);
+        }
+        const auto &result = instructions.back();
+        const auto &binary = std::get<BinaryOperation>(result.operation);
+        check(result.type == (kind == 0 ? Type::I32 : Type::I1) &&
+                  binary.operation == (kind == 0 ? BinaryOp::Subtract : BinaryOp::Xor) &&
+                  binary.left == (kind == 0 ? Operand::constant(Type::I32, 0) : value) &&
+                  binary.right == (kind == 0 ? value : Operand::constant(Type::I1, 1)) &&
+                  function.blocks[0].terminator->value ==
+                      Operand::local(result.type, *result.result),
+              "-&i32 应产生 i32 的 0-value，!&bool 应产生 i1 的 value xor true");
+    }
+}
+
+// 多层排序先取得两侧引用，再逐层读到标量；外层 &T / &mut T 只调整合法方向。
+void check_reference_ordering_chains() {
+    const auto crate = parse_crate(R"(
+        fn left(p: &&&i32) -> &&&i32 { println_i32(1); p }
+        fn right(p: &&&i32) -> &&&i32 { println_i32(2); p }
+        fn mutable(p: &mut &&i32) -> &mut &&i32 { println_i32(2); p }
+        fn matching(a: &&&i32, b: &&&i32) -> bool { left(a) < right(b) }
+        fn adjusted(a: &&&i32, b: &mut &&i32) -> bool { left(a) < mutable(b) }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "多层引用排序及外层可变转共享调整必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    for (std::size_t kind = 0; kind < 2; ++kind) {
+        const auto &function = *module.find_function(names[3 + kind]);
+        const auto &instructions = function.blocks[0].instructions;
+        const auto left = unique_call_index(instructions, module.find_function(names[0])->id);
+        const auto right = unique_call_index(instructions, module.find_function(names[1 + kind])->id);
+        check(left < right && right + 8 == instructions.size(),
+              "多层排序必须先从左到右各调用一次，再读取两条三层引用链并比较");
+        // 调用之前只允许读取形参 slot，不能提前读取任意一侧的引用目标。
+        for (std::size_t index = 0; index < right; ++index) {
+            if (const auto *load = std::get_if<Load>(&instructions[index].operation))
+                check(load->storage_type == Type::Ptr &&
+                          (load->address == Operand::local(Type::Ptr, *function.entry_allocas[0].result) ||
+                           load->address == Operand::local(Type::Ptr, *function.entry_allocas[1].result)),
+                      "两侧求值期间只能取出形参中的引用，不能提前沿引用链读取");
+        }
+        std::vector<Operand> scalars;
+        for (std::size_t side = 0; side < 2; ++side) {
+            auto address = Operand::local(Type::Ptr, *instructions[side == 0 ? left : right].result);
+            for (std::size_t depth = 0; depth < 3; ++depth) {
+                const auto &instruction = instructions[right + 1 + side * 3 + depth];
+                const auto &load = std::get<Load>(instruction.operation);
+                const auto type = depth == 2 ? Type::I32 : Type::Ptr;
+                check(load.address == address && load.storage_type == type &&
+                          instruction.type == type && load.alignment == 4,
+                      "排序必须依次 load ptr、ptr、i32，每一步使用上一层的结果");
+                address = Operand::local(type, *instruction.result);
+            }
+            scalars.push_back(address);
+        }
+        const auto &comparison = std::get<Compare>(instructions.back().operation);
+        check(comparison.predicate == Comparison::SignedLessThan &&
+                  comparison.left == scalars[0] && comparison.right == scalars[1] &&
+                  function.blocks[0].terminator->value ==
+                      Operand::local(Type::I1, *instructions.back().result),
+              "引用排序必须比较最终有符号整数，绝不能比较引用地址");
+    }
+}
+
+// 操作数内部 return 只保留此前调用，跳过右侧求值、引用内容读取和外层运算。
+void check_reference_operation_early_return() {
+    const auto crate = parse_crate(R"(
+        fn left(p: &i32) -> &i32 { println_i32(1); p }
+        fn right(p: &i32) -> &i32 { println_i32(2); p }
+        fn flag(p: &bool) -> &bool { println_i32(3); p }
+        fn leave_left(p: &i32, q: &i32) -> i32 {
+            ({ left(p); return 7; p }) - right(q)
+        }
+        fn leave_right(p: &i32, q: &i32) -> i32 {
+            left(p) - { right(q); return 8; q }
+        }
+        fn leave_negative(p: &i32) -> i32 { -{ left(p); return 9; p } }
+        fn leave_not(p: &bool) -> bool { !{ flag(p); return false; p } }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "引用运算中提前 return 必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    for (std::size_t kind = 0; kind < 4; ++kind) {
+        const auto &function = *module.find_function(names[3 + kind]);
+        const auto &instructions = function.blocks[0].instructions;
+        const auto first = unique_call_index(instructions, module.find_function(names[kind == 3 ? 2 : 0])->id);
+        if (kind == 1)
+            check(first < unique_call_index(instructions, module.find_function(names[1])->id),
+                  "右侧 return 之前仍必须保留从左到右的两次引用求值");
+        std::size_t calls = 0;
+        for (const auto &instruction : instructions) {
+            if (const auto *call = std::get_if<Call>(&instruction.operation)) {
+                ++calls;
+                check(call->function == module.find_function(names[kind == 3 ? 2 : 0])->id ||
+                          (kind == 1 && call->function == module.find_function(names[1])->id),
+                      "左侧 return 必须跳过右侧调用，一元 return 不得引入额外副作用");
+            } else if (const auto *load = std::get_if<Load>(&instruction.operation)) {
+                check(load->storage_type == Type::Ptr,
+                      "路径结束后不得为二元或一元引用运算读取最终标量内容");
+            } else {
+                check(std::holds_alternative<Store>(instruction.operation) &&
+                          std::get<Store>(instruction.operation).storage_type == Type::Ptr,
+                      "提前 return 只能保留引用参数保存，不能生成外层运算");
+            }
+        }
+        check(calls == (kind == 1 ? 2u : 1u) &&
+                  function.blocks[0].terminator->value ==
+                      (kind == 3 ? Operand::constant(Type::I1, 0) :
+                                   Operand::constant(Type::I32, 7 + kind)),
+              "引用运算必须直接返回操作数内部指定的值，且此前调用各保留一次");
+    }
+}
+
+// 引用相等仍属于 P10；Box 只有显式解引用后的排序合法，不能混作 lowering 负例。
+void check_reference_operation_boundaries() {
+    for (const auto &source : {
+             "fn main() { let a = 1; let b = 2; let same = &a == &b; }",
+             "fn main() { let a = 1; let b = 2; let different = &a != &b; }",
+             "fn main() { let a = [1]; let b = [2]; let same = &a == &b; }",
+             "#[derive(PartialEq)] struct Data { value: i32 } fn main() { "
+             "let a = Data { value: 1 }; let b = Data { value: 2 }; let same = &a == &b; }",
+             "fn main() { let a = Box::<i32>::new(1); let b = Box::<i32>::new(2); let less = *a < *b; }"})
+        check_rejected(source);
+    for (const auto &source : {
+             "fn main() { let a = Box::<i32>::new(1); let b = Box::<i32>::new(2); let less = a < b; }",
+             "fn main() { let mut a = 1; let b = 2; let less = &mut a < &b; }",
+             "fn main() { let a = 1; let mut b = 2; let less = &&a < &&mut b; }"})
+        check_semantic_rejected(source);
+}
+
+// 检查两种赋值先调用 RHS；复合赋值在目标修改旧值后读取，并写回同一地址。
+void check_assignment_order() {
+    const auto crate = parse_crate(R"(
+        fn target(p: &mut i32) -> &mut i32 { println_i32(2); *p = 23; p }
+        fn right() -> i32 { println_i32(1); 3 }
+        fn reference(p: &i32) -> &i32 { println_i32(1); p }
+        fn plain(p: &mut i32) { *target(p) = right(); }
+        fn compound(p: &mut i32) { *target(p) += right(); }
+        fn shared(p: &mut i32, other: &i32) { *target(p) += reference(other); }
+        fn main() {
+            let mut x = 10;
+            let other = 3;
+            plain(&mut x); compound(&mut x); shared(&mut x, &other);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "标量和共享引用 RHS 的赋值模块必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto target = module.find_function(names[0])->id;
+    for (std::size_t kind = 0; kind < 3; ++kind) {
+        const auto &instructions = module.find_function(names[3 + kind])->blocks[0].instructions;
+        const auto right_index = unique_call_index(
+            instructions, module.find_function(names[kind == 2 ? 2 : 1])->id);
+        const auto target_index = unique_call_index(instructions, target);
+        check(right_index < target_index, "普通和复合赋值都必须先调用 RHS，再调用目标");
+        const auto right = Operand::local(instructions[right_index].type,
+                                           *instructions[right_index].result);
+        const auto address = Operand::local(Type::Ptr, *instructions[target_index].result);
+        std::vector<std::size_t> loads, stores, operations;
+        for (std::size_t index = 0; index < instructions.size(); ++index) {
+            if (const auto *load = std::get_if<Load>(&instructions[index].operation);
+                load && load->storage_type == Type::I32)
+                loads.push_back(index);
+            if (const auto *store = std::get_if<Store>(&instructions[index].operation);
+                store && store->storage_type == Type::I32)
+                stores.push_back(index);
+            if (std::holds_alternative<BinaryOperation>(instructions[index].operation))
+                operations.push_back(index);
+        }
+        check(stores.size() == 1 && target_index < stores[0] &&
+                  std::get<Store>(instructions[stores[0]].operation).address == address,
+              "赋值必须只写一次目标调用返回的原地址");
+        const auto &store = std::get<Store>(instructions[stores[0]].operation);
+        if (kind == 0) {
+            check(loads.empty() && operations.empty() && store.value == right,
+                  "普通赋值直接写入已固定的 RHS，不读取旧值或执行复合运算");
+            continue;
+        }
+        check(loads.size() == (kind == 2 ? 2u : 1u) && operations.size() == 1 &&
+                  target_index < loads[0] && loads.back() < operations[0] &&
+                  operations[0] < stores[0],
+              "旧值和共享引用内容只能在目标调用后读取，再运算并写回");
+        const auto &old = std::get<Load>(instructions[loads[0]].operation);
+        auto right_scalar = right;
+        if (kind == 2) {
+            const auto &read_right = std::get<Load>(instructions[loads[1]].operation);
+            check(read_right.address == right,
+                  "共享引用 RHS 必须先保留调用返回的指针，运算时才读取其独立数据");
+            right_scalar = Operand::local(Type::I32, *instructions[loads[1]].result);
+        }
+        const auto &operation = std::get<BinaryOperation>(instructions[operations[0]].operation);
+        check(old.address == address && operation.operation == BinaryOp::Add &&
+                  operation.left == Operand::local(Type::I32, *instructions[loads[0]].result) &&
+                  operation.right == right_scalar &&
+                  store.value == Operand::local(Type::I32, *instructions[operations[0]].result),
+              "加法必须使用目标改变后的旧值及已准备的 RHS，计算结果写回同一目标");
+    }
+}
+
+// 普通引用赋值先完成 AssignmentValue 的指针调整，不能等目标调用之后再转换。
+void check_assignment_coercion_order() {
+    const auto crate = parse_crate(R"(
+        fn source(p: &&i32) -> &&i32 { println_i32(1); p }
+        fn slot(p: &mut &i32) -> &mut &i32 { println_i32(2); p }
+        fn main() {
+            let first = 7;
+            let other = 9;
+            let mut r = &first;
+            let rr = &other;
+            *slot(&mut r) = source(&rr);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    std::size_t assignments = 0;
+    for (const auto &[site, plan] : sema.coercion_plans) {
+        if (site.kind != rx::UseKind::AssignmentValue)
+            continue;
+        ++assignments;
+        check(plan.steps.size() == 1 && plan.steps[0].kind == rx::CoercionStepKind::Reference,
+              "赋值位置必须记录从 &&i32 到 &i32 的一次引用调整");
+    }
+    check(assignments == 1, "必须实际覆盖赋值 RHS 的 CoercionPlan");
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "赋值引用转换模块必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto &instructions = module.find_function(names[2])->blocks[0].instructions;
+    const auto source = unique_call_index(instructions, module.find_function(names[0])->id);
+    const auto target = unique_call_index(instructions, module.find_function(names[1])->id);
+    check(source + 1 < target && target + 1 < instructions.size(),
+          "RHS 调用后必须先调整指针，再调用目标并保存");
+    const auto &adjust = std::get<Load>(instructions[source + 1].operation);
+    const auto &store = std::get<Store>(instructions[target + 1].operation);
+    check(adjust.storage_type == Type::Ptr &&
+              adjust.address == Operand::local(Type::Ptr, *instructions[source].result) &&
+              store.storage_type == Type::Ptr &&
+              store.value == Operand::local(Type::Ptr, *instructions[source + 1].result) &&
+              store.address == Operand::local(Type::Ptr, *instructions[target].result),
+          "目标必须保存目标求值前已转换好的引用，而不是 RHS 的外层引用");
+    for (const auto &instruction : instructions) {
+        const auto *load = std::get_if<Load>(&instruction.operation);
+        check(!load || load->storage_type == Type::Ptr,
+              "引用赋值不得读取被引用的整数内容");
+    }
+}
+
+// 分别在 RHS 和地址阶段 return，保留此前副作用，但跳过旧值、运算、写回及后续语句。
+void check_assignment_early_return() {
+    for (const std::string operation : {"=", "+="}) {
+        const auto crate = parse_crate(
+            "fn target(p: &mut i32) -> &mut i32 { println_i32(2); p } "
+            "fn right() -> i32 { println_i32(1); 3 } "
+            "fn leave_rhs(p: &mut i32) -> i32 { *target(p) " + operation +
+            " { right(); return 7; 1 }; println_i32(99); 0 } "
+            "fn leave_target(p: &mut i32) -> i32 { *{ target(p); return 8; p } " +
+            operation + " right(); println_i32(99); 0 } fn main() {}");
+        const auto sema = analyze(*crate);
+        const auto artifact = generate(sema);
+        std::ostringstream text, diagnostics;
+        check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+              "赋值中提前 return 的模块必须通过 IR 自检");
+        const auto names = rx::assign_function_names(sema);
+        const auto &module = artifact.module();
+        for (std::size_t stage = 0; stage < 2; ++stage) {
+            const auto &function = *module.find_function(names[2 + stage]);
+            check(function.blocks.size() == 1 && function.blocks[0].terminator &&
+                      function.blocks[0].terminator->value == Operand::constant(Type::I32, 7 + stage),
+                  "赋值中的 return 必须直接返回对应阶段的值，不能生成后续尾值");
+            const auto &instructions = function.blocks[0].instructions;
+            const auto right = unique_call_index(instructions, module.find_function(names[1])->id);
+            std::size_t target_calls = 0;
+            for (std::size_t index = 0; index < instructions.size(); ++index) {
+                const auto &instruction = instructions[index];
+                if (const auto *call = std::get_if<Call>(&instruction.operation)) {
+                    if (call->function == module.find_function(names[0])->id) {
+                        ++target_calls;
+                        check(right < index, "地址阶段 return 前的目标调用仍必须晚于 RHS");
+                    } else {
+                        check(call->function == module.find_function(names[1])->id,
+                              "赋值路径结束后不得执行后续打印");
+                    }
+                } else if (const auto *store = std::get_if<Store>(&instruction.operation)) {
+                    check(store->storage_type == Type::Ptr && store->value == function.argument(0),
+                          "提前 return 只能保留参数保存，不得执行本次赋值的写回");
+                } else {
+                    const auto *load = std::get_if<Load>(&instruction.operation);
+                    check(load && load->storage_type == Type::Ptr,
+                          "提前 return 不得读取旧整数值或执行复合运算");
+                }
+            }
+            check(target_calls == stage,
+                  "RHS return 跳过目标；地址 return 保留一次目标副作用但不再赋值");
+        }
+    }
+}
+
+// 赋值产生 unit，覆盖语句、函数尾、嵌套块尾和显式 unit return 的分派。
+void check_assignment_unit_tails() {
+    const auto crate = parse_crate(R"(
+        fn plain(p: &mut i32) { *p = 2 }
+        fn compound(p: &mut i32) { *p += 3 }
+        fn nested(p: &mut i32) { { *p = 4 } }
+        fn explicit(p: &mut i32) { return { *p += 5 }; }
+        fn main() {
+            let mut x = 1;
+            x = 2;
+            { x += 3 }
+            plain(&mut x); compound(&mut x); nested(&mut x); explicit(&mut x);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "赋值的 unit 函数尾、块尾和 return 必须全部成功生成并通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        const auto &function = *artifact.module().find_function(names[index]);
+        check(function.signature.result == Type::Void && function.blocks.size() == 1 &&
+                  function.blocks[0].terminator && !function.blocks[0].terminator->value,
+              "赋值完成后只能返回 void，不能产生虚构的 unit SSA 值");
+        std::vector<const Store *> stores;
+        for (const auto &instruction : function.blocks[0].instructions) {
+            if (const auto *store = std::get_if<Store>(&instruction.operation);
+                store && store->storage_type == Type::I32)
+                stores.push_back(store);
+        }
+        check(stores.size() == (index == 4 ? 3u : 1u),
+              "每个函数尾赋值写回一次；main 保留初始化、普通赋值和复合赋值");
+        if (index == 4) {
+            check(stores[0]->value == Operand::constant(Type::I32, 1) &&
+                      stores[1]->value == Operand::constant(Type::I32, 2) &&
+                      stores[0]->address == stores[1]->address &&
+                      stores[1]->address == stores[2]->address,
+                  "原赋值负例必须成为正例，后续赋值继续更新同一个局部 slot");
+        }
+    }
+}
+
 void run_tests() {
     check_function_names();
     check_println();
@@ -721,6 +1461,21 @@ void run_tests() {
     check_mixed_scalar_storage();
     check_scalar_operations();
     check_shifts_and_casts();
+    check_reference_places();
+    check_reference_temporaries();
+    check_reference_early_return();
+    check_reference_coercions();
+    check_coercion_argument_order();
+    check_reference_binary_order();
+    check_mixed_reference_operand_order();
+    check_reference_unary_operations();
+    check_reference_ordering_chains();
+    check_reference_operation_early_return();
+    check_reference_operation_boundaries();
+    check_assignment_order();
+    check_assignment_coercion_order();
+    check_assignment_early_return();
+    check_assignment_unit_tails();
     check_entry("fn main() {}");
     check_entry("fn main() -> () {}");
     check_entry("fn __rx_fn_1() {} fn main() {} fn helper() {}");
@@ -731,13 +1486,14 @@ void run_tests() {
              "fn main() { let x = true || { return; false }; println_i32(7); }",
              "fn main() { let x = { return; true } && false; }",
              "fn main() { let x = { return; false } || true; }",
-             "fn main() { let mut x = 1; x = 2; }",
              "fn main() { Box::<i32>::new(1); }",
              "fn main() { Vec::<i32>::new(); }",
              "fn main() { let x = { (); }; }",
              "fn main() { let x = { [1, 2] }; }",
+             "fn main() { let mut x = [1]; x = [2]; }",
+             "struct Data { value: i32 } fn main() { let mut x = Data { value: 1 }; x = Data { value: 2 }; }",
              "fn main() { let x = loop {}; }",
-             "fn unused(value: &i32) {} fn main() {}",
+             "fn unused(value: &[i32; 1]) {} fn main() {}",
              "fn unused() -> [i32; 1] { [1] } fn main() {}",
              "fn main() {} fn unused() { println_i32(99); let x = [1, 2]; }",
              "struct Data {} impl Data { fn unused(&self) {} } fn main() {}"})

@@ -1,12 +1,13 @@
 // 将已通过语义检查的程序编排为 IR 模块：检查支持范围、登记函数签名、
 // 逐函数调用 lowering，并生成机器入口 main。
-// 单个函数体内部的表达式、语句、调用和 return 由 lowering.cpp 实现。
+// 函数体入口由 lowering.cpp 编排，表达式、引用、语句和调用按职责在 lowering/ 实现。
 // 这里只构建模块，输出 LLVM 文本由 artifact/printer 完成。
 #include "ir/generator.hpp"
 #include "ast/ast.hpp"
 #include "ir/builder.hpp"
 #include "ir/check.hpp"
 #include "ir/lowering.hpp"
+#include "ir/lowering/value.hpp"
 #include "sema/result.hpp"
 #include <algorithm>
 #include <ostream>
@@ -26,17 +27,18 @@ bool validate_functions(const SemanticResult &semantics,
             diagnostics << "IR 生成尚未支持方法或关联函数\n";
             return false;
         }
-        // 当前接受整数或 bool 形参，以及整数、bool 或 unit 返回类型。
-        const bool supported_return = function.return_type.is_unit() ||
-                                      is_scalar(function.return_type);
+        // 当前接受标量或标量引用形参，以及标量、标量引用或 unit 返回类型。
+        const bool supported_return =
+            function.return_type.is_unit() ||
+            is_supported_value(function.return_type);
         const bool supported_parameters =
             std::all_of(function.parameters.begin(), function.parameters.end(),
                         [](const ResolvedParameter &parameter) {
-                            return is_scalar(parameter.type);
+                            return is_supported_value(parameter.type);
                         });
         if (!supported_parameters || !supported_return) {
             diagnostics << "IR 生成尚未支持此函数签名"
-                           "（仅支持整数/bool 参数以及整数/bool/unit 返回）\n";
+                           "（仅支持整数/bool/引用参数以及整数/bool/引用/unit 返回）\n";
             return false;
         }
         // 函数体的语句列表和尾表达式会在 lowering 时按源码顺序处理。
@@ -78,12 +80,12 @@ std::optional<IRArtifact> generate_ir(const SemanticResult &semantics,
             const auto &source = *semantics.functions[function_index];
             std::vector<ir::Type> parameters;
             parameters.reserve(source.parameters.size());
-            // 每个形参按源类型映射成 i1 或 i32。
+            // 每个形参按源类型映射成 i1、i32 或引用的 ptr。
             for (const auto &parameter : source.parameters)
-                parameters.push_back(lower_scalar_type(parameter.type));
+                parameters.push_back(lower_value_type(parameter.type));
             const auto result = source.return_type.is_unit()
                                     ? ir::Type::Void
-                                    : lower_scalar_type(source.return_type);
+                                    : lower_value_type(source.return_type);
             functions.push_back(module.add_function(
                 function_names[function_index],
                 {result, std::move(parameters)}, ir::Linkage::Internal));

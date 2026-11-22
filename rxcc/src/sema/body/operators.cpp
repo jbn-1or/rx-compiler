@@ -341,7 +341,9 @@ BodyChecker::check_assignment(const AssignmentExpression &expression) {
         // 普通赋值是固定目标：右侧以左侧类型为期望，再统一做一对一转换。
         const ExpressionResult right =
             check_expression(*expression.right, &left.type);
-        if (!require_coerce(right, left.type, expression.right->span))
+        if (!require_coerce_at(
+                UseSite{&expression, UseKind::AssignmentValue, 0}, right,
+                left.type, expression.right->span))
             return ExpressionResult::error();
         return ExpressionResult::value(SemanticType::unit(),
                                         left.diverges || right.diverges);

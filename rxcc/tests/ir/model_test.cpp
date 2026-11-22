@@ -1,4 +1,4 @@
-// P2/P3 独立验证：模型所有权、call/ret/存储/转换、结构检查和确定的文本输出。
+// P2/P3/P5.1 独立验证：模型所有权、call/ret/存储/转换、结构检查和确定的文本输出。
 #include "ir/artifact.hpp"
 #include "ir/builder.hpp"
 #include <iomanip>
@@ -70,6 +70,45 @@ void add_storage(Module &module) {
     check(builder.insert_point() == insertion, "入口分配不得改变插入点");
     builder.store(Type::I32, loaded, second, 4);
     builder.ret(builder.load(Type::I32, second, 4));
+}
+
+// 把指针存入 slot 后读回，经调用返回原地址，再显式读取目标整数。
+void add_pointer_storage(Module &module) {
+    IRBuilder builder(module);
+    const auto id = module.add_function(
+        "pointer_roundtrip", {Type::Ptr, {Type::Ptr}}, Linkage::Internal);
+    auto &roundtrip = module.function(id);
+    builder.set_insert_point(roundtrip.add_block());
+    const auto slot = builder.entry_alloca(Type::Ptr, 4);
+    builder.store(Type::Ptr, roundtrip.argument(0), slot, 4);
+    const auto loaded = builder.load(Type::Ptr, slot, 4);
+    check(loaded.type == Type::Ptr, "读取 ptr slot 必须产生指针值");
+    builder.ret(loaded);
+
+    const auto caller = module.add_function(
+        "pointer_use", {Type::I32, {}}, Linkage::Internal);
+    auto &function = module.function(caller);
+    builder.set_insert_point(function.add_block());
+    const auto address = builder.entry_alloca(Type::I32, 4);
+    builder.store(Type::I32, Operand::constant(Type::I32, 42), address, 4);
+    const auto returned = builder.call(id, {address});
+    check(returned && returned->type == Type::Ptr, "ptr call 必须产生指针结果");
+    const auto value = builder.load(Type::I32, *returned, 4);
+    builder.ret(value);
+
+    const auto &pointer_block = roundtrip.blocks[0];
+    const auto &store = std::get<Store>(pointer_block.instructions[0].operation);
+    check(store.value == roundtrip.argument(0) && store.address == slot &&
+              std::get<Load>(pointer_block.instructions[1].operation).address == slot &&
+              pointer_block.terminator->value == loaded,
+          "ptr 往返必须保存形参、读取同一 slot 并返回读取结果");
+    const auto &caller_block = function.blocks[0];
+    const auto &call = std::get<Call>(caller_block.instructions[1].operation);
+    check(std::get<Store>(caller_block.instructions[0].operation).address == address &&
+              call.function == id && call.arguments.size() == 1 && call.arguments[0] == address &&
+              std::get<Load>(caller_block.instructions[2].operation).address == *returned &&
+              caller_block.terminator->value == value,
+          "调用必须传入原地址，用返回的指针读取整数，再返回该整数");
 }
 
 // 构造一个完整的 bool 往返函数，覆盖 i1 计算、i8 存取和 zext/trunc。
@@ -170,6 +209,16 @@ template <class F> void reject_scalar_model(F corrupt) {
           "损坏的 bool 模型必须诊断且不得输出部分文本");
 }
 
+// 每次只破坏指针正例的一项约束，确认检查失败时不交付部分文本。
+template <class F> void reject_pointer_model(F corrupt) {
+    auto artifact = make_module();
+    add_pointer_storage(artifact.module());
+    corrupt(artifact.module());
+    std::ostringstream text, diagnostics;
+    check(!artifact.verify_and_print(text, diagnostics) && text.str().empty() && !diagnostics.str().empty(),
+          "损坏的 ptr 模型必须诊断且不得输出部分文本");
+}
+
 template <class F> void reject_model(F corrupt) {
     auto artifact = make_module();
     add_typed_calls(artifact.module());
@@ -224,10 +273,55 @@ void check_invalid_models() {
     reject_model([](Module &m) { m.find_function("storage")->entry_allocas[0].type = Type::I32; });
     reject_model([](Module &m) { m.find_function("storage")->entry_allocas[1].result = m.find_function("storage")->entry_allocas[0].result; });
     reject_model([](Module &m) { std::get<Store>(m.find_function("storage")->blocks[0].instructions[0].operation).address = Operand::constant(Type::I32, 0); });
+    // ptr 本身是合法存储类型；这里拒绝的是显式读取类型与 i32 结果不一致。
     reject_model([](Module &m) { std::get<Load>(m.find_function("storage")->blocks[0].instructions[1].operation).storage_type = Type::Ptr; });
     reject_model([](Module &m) { std::get<Store>(m.find_function("storage")->blocks[0].instructions[0].operation).alignment = 0; });
     reject_model([](Module &m) { m.find_function("storage")->blocks[0].instructions.push_back(m.find_function("storage")->entry_allocas[0]); });
     reject_model([](Module &m) { m.find_function("external_io")->entry_allocas.push_back(m.find_function("storage")->entry_allocas[0]); });
+    // 只核对显式存取类型和值归属，不从 opaque ptr 推断目标类型。
+    reject_pointer_model([](Module &m) {
+        std::get<Load>(m.find_function("pointer_roundtrip")->blocks[0].instructions[1].operation)
+            .storage_type = Type::I32;
+    });
+    reject_pointer_model([](Module &m) {
+        std::get<Store>(m.find_function("pointer_roundtrip")->blocks[0].instructions[0].operation)
+            .value = Operand::constant(Type::I32, 42);
+    });
+    // 同模块另一函数的 ptr 也不能作为当前函数的值或地址使用。
+    reject_pointer_model([](Module &m) {
+        std::get<Store>(m.find_function("pointer_roundtrip")->blocks[0].instructions[0].operation)
+            .value = Operand::local(Type::Ptr, *m.find_function("pointer_use")->entry_allocas[0].result);
+    });
+    reject_pointer_model([](Module &m) {
+        std::get<Load>(m.find_function("pointer_use")->blocks[0].instructions[2].operation)
+            .address = m.find_function("pointer_roundtrip")->argument(0);
+    });
+    reject_pointer_model([](Module &m) {
+        std::get<Call>(m.find_function("pointer_use")->blocks[0].instructions[1].operation)
+            .arguments[0] = m.find_function("pointer_roundtrip")->argument(0);
+    });
+    reject_pointer_model([](Module &m) {
+        std::get<Call>(m.find_function("pointer_use")->blocks[0].instructions[1].operation)
+            .arguments[0] = Operand::constant(Type::I32, 42);
+    });
+    reject_pointer_model([](Module &m) {
+        auto &function = *m.find_function("pointer_use");
+        auto &call = function.blocks[0].instructions[1];
+        // 同步值表，避免仅因结果登记不一致而拒绝，真正检查 call 的返回签名。
+        call.type = Type::I32;
+        function.value_types[call.result->index] = Type::I32;
+    });
+    reject_pointer_model([](Module &m) {
+        m.find_function("pointer_roundtrip")->blocks[0].terminator =
+            Return{Operand::constant(Type::I32, 42)};
+    });
+    reject_pointer_model([](Module &m) {
+        m.find_function("pointer_roundtrip")->blocks[0].terminator = Return{};
+    });
+    reject_pointer_model([](Module &m) {
+        m.find_function("pointer_roundtrip")->blocks[0].terminator = Return{
+            Operand::local(Type::Ptr, *m.find_function("pointer_use")->entry_allocas[0].result)};
+    });
     // bool 模型：i1 常量范围、zext/trunc 的源/目标/结果类型都必须一致。
     reject_scalar_model([](Module &m) {
         m.find_function("bool_constant")->blocks[0].terminator = Return{Operand::constant(Type::I1, 2)};
@@ -399,18 +493,32 @@ void run_tests() {
     const auto values = memory_function.value_types.size();
     rejects([&] { memory.entry_alloca(Type::Void, 4); });
     rejects([&] { memory.entry_alloca(Type::I32, 3); });
-    rejects([&] { memory.load(Type::Ptr, address, 4); });
+    rejects([&] { memory.load(Type::Void, address, 4); });
     rejects([&] { memory.load(Type::I32, Operand::constant(Type::I32, 0), 4); });
     rejects([&] { memory.store(Type::I32, address, address, 4); });
     rejects([&] { memory.store(Type::I32, Operand::constant(Type::I32, 1), address, 0); });
     check(memory_function.value_types.size() == values && memory_function.entry_allocas.size() == 1 &&
-              memory_function.blocks[0].instructions.empty() && memory.insert_point() == block,
+              memory_function.blocks[0].instructions.empty() &&
+              !memory_function.blocks[0].terminator && memory.insert_point() == block,
           "无效存储请求不得产生部分指令或改变状态");
     memory.ret();
     rejects([&] { memory.store(Type::I32, Operand::constant(Type::I32, 1), address, 4); });
     memory.set_insert_point(block);
     rejects([&] { memory.entry_alloca(Type::I32, 4); });
     rejects([&] { memory.load(Type::I32, address, 4); });
+    auto pointers = make_module();
+    add_pointer_storage(pointers.module());
+    std::ostringstream pointer_text;
+    check(pointers.verify_and_print(pointer_text, diagnostics), "ptr 存取和调用模型必须通过检查");
+    const auto pointer_ir = pointer_text.str();
+    check(pointer_ir.find("define internal ptr @pointer_roundtrip(ptr ") != std::string::npos &&
+              pointer_ir.find("alloca ptr, align 4") != std::string::npos &&
+              pointer_ir.find("store ptr ") != std::string::npos &&
+              pointer_ir.find("load ptr, ptr ") != std::string::npos &&
+              pointer_ir.find("call ptr @pointer_roundtrip(ptr ") != std::string::npos &&
+              pointer_ir.find("ret ptr ") != std::string::npos &&
+              pointer_ir.find("load i32, ptr ") != std::string::npos,
+          "ptr 分配、存取、参数、call/ret 和目标读取必须打印各自的显式类型");
     auto scalars = make_module();
     add_bool_scalar(scalars.module());
     std::ostringstream scalar_text;
@@ -483,6 +591,7 @@ int main(int argc, char **argv) {
         if (mode == "--emit-model") {
             add_typed_calls(artifact.module());
             add_storage(artifact.module());
+            add_pointer_storage(artifact.module());
             add_bool_scalar(artifact.module());
             add_operations(artifact.module());
         }

@@ -33,7 +33,7 @@ CallableSignature function_signature(const FunctionSymbol &function) {
 // 多出的实参没有对应参数类型，只独立定型。
 // 实参都是必经子表达式，另行汇总它们的发散状态。
 bool BodyChecker::check_arguments(
-    const std::vector<SemanticType> &parameter_types,
+    const Node *parent, const std::vector<SemanticType> &parameter_types,
     const std::vector<std::shared_ptr<Expression>> &arguments, Span at,
     bool &diverges) {
     diverges = false;
@@ -59,10 +59,12 @@ bool BodyChecker::check_arguments(
         const auto argument = check_expression(*arguments[index], expected);
         diverges = diverges || argument.diverges;
         // 有对应参数时按固定目标核对；多出的实参只要求自身无错。
-        const bool argument_ok = expected
-                                     ? require_coerce(argument, *expected,
-                                                      arguments[index]->span)
-                                     : !argument.type.is_error();
+        const bool argument_ok =
+            expected
+                ? require_coerce_at(
+                      UseSite{parent, UseKind::Argument, index}, argument,
+                      *expected, arguments[index]->span)
+                : !argument.type.is_error();
         // 累积失败但继续检查后面的实参。
         ok = argument_ok && ok;
     }
@@ -92,8 +94,8 @@ ExpressionResult BodyChecker::check_call(const CallExpression &call) {
     const auto signature = resolve_qualified_callee(*path);
     bool diverges = false;
     if (!signature ||
-        !check_arguments(signature->explicit_parameters(), call.arguments, call.span,
-                         diverges))
+        !check_arguments(&call, signature->explicit_parameters(),
+                         call.arguments, call.span, diverges))
         return ExpressionResult::error();
     return ExpressionResult::value(signature->return_type, diverges);
 }
@@ -145,9 +147,10 @@ ExpressionResult BodyChecker::check_ordinary_call(const PathExpression &path,
     // 收集阶段已诊断的非法顶层接收者仍沿用显式参数表做错误恢复。
     bool diverges = false;
     const bool arguments_ok = signature->receiver
-        ? check_arguments(signature->explicit_parameters(), call.arguments, call.span,
-                          diverges)
-        : check_arguments(signature->parameters, call.arguments, call.span, diverges);
+        ? check_arguments(&call, signature->explicit_parameters(),
+                          call.arguments, call.span, diverges)
+        : check_arguments(&call, signature->parameters, call.arguments,
+                          call.span, diverges);
     if (!arguments_ok)
         return ExpressionResult::error();
     if (symbol.kind == Symbol::Kind::Function) {

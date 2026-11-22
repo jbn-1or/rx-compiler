@@ -87,23 +87,23 @@ struct Call {
 };
 // 保存 alloca 指令要分配的存储类型和对齐值。
 struct Alloca {
-    Type storage_type; // 分配出的存储单元保存的 IR 类型；当前支持 i32 和 bool 的 i8。
+    Type storage_type; // 分配出的存储单元保存的 IR 类型；支持 i32、bool 的 i8 和引用的 ptr。
     uint32_t alignment; // 分配地址的对齐字节数，必须是非零的 2 的幂。
 };
 // 保存 load 指令从哪个地址读取哪种类型。
 struct Load {
-    Type storage_type; // 读取的 IR 类型；当前支持 i32 和 i8。
+    Type storage_type; // 读取的 IR 类型；支持 i32、i8 和 ptr。
     Operand address; // 要读取的地址操作数，类型必须是 ptr。
     uint32_t alignment; // 地址的对齐字节数，必须是非零的 2 的幂。
 };
 // 保存 store 指令把哪个值写到哪个地址。
 struct Store {
-    Type storage_type; // 写入的 IR 类型；当前支持 i32 和 i8。
+    Type storage_type; // 写入的 IR 类型；支持 i32、i8 和 ptr。
     Operand value; // 要写入的值。
     Operand address; // 目标地址操作数，类型必须是 ptr。
     uint32_t alignment; // 地址的对齐字节数，必须是非零的 2 的幂。
 };
-// 存储类型支持 i32 和 i8；对齐必须是非零的 2 的幂。
+// 存储类型支持 i32、i8 和 ptr；对齐必须是非零的 2 的幂。
 bool valid_storage(Type type, uint32_t alignment);
 // 保存 zext 指令：把较窄整数的无符号位模式扩展成较宽整数。
 struct ZExt {

@@ -17,7 +17,9 @@ void BodyChecker::check_function(const FunctionSymbol &fn) {
     // 函数体直接从块入口检查；嵌套块由 check_expression 登记结果。
     const auto body = check_block(*fn.node->body, &fn.return_type);
     analyzer_.result_.expressions.insert_or_assign(fn.node->body.get(), body);
-    require_coerce(body, fn.return_type, fn.node->body->span);
+    // 函数尾部结果是一个固定使用位置；IR 生成函数体时读取同一位置的计划。
+    require_coerce_at(UseSite{fn.node, UseKind::FunctionBody, 0}, body,
+                      fn.return_type, fn.node->body->span);
 }
 
 ExpressionResult BodyChecker::check_block(const BlockExpression &block,
@@ -64,8 +66,10 @@ BodyChecker::StatementResult BodyChecker::check_statement(const Statement &state
         const auto initializer = check_expression(*let->initializer,
                                                   annotation ? &*annotation : nullptr);
         const bool ok = annotation
-                            ? require_coerce(initializer, *annotation,
-                                             let->initializer->span)
+                            ? require_coerce_at(
+                                  UseSite{let, UseKind::Initializer, 0},
+                                  initializer, *annotation,
+                                  let->initializer->span)
                             : !initializer.type.is_error();
         // 初始化器先查旧绑定，再登记新绑定，允许 let x = x 式遮蔽。
         const auto id = declare_local(
@@ -180,8 +184,10 @@ BodyChecker::check_expression_impl(const Expression &expression,
                 const ExpressionResult value = check_expression(
                     *return_expression->value,
                     &current_function_->return_type);
-                require_coerce(value, current_function_->return_type,
-                               return_expression->value->span);
+                require_coerce_at(
+                    UseSite{return_expression, UseKind::ReturnValue, 0}, value,
+                    current_function_->return_type,
+                    return_expression->value->span);
             } else {
                 require_coerce(
                     ExpressionResult::value(SemanticType::unit()),

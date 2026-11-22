@@ -121,10 +121,11 @@ bool valid_comparison(Comparison comparison, Type operand_type) {
     return false;
 }
 
-// 检查存储类型和对齐是否合法：类型为 i32 或 i8，且对齐值是 2 的幂。
+// 检查存储类型和对齐是否合法：类型为 i32、i8 或 ptr，且对齐值是 2 的幂。
+// ptr 用于保存引用变量的目标地址，读取它只得到地址，不解引用目标。
 bool valid_storage(Type type, uint32_t alignment) {
-    return (type == Type::I32 || type == Type::I8) && alignment != 0 &&
-           (alignment & (alignment - 1)) == 0;
+    return (type == Type::I32 || type == Type::I8 || type == Type::Ptr) &&
+           alignment != 0 && (alignment & (alignment - 1)) == 0;
 }
 
 // 用指定类型和 32 个二进制位创建常量操作数，不重新推导源语言整数类型。

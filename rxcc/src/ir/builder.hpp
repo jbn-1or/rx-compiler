@@ -29,7 +29,8 @@ public:
                                 std::vector<Operand> arguments = {});
     // 在当前函数入口分配固定存储，不改变当前插入点。
     Operand entry_alloca(Type storage_type, uint32_t alignment);
-    // 从地址读取指定存储类型的值，并为结果分配值 ID。
+    // 从地址读取指定存储类型的值，并为结果分配值 ID；保存引用的 ptr slot
+    // 读取后仍是地址，不会自动读取目标内容。
     Operand load(Type storage_type, Operand address, uint32_t alignment);
     // 把指定类型的值写入地址；store 有副作用，但不产生结果。
     void store(Type storage_type, Operand value, Operand address,

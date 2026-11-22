@@ -17,6 +17,7 @@ namespace rx {
 
 class SemanticAnalyzer;
 struct FunctionSymbol;
+struct UseSite;
 
 // 单个函数的检查上下文；通过 SemanticAnalyzer 访问结果中的符号和定型服务。
 // 保存局部作用域、当前函数/结构体和循环栈；全局信息通过 analyzer_ 访问。
@@ -86,7 +87,7 @@ private:
     bool check_method_receiver(const ExpressionResult &receiver,
                                const ResolvedMethod &method, Span at);
     bool check_arguments(
-        const std::vector<SemanticType> &parameter_types,
+        const Node *parent, const std::vector<SemanticType> &parameter_types,
         const std::vector<std::shared_ptr<Expression>> &arguments, Span at,
         bool &diverges);
 
@@ -136,6 +137,12 @@ private:
     // 已有 Error 时静默失败；不兼容时报错；不改写表达式本身的类型。
     bool require_coerce(const ExpressionResult &from, const SemanticType &to,
                         Span at);
+    // 固定使用位置的转换检查；成功时把选定路径记录到该使用位置。
+    bool require_coerce_at(const UseSite &site, const ExpressionResult &from,
+                           const SemanticType &to, Span at);
+    // 兼容性检查与可选记录共用的实现；site 为空表示不需要保存路径。
+    bool require_coercion(const UseSite *site, const ExpressionResult &from,
+                          const SemanticType &to, Span at);
     SemanticType compute_least_upper_bound(
         const std::vector<ExpressionResult> &results) const;
 };

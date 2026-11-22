@@ -2,9 +2,78 @@
 // 表达式处理器返回原始类型和权限，调用方在固定目标处检查兼容性。
 
 #include "sema/body/checker.hpp"
+#include "sema/sema.hpp"
 #include <cassert>
+#include <utility>
 
 namespace rx {
+namespace {
+
+// 根据源类型、源 place 权限和目标类型生成唯一的一条调整路径。
+// can_coerce 与固定使用位置共用这个函数，避免兼容性判断和发射路径出现两套算法。
+std::optional<CoercionPlan> build_coercion_plan(
+    const SemanticType &from, const PlaceAccessInformation &place,
+    const SemanticType &to) {
+    CoercionPlan plan;
+    plan.source_type = from;
+    plan.target_type = to;
+
+    // Never 路径不产生值，可以适配任意目标；生成端会在调整前看到结束路径。
+    if (from.is_never())
+        return plan;
+
+    const bool target_is_mut =
+        to.kind == SemanticType::Kind::Reference && to.is_mut;
+    plan.target_is_mut = target_is_mut;
+
+    // 可变重借用不能跨过共享访问；必须先于同类型判断。
+    if (target_is_mut && place.crossed_shared)
+        return std::nullopt;
+
+    // 同类型直接保持；同类型 &mut T 在这个使用位置按重借用处理。
+    if (from.same_type(to)) {
+        plan.reborrow = from.kind == SemanticType::Kind::Reference &&
+                        from.is_mut;
+        return plan;
+    }
+
+    // 只有引用到引用才可能发生强制转换。
+    if (from.kind != SemanticType::Kind::Reference ||
+        to.kind != SemanticType::Kind::Reference)
+        return std::nullopt;
+
+    // 可变目标要求源外层为 &mut；共享目标允许 &T 和 &mut T。
+    if (target_is_mut && !from.is_mut)
+        return std::nullopt;
+
+    // 从源引用的内部类型开始逐层内置解引用，直到与目标内部类型完全相等。
+    // 每一步只记录“读取该层指针”，不记录或复制最终目标中保存的值。
+    const SemanticType *current = from.inner.get();
+    for (;;) {
+        if (current->same_type(*to.inner))
+            return plan;
+
+        if (current->kind == SemanticType::Kind::Reference) {
+            // 可变目标不能经过共享引用；共享目标允许。
+            if (target_is_mut && !current->is_mut)
+                return std::nullopt;
+            plan.steps.push_back({CoercionStepKind::Reference});
+            current = current->inner.get();
+            continue;
+        }
+
+        if (current->kind == SemanticType::Kind::Box) {
+            plan.steps.push_back({CoercionStepKind::Box});
+            current = current->inner.get();
+            continue;
+        }
+
+        // Vec、数组、整数、结构体等都不产生隐式解引用/切片转换。
+        return std::nullopt;
+    }
+}
+
+} // namespace
 
 // 值表达式需要存储位置时物化为可写临时 place；已有 place 保留原权限，
 // 不能把不可变 place 变成可变副本。
@@ -58,72 +127,42 @@ bool BodyChecker::can_coerce(const SemanticType &from,
                              const PlaceAccessInformation &place,
                              const SemanticType &to) const {
     assert(!from.is_error() && !to.is_error());
-    // Never 路径不产生值，可以转换到任意目标。
-    if (from.is_never())
-        return true;
-
-    const bool target_is_mutable_reference =
-        to.kind == SemanticType::Kind::Reference && to.is_mut;
-
-    // 可变重借用不能跨过共享访问；必须先于同类型判断。
-    if (target_is_mutable_reference && place.crossed_shared)
-        return false;
-
-    // 同类型直接保持；&mut T → &T 也在此后按引用解引用规则处理。
-    if (from.same_type(to))
-        return true;
-
-    // 只有引用到引用才可能发生强制转换。
-    if (from.kind != SemanticType::Kind::Reference ||
-        to.kind != SemanticType::Kind::Reference || !from.inner ||
-        !to.inner)
-        return false;
-
-    // 可变目标要求源外层为 &mut；共享目标允许 &T 和 &mut T。
-    if (target_is_mutable_reference && !from.is_mut)
-        return false;
-
-    // 从源引用的内部类型开始逐层内置解引用，直到与目标内部类型完全相等。
-    const SemanticType *current = from.inner.get();
-    for (;;) {
-        if (current->same_type(*to.inner))
-            return true;
-
-        if (current->kind == SemanticType::Kind::Reference) {
-            if (!current->inner)
-                return false;
-            // 可变目标不能经过共享引用；共享目标允许。
-            if (target_is_mutable_reference && !current->is_mut)
-                return false;
-            current = current->inner.get();
-            continue;
-        }
-
-        if (current->kind == SemanticType::Kind::Box) {
-            if (!current->inner)
-                return false;
-            current = current->inner.get();
-            continue;
-        }
-
-        // Vec、数组、整数、结构体等都不产生隐式解引用/切片转换。
-        return false;
-    }
+    return build_coercion_plan(from, place, to).has_value();
 }
 
 // 表达式结果、固定目标、位置 → 是否兼容；不兼容时报诊断；转换本身不改写结果类型。
 bool BodyChecker::require_coerce(const ExpressionResult &from,
                                 const SemanticType &to, Span at) {
+    return require_coercion(nullptr, from, to, at);
+}
+
+// 固定使用位置的转换检查；成功时保存已选定的调整路径，供生成端直接执行。
+bool BodyChecker::require_coerce_at(const UseSite &site,
+                                    const ExpressionResult &from,
+                                    const SemanticType &to, Span at) {
+    return require_coercion(&site, from, to, at);
+}
+
+// 兼容性检查和可选记录共用的实现；失败时不写入任何调整路径。
+bool BodyChecker::require_coercion(const UseSite *site,
+                                   const ExpressionResult &from,
+                                   const SemanticType &to, Span at) {
     if (from.type.is_error() || to.is_error())
         return false;
-    if (can_coerce(from.type, from.place, to))
-        return true;
-    if (from.place.crossed_shared && from.type.same_type(to))
-        diagnostics_.error(at, "cannot mutably reborrow through shared access");
-    else
-        diagnostics_.error(at, "type mismatch: expected " + to.toString() +
-                                   ", found " + from.type.toString());
-    return false;
+    auto plan = build_coercion_plan(from.type, from.place, to);
+    if (!plan) {
+        if (from.place.crossed_shared && from.type.same_type(to))
+            diagnostics_.error(
+                at, "cannot mutably reborrow through shared access");
+        else
+            diagnostics_.error(at, "type mismatch: expected " + to.toString() +
+                                       ", found " + from.type.toString());
+        return false;
+    }
+    if (site)
+        analyzer_.result_.coercion_plans.insert_or_assign(*site,
+                                                          std::move(*plan));
+    return true;
 }
 
 // 无期望类型时，为一组表达式结果寻找公共类型

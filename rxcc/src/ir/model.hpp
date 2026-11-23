@@ -4,6 +4,7 @@
 // 整数扩展/截断和返回指令，不推导源程序类型。
 #pragma once
 
+#include "ir/layout.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -247,6 +248,14 @@ struct Function {
     bool contains(const Operand &operand) const;
 };
 
+// 模块类型表中的一个命名结构体定义。
+// 名称不带前导 %；字段是存储类型，bool 已映射为 i8，引用/Box 已映射为 ptr。
+struct NamedType {
+    std::string name; // LLVM 类型名，例如 __rx_struct_0。
+    std::vector<StorageType> fields; // 按声明顺序保存的字段存储类型。
+    bool defined = false; // 是否已经补齐字段定义；false 时不能用于布局或输出。
+};
+
 // 固定生成 RV32 的 32 位小端代码，不使用运行编译器的机器的数据布局。
 inline constexpr const char *rv32_triple = "riscv32-unknown-unknown-elf";
 inline constexpr const char *rv32_data_layout = "e-m:e-p:32:32-i64:64-n32-S128";
@@ -279,6 +288,16 @@ public:
     // 返回按添加顺序保存的函数表，不允许通过这个接口修改函数表本身。
     const auto &functions() const { return functions_; }
 
+    // 登记一个命名结构体类型并返回它在类型表中的下标。
+    // 先登记身份、后补字段，允许经 Box/Vec 引用尚未完成定义的结构体。
+    std::size_t add_named_type(std::string name);
+    // 为一个已登记的类型补齐按声明顺序排列的字段存储类型。
+    void define_named_type(std::size_t index, std::vector<StorageType> fields);
+    // 按登记顺序返回全部命名结构体类型。
+    const std::vector<NamedType> &named_types() const { return named_types_; }
+    // 按类型表下标返回命名结构体；下标越界时抛出 logic_error。
+    const NamedType &named_type(std::size_t index) const;
+
     std::string target_triple = rv32_triple; // LLVM 目标三元组，指定生成代码使用的架构和目标环境。
     std::string data_layout = rv32_data_layout; // LLVM 数据布局字符串，描述目标的字节序、指针宽度和对齐规则。
 
@@ -287,6 +306,7 @@ private:
     std::vector<std::unique_ptr<Function>> functions_; // 按添加顺序保存并拥有函数；IRFunctionId.index 对应表下标。
                                                      // vector 扩容只移动指针，不移动函数对象，已有函数引用仍有效。
     std::unordered_map<std::string, Function *> functions_by_name_; // 函数名到函数对象的索引，不拥有函数对象。
+    std::vector<NamedType> named_types_; // 按登记顺序保存的自有命名结构体类型。
 };
 
 // 判断函数名是否可以不加引号，直接写入 LLVM 文本。

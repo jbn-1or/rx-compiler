@@ -80,6 +80,31 @@ void check_entry(const std::string &source) {
           "空函数模块必须通过自检并输出文本");
 }
 
+// 前向字段、聚合尾填充和通过容器形成的递归都使用模块类型表。
+void check_named_storage_layouts() {
+    const auto crate = parse_crate(R"(
+        struct Outer { first: bool, pair: [Inner; 2], inner: Inner, tail: bool }
+        struct Inner { flag: bool, value: i32, end: bool }
+        struct Node { children: Vec<Node>, next: Box<Node> }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto &module = artifact.module();
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics),
+          "前向结构体和容器递归必须通过模块校验");
+    LayoutService layouts(module);
+    check(layouts.layout(StorageType::struct_of(0)) == Layout{44, 4, {0, 4, 28, 40}} &&
+              layouts.layout(StorageType::struct_of(1)) == Layout{12, 4, {0, 4, 8}},
+          "前向字段和数组应使用完整子布局，包括结构体尾填充");
+    check(layouts.layout(StorageType::struct_of(2)) == Layout{16, 4, {0, 12}},
+          "Vec 和 Box 存储不得展开递归元素");
+    check(text.str().find("%__rx_struct_0 = type { i8, [2 x %__rx_struct_1], %__rx_struct_1, i8 }") !=
+              std::string::npos,
+          "LLVM 文本应按声明顺序保留前向命名类型和 bool 存储宽度");
+}
+
 void check_rejected(const std::string &source) {
     const auto crate = parse_crate(source);
     const auto sema = analyze(*crate);
@@ -2089,6 +2114,7 @@ void check_control_flow_integration() {
 
 void run_tests() {
     check_function_names();
+    check_named_storage_layouts();
     check_println();
     check_locals();
     check_scalar_constants();

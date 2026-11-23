@@ -21,7 +21,8 @@ struct SemanticResult;
 std::vector<std::string> assign_function_names(const SemanticResult &semantics);
 
 // 使用成功的语义检查结果生成模块，调用期间须保持原 Crate 存活，不重复检查语义事实。
-// 不支持的代码或内部错误会输出原因并返回空值，不返回生成到一半的模块。
+// 不支持的代码或构建错误会输出原因并返回空值，不返回生成到一半的模块。
+// 返回的模块仍可修改，使用前通过 verify_and_print 或 check_module 校验。
 std::optional<IRArtifact> generate_ir(const SemanticResult &semantics,
                                       std::ostream &diagnostics);
 

@@ -65,8 +65,7 @@ GenerationContext::emit_borrow(const UnaryExpression &expression,
         return std::nullopt;
     if (path_ended(*value))
         return EmitResult{NoContinuation{}};
-    return EmitResult{
-        materialize_once(operand, std::get<ir::Operand>(*value))};
+    return EmitResult{materialize_value(std::get<ir::Operand>(*value))};
 }
 
 // 生成一次内置解引用：先得到引用保存的地址，再读取该位置的值。
@@ -100,7 +99,7 @@ GenerationContext::emit_coercion(ir::Operand value,
             diagnostics << "IR 生成尚未支持 Box 引用转换（P9）\n";
             return std::nullopt;
         }
-        value = builder.load(ir::Type::Ptr, value, 4);
+        value = load_value(value, ir::Type::Ptr);
     }
     return value;
 }

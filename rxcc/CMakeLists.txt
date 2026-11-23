@@ -72,6 +72,7 @@ set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "-w"
 add_library(rxcc_ir STATIC
   src/ir/model.cpp src/ir/builder.cpp src/ir/check.cpp src/ir/printer.cpp
   src/ir/artifact.cpp src/ir/lowering.cpp src/ir/generator.cpp
+  src/ir/layout.cpp
   src/ir/lowering/value.cpp src/ir/lowering/operators.cpp
   src/ir/lowering/reference.cpp src/ir/lowering/statements.cpp
   src/ir/lowering/control_flow.cpp src/ir/lowering/call.cpp)

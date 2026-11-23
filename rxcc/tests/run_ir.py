@@ -88,6 +88,8 @@ def main():
             ("internal-names", "fn __rx_fn_1() {} fn main() {} fn helper() {}"),
             ("declarations", "const N: usize = 2; struct Data { values: [i32; N] } "
              "impl Data { const VALUE: i32 = 7; } fn main() {}"),
+            ("forward-struct-layout", "struct Outer { pair: [Inner; 2] } "
+             "struct Inner { flag: bool, value: i32 } fn main() {}"),
         ):
             source = temp / f"{name}.rx"
             output = temp / f"{name}.ll"
@@ -104,6 +106,17 @@ def main():
             if repeated.read_bytes() != output.read_bytes():
                 raise RuntimeError("identical source must produce deterministic text")
             modules.append((name, output, b"", b""))
+
+        huge_source = temp / "oversized-layout.rx"
+        huge_source.write_text("struct Huge { values: [i32; 1073741824usize] } fn main() {}",
+                               encoding="utf-8")
+        preserved = temp / "oversized-layout.ll"
+        preserved.write_bytes(b"existing output\n")
+        run([args.compiler, "--stage", "semantic", str(huge_source)])
+        rejected = run([args.compiler, "--stage", "ir", str(huge_source), "-o", str(preserved)],
+                       expected=1)
+        if "布局" not in rejected.stderr or preserved.read_bytes() != b"existing output\n":
+            raise RuntimeError("layout verification must reject overflow without replacing old output")
 
         if (temp / "plain-helper.ll").read_bytes() != (temp / "lifetime-helper.ll").read_bytes():
             raise RuntimeError("a helper's lifetime parameter must erase to the same P2 IR")
@@ -945,6 +958,16 @@ def main():
              b"1\n0\n0\n1\n0\n0\n"),
             ("p62-if-values", if_values.read_text(encoding="utf-8"),
              if_values.with_suffix(".out").read_bytes(), b""),
+            ("discarded-if-value", """
+                fn run() {
+                    if get_i32() == 0 {
+                        if get_i32() == 1 { println_i32(10); 1 }
+                        else { println_i32(20); 2 }
+                    } else { println_i32(30); return; 3 };
+                    println_i32(40);
+                }
+                fn main() { run(); run(); run(); }
+             """, b"10\n40\n20\n40\n30\n", b"0 1 0 2 3\n"),
             # 外层 get 的值跨外层合流；then 中读取的 base 跨内层合流。
             ("p62-nested-values", """
                 fn choose(flag: bool, inner: bool) -> i32 {
@@ -1279,6 +1302,8 @@ def main():
             # P4.3：自有 baseline 不附加不溢出、精确性或别名承诺。
             # 检查生成文本，而不是依赖 LLVM verifier 事后接受错误承诺。
             text = output.read_text(encoding="utf-8")
+            if name == "discarded-if-value" and re.search(r"\b(?:alloca|store|load)\b", text):
+                raise RuntimeError("discarded if results must not allocate, store, or reload a result")
             for forbidden in (" nsw ", " nuw ", " exact", "noalias",
                               "inbounds", "nonnull"):
                 if forbidden in text:

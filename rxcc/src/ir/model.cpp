@@ -279,6 +279,40 @@ bool Module::contains(IRFunctionId function_id) const {
            function_id.index < functions_.size() &&
            functions_[function_id.index]->id == function_id;
 }
+// 登记一个命名结构体类型；名称必须可以直接写入 LLVM 文本且不能重复。
+std::size_t Module::add_named_type(std::string type_name) {
+    if (!valid_symbol_name(type_name))
+        throw std::logic_error("IR 类型名称非法");
+    const auto duplicate = std::find_if(
+        named_types_.begin(), named_types_.end(),
+        [&](const NamedType &existing) { return existing.name == type_name; });
+    if (duplicate != named_types_.end())
+        throw std::logic_error("IR 类型名称重复");
+    NamedType type;
+    type.name = std::move(type_name);
+    named_types_.push_back(std::move(type));
+    return named_types_.size() - 1;
+}
+
+// 为一个已登记类型补齐字段；每个类型只能定义一次。
+void Module::define_named_type(std::size_t index,
+                               std::vector<StorageType> fields) {
+    if (index >= named_types_.size())
+        throw std::logic_error("IR 类型下标无效");
+    auto &type = named_types_[index];
+    if (type.defined)
+        throw std::logic_error("IR 类型字段重复定义");
+    type.fields = std::move(fields);
+    type.defined = true;
+}
+
+// 按类型表下标读取命名结构体；越界时抛出 logic_error。
+const NamedType &Module::named_type(std::size_t index) const {
+    if (index >= named_types_.size())
+        throw std::logic_error("IR 类型下标无效");
+    return named_types_[index];
+}
+
 // 按 ID 返回可修改的函数；ID 无效或属于其他模块时抛出 logic_error。
 Function &Module::function(IRFunctionId function_id) {
     if (!contains(function_id))

@@ -8,7 +8,6 @@
 #include <map>
 #include <optional>
 #include <ostream>
-#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -50,7 +49,7 @@ bool path_ended(const EmitResult &result);
 // 判断一次 place 生成是否已经结束当前路径。
 bool path_ended(const PlaceResult &result);
 
-// 保存一次函数体生成过程中不变的环境；局部变量表按函数和块作用域单独传递。
+// 保存 lowering 环境；局部地址表按函数维护，词法作用域已由 sema 解析。
 class GenerationContext {
 public:
     // 保存这次生成使用的引用，不拥有任何对象。
@@ -64,6 +63,8 @@ public:
     bool emit_function_body(const FunctionSymbol &function, ir::IRFunctionId id);
 
 private:
+    enum class ResultUse { Value, Discard }; // 调用方是否消费表达式的数据结果。
+
     // IR 生成期的循环帧：用 sema 固定的 LoopId 查跳转目标，不重新选最近循环。
     struct LoopFrame {
         LoopId id; // 这个帧对应的语义循环身份。
@@ -77,22 +78,23 @@ private:
     // 生成一条 let 或表达式语句。
     std::optional<EmitResult> emit_statement(const Statement &statement,
                                              LocalPlaces &locals);
+    // 按顺序生成块内语句，遇到失败或路径结束立即返回。
+    std::optional<EmitResult> emit_statements(const BlockExpression &block,
+                                              LocalPlaces &locals);
+    // 统一分派；块和 if 根据使用方式决定是否生成数据结果。
+    std::optional<EmitResult> emit_expression(const Expression &expression,
+                                              LocalPlaces &locals, ResultUse use);
     // 计算需要数据值的表达式，包括整数、bool 和引用。
     std::optional<EmitResult> emit_value(const Expression &expression,
                                          LocalPlaces &locals);
-    // 生成 unit/发散表达式，或生成不需要块结果的代码块。
-    std::optional<EmitResult> emit_unit_expression(const Expression &expression,
-                                                     LocalPlaces &locals);
     // 按语义类型求值，保留副作用与控制流，但丢弃正常结果。
     std::optional<EmitResult> emit_discarded_expression(const Expression &expression,
                                                         LocalPlaces &locals);
 
     // lowering/control_flow.cpp：if 的分块、跳转和正常边汇合。
-    // unit/never if 不分配结果 slot；整数值 if 用入口 result slot 汇合两支结果。
-    std::optional<EmitResult> emit_if_unit(const IfExpression &expression,
-                                            LocalPlaces &locals);
-    std::optional<EmitResult> emit_if_value(const IfExpression &expression,
-                                             LocalPlaces &locals);
+    // 仅在调用方需要数据结果时创建 slot，供正常分支写入并在汇合块读回。
+    std::optional<EmitResult> emit_if(const IfExpression &expression,
+                                     LocalPlaces &locals, ResultUse use);
     // 生成 && / ||：先求左操作数，只有需要时再求右操作数。
     std::optional<EmitResult> emit_logical(const BinaryExpression &expression,
                                            LocalPlaces &locals);
@@ -111,21 +113,19 @@ private:
     LoopFrame *find_loop_frame(LoopId id);
 
     // lowering/value.cpp：基础值、存储表示和固定临时 slot。
-    // 选择局部 slot 的存储类型，供 let 与函数形参共同使用。
-    static ir::Type slot_type(const SemanticType &type);
-    // bool 按字节对齐，整数和引用按 RV32 的四字节对齐。
-    static uint32_t slot_alignment(const SemanticType &type);
+    // 按标量的 RV32 存储类型和对齐要求分配入口 slot。
+    ir::Operand allocate_slot(ir::Type value_type);
     // 计算字面量、路径以及引用本地读取；引用路径只加载保存的指针。
     ir::Operand emit_leaf(const Expression &expression,
                            const LocalPlaces &locals);
     // 从存储单元读回普通值；bool 读取 i8 后再截断成 i1，引用读取 ptr，整数读取 i32。
     ir::Operand load_value(const ir::Operand &address,
                            const SemanticType &type);
+    ir::Operand load_value(const ir::Operand &address, ir::Type value_type);
     // 把普通值写入它的存储单元；bool 先扩展成 i8，引用写 ptr，整数写 i32。
     void store_value(const ir::Operand &value, const ir::Operand &address);
-    // 把已求得的值写入以 AST 静态位置为键的固定临时 slot，并返回地址。
-    // 同一位置重复执行时复用入口分配，初始化 store 留在当前求值位置。
-    ir::Operand materialize_once(const Expression &position, ir::Operand value);
+    // 把值物化到入口分配的临时 slot；初始化 store 留在当前求值位置。
+    ir::Operand materialize_value(ir::Operand value);
 
     // lowering/reference.cpp：地址投影、借用、解引用和使用位置转换。
     // 计算位置表达式的地址；引用本身不在这里读取目标内容。
@@ -185,8 +185,6 @@ private:
     ir::Module &module; // 正在构建的 IR 模块。
     ir::IRBuilder &builder; // 向当前基本块添加指令的构建器。
     std::ostream &diagnostics; // 收集 IR 生成期间错误信息的输出流。
-    // 当前函数内按 AST 静态位置缓存的临时 slot；切换函数时清空，避免跨函数共用。
-    std::unordered_map<const Expression *, ir::Operand> temporary_slots;
     // 当前正在生成的循环帧，按嵌套顺序保存；break/continue 用 LoopId 定位目标。
     std::vector<LoopFrame> loop_frames_;
 };

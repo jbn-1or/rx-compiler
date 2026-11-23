@@ -453,6 +453,23 @@ bool check_function(const Module &module, const Function &function,
     return true;
 }
 
+// 检查模块类型表中的命名结构体：字段已经定义，
+// 并且按同一布局服务能算出有限且不溢出的目标布局。
+// 名称与登记顺序由 Module::add_named_type 保证，这里不重复校验。
+bool check_named_types(const Module &module, std::ostream &diagnostics) {
+    LayoutService layouts(module);
+    for (std::size_t index = 0; index < module.named_types().size(); ++index) {
+        try {
+            (void)layouts.layout(StorageType::struct_of(index));
+        } catch (const std::logic_error &error) {
+            diagnostics << "IR 内部错误：命名类型布局失败：" << error.what()
+                        << '\n';
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 // 先检查目标配置和函数表，再逐个检查函数；发现第一个错误就返回 false。
@@ -463,6 +480,8 @@ bool check_module(const Module &module, std::ostream &diagnostics) {
         diagnostics << "IR 内部错误：目标配置必须为固定 RV32IM/ILP32 布局\n";
         return false;
     }
+    if (!check_named_types(module, diagnostics))
+        return false;
     // 函数 ID 要匹配所属模块和函数表下标，函数名也不能在模块中重复。
     for (std::size_t function_index = 0;
          function_index < module.functions().size(); ++function_index) {

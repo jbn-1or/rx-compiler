@@ -1,5 +1,4 @@
-// 实现 if 表达式的分块和跳转：条件在入口块求值一次，then/else 各自结束，
-// 正常完成的分支跳到同一个 merge 块。unit/never if 不分配结果 slot。
+// 生成 if、短路运算、循环和循环跳转的控制流。
 #include "ir/lowering.hpp"
 #include "ast/ast.hpp"
 #include "ir/builder.hpp"
@@ -8,11 +7,18 @@
 
 namespace rx {
 
-// 生成 unit if：条件只求值一次，选中的分支执行完后进入 merge；
-// 没有 else 时 false 边直接进入 merge。提前结束的分支不再添加跳转。
+// 条件只求值一次，只有正常完成的分支才能进入汇合块。
+// 调用方需要数据时，正常分支先按 sema 的计划转换，再写入共同的结果 slot。
 std::optional<EmitResult>
-GenerationContext::emit_if_unit(const IfExpression &expression,
-                                LocalPlaces &locals) {
+GenerationContext::emit_if(const IfExpression &expression, LocalPlaces &locals,
+                           ResultUse use) {
+    const auto &result_type = semantics.expressions.at(&expression).type;
+    const bool needs_value = use == ResultUse::Value &&
+                             !result_type.is_unit() && !result_type.is_never();
+    if (needs_value && !is_supported_value(result_type)) {
+        diagnostics << "IR 生成尚未支持此 if 结果类型（聚合 P7）\n";
+        return std::nullopt;
+    }
     // 条件在当前块求值一次；条件自身提前 return 时，整个 if 不再发射。
     auto condition_result = emit_value(*expression.condition, locals);
     if (!condition_result)
@@ -26,123 +32,51 @@ GenerationContext::emit_if_unit(const IfExpression &expression,
     const auto insertion = builder.insert_point();
     auto &function = module.function(insertion->function);
 
-    // then 块总是需要；有 else 时先建 else 块，没有 else 时先建 false 边直达的 merge。
+    std::optional<ir::Operand> result_slot;
+    if (needs_value)
+        result_slot = allocate_slot(lower_value_type(result_type));
+
+    // 无 else 时，false 边直接进入 merge；否则等第一条正常路径再创建 merge。
     const auto then_block = function.add_block();
-    std::optional<ir::BlockId> else_block;
+    const auto false_block = function.add_block();
     std::optional<ir::BlockId> merge_block;
-    if (expression.else_)
-        else_block = function.add_block();
-    else
-        merge_block = function.add_block();
-    builder.cond_branch(condition, then_block,
-                        else_block ? *else_block : *merge_block);
+    if (!expression.else_)
+        merge_block = false_block;
+    builder.cond_branch(condition, then_block, false_block);
 
-    // 生成 then 分支；只有正常完成的分支才需要跳到 merge。
-    builder.set_insert_point(then_block);
-    auto then_result = emit_unit_expression(*expression.then, locals);
-    if (!then_result)
-        return std::nullopt;
-    if (!path_ended(*then_result)) {
-        // 两个分支都正常完成时才第一次需要 merge；延迟创建避免空前驱块。
-        if (!merge_block)
-            merge_block = function.add_block();
-        builder.branch(*merge_block);
-    }
-
-    // 有 else 时生成另一条路径；没有 else 的 false 边已经在 condbr 中直达 merge。
-    if (else_block) {
-        builder.set_insert_point(*else_block);
-        auto else_result = emit_unit_expression(*expression.else_, locals);
-        if (!else_result)
-            return std::nullopt;
-        if (!path_ended(*else_result)) {
-            if (!merge_block)
-                merge_block = function.add_block();
-            builder.branch(*merge_block);
+    const auto emit_branch = [&](const Expression &branch, ir::BlockId block,
+                                  std::size_t index) {
+        builder.set_insert_point(block);
+        auto result = needs_value ? emit_value(branch, locals)
+                                  : emit_discarded_expression(branch, locals);
+        if (!result)
+            return false;
+        if (path_ended(*result))
+            return true;
+        if (result_slot) {
+            auto prepared = emit_coercion_at(
+                UseSite{&expression, UseKind::IfBranch, index},
+                std::get<ir::Operand>(*result));
+            if (!prepared)
+                return false;
+            store_value(*prepared, *result_slot);
         }
-    }
-
-    // 两支都提前结束时没有正常后继，外层不应再补正常返回或后续指令。
-    if (!merge_block)
-        return EmitResult{NoContinuation{}};
-    builder.set_insert_point(*merge_block);
-    return EmitResult{UnitResult{}};
-}
-
-// 生成有标量结果的 if：两支在正常结束时先写入口 result slot，再跳 merge；
-// merge 读取 slot 得到 if 的值。这样不需要 phi，也不让分支 SSA 值跨块逃逸。
-std::optional<EmitResult>
-GenerationContext::emit_if_value(const IfExpression &expression,
-                                 LocalPlaces &locals) {
-    const auto &result_type =
-        semantics.expressions.at(&expression).type;
-    // 当前支持标量和标量引用；聚合结果要等 P7 的布局实现。
-    if (!is_supported_value(result_type)) {
-        diagnostics << "IR 生成尚未支持此 if 结果类型（聚合 P7）\n";
-        return std::nullopt;
-    }
-
-    // 条件在当前块求值一次；条件自身提前 return 时，整个 if 不再发射。
-    auto condition_result = emit_value(*expression.condition, locals);
-    if (!condition_result)
-        return std::nullopt;
-    if (path_ended(*condition_result))
-        return EmitResult{NoContinuation{}};
-    const auto condition = std::get<ir::Operand>(*condition_result);
-
-    // 条件可能包含嵌套控制流，插入点在求值后以 builder 记录的当前块为准。
-    const auto insertion = builder.insert_point();
-    auto &function = module.function(insertion->function);
-
-    // 结果 slot 固定在函数入口分配，两支都通过 store 写入同一个内存位置。
-    // 整数保存为 i32，bool 保存为 i8；merge 再按源类型读回 i1 或 i32。
-    const auto result_slot = builder.entry_alloca(slot_type(result_type),
-                                                  slot_alignment(result_type));
-
-    const auto then_block = function.add_block();
-    const auto else_block = function.add_block();
-    builder.cond_branch(condition, then_block, else_block);
-
-    std::optional<ir::BlockId> merge_block;
-    // then 正常完成时先写结果再跳 merge；提前 return 的分支没有正常结果边。
-    builder.set_insert_point(then_block);
-    auto then_result = emit_value(*expression.then, locals);
-    if (!then_result)
-        return std::nullopt;
-    if (!path_ended(*then_result)) {
-        // 每个正常结果边按 sema 记录的最终 LUB 路径转换后再写共同 slot。
-        auto prepared = emit_coercion_at(
-            UseSite{&expression, UseKind::IfBranch, 0},
-            std::get<ir::Operand>(*then_result));
-        if (!prepared)
-            return std::nullopt;
-        merge_block = function.add_block();
-        store_value(*prepared, result_slot);
-        builder.branch(*merge_block);
-    }
-
-    // else 与 then 对称：只有正常完成的分支才写 slot 并跳 merge。
-    builder.set_insert_point(else_block);
-    auto else_result = emit_value(*expression.else_, locals);
-    if (!else_result)
-        return std::nullopt;
-    if (!path_ended(*else_result)) {
-        auto prepared = emit_coercion_at(
-            UseSite{&expression, UseKind::IfBranch, 1},
-            std::get<ir::Operand>(*else_result));
-        if (!prepared)
-            return std::nullopt;
         if (!merge_block)
             merge_block = function.add_block();
-        store_value(*prepared, result_slot);
         builder.branch(*merge_block);
-    }
+        return true;
+    };
+    if (!emit_branch(*expression.then, then_block, 0) ||
+        (expression.else_ && !emit_branch(*expression.else_, false_block, 1)))
+        return std::nullopt;
 
     // 两支都提前结束时没有结果路径，外层不能继续读取 slot。
     if (!merge_block)
         return EmitResult{NoContinuation{}};
     builder.set_insert_point(*merge_block);
-    return EmitResult{load_value(result_slot, result_type)};
+    if (result_slot)
+        return EmitResult{load_value(*result_slot, result_type)};
+    return EmitResult{UnitResult{}};
 }
 
 // 生成短路逻辑：先求左侧，再由左侧决定是否进入右侧。
@@ -166,7 +100,7 @@ GenerationContext::emit_logical(const BinaryExpression &expression,
     auto &function = module.function(insertion->function);
 
     // 短路结果使用 bool 的 i8 存储形式，merge 读取后再 trunc 回 i1。
-    const auto result_slot = builder.entry_alloca(ir::Type::I8, 1);
+    const auto result_slot = allocate_slot(ir::Type::I1);
     const auto short_block = function.add_block();
     const auto rhs_block = function.add_block();
     const auto merge_block = function.add_block();
@@ -179,9 +113,8 @@ GenerationContext::emit_logical(const BinaryExpression &expression,
     // 短路分支直接给出结果：&& 给出 false，|| 给出 true。
     // 结果 slot 是 i8，已知的 0/1 可以直接按 i8 常量写入，无需先 zext。
     builder.set_insert_point(short_block);
-    builder.store(ir::Type::I8,
-                  ir::Operand::constant(ir::Type::I8, is_and ? 0u : 1u),
-                  result_slot, 1);
+    store_value(ir::Operand::constant(ir::scalar_storage_type(ir::Type::I1),
+                                      is_and ? 0u : 1u), result_slot);
     builder.branch(merge_block);
 
     // 右侧路径只在运行时需要时执行；右侧提前结束时没有正常结果边。
@@ -195,7 +128,7 @@ GenerationContext::emit_logical(const BinaryExpression &expression,
     }
 
     builder.set_insert_point(merge_block);
-    return EmitResult{load_value(result_slot, SemanticType::bool_())};
+    return EmitResult{load_value(result_slot, ir::Type::I1)};
 }
 
 // 生成 while：当前块先跳到 cond，cond 每轮重新求值并选择 body 或 exit；
@@ -230,7 +163,7 @@ GenerationContext::emit_while(const WhileExpression &expression,
          exit_block, nullptr, std::nullopt});
     // 循环体按 unit 生成；正常结束后回到条件块重新判断。
     builder.set_insert_point(body_block);
-    auto body_result = emit_unit_expression(*expression.body, locals);
+    auto body_result = emit_discarded_expression(*expression.body, locals);
     loop_frames_.pop_back();
     if (!body_result)
         return std::nullopt;
@@ -258,8 +191,7 @@ GenerationContext::emit_loop(const LoopExpression &expression,
     }
     std::optional<ir::Operand> result_slot;
     if (has_result)
-        result_slot = builder.entry_alloca(slot_type(result_type),
-                                           slot_alignment(result_type));
+        result_slot = allocate_slot(lower_value_type(result_type));
 
     const auto insertion = builder.insert_point();
     auto &function = module.function(insertion->function);
@@ -272,7 +204,7 @@ GenerationContext::emit_loop(const LoopExpression &expression,
     loop_frames_.push_back(
         {semantics.loop_expressions.at(&expression), body_block, std::nullopt,
          has_result ? &result_type : nullptr, result_slot});
-    auto body_result = emit_unit_expression(*expression.body, locals);
+    auto body_result = emit_discarded_expression(*expression.body, locals);
     // 取走帧后再出栈；break 可能已经在生成期间创建了 exit 块。
     const LoopFrame frame = loop_frames_.back();
     loop_frames_.pop_back();
@@ -322,7 +254,7 @@ GenerationContext::emit_break(const BreakExpression &expression,
             semantics.expressions.at(expression.value.get()).type;
         if (value_type.is_unit()) {
             // unit break 只执行操作数的副作用，没有数据需要写入。
-            auto value_result = emit_unit_expression(*expression.value, locals);
+            auto value_result = emit_discarded_expression(*expression.value, locals);
             if (!value_result)
                 return std::nullopt;
             if (path_ended(*value_result))

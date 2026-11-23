@@ -77,7 +77,7 @@ GenerationContext::emit_binary(const BinaryExpression &expression,
                 }
                 // 除最后一层外，每层读取的是下一层引用指针。
                 for (std::size_t index = 0; index + 1 < depth; ++index)
-                    value = builder.load(ir::Type::Ptr, value, 4);
+                    value = load_value(value, ir::Type::Ptr);
                 // 最后一层读取最终标量；depth 为 0 时值已经就是标量。
                 if (depth > 0)
                     value = load_value(value, *base_type);

@@ -1,5 +1,5 @@
 // 编排一个函数体的生成，并按表达式或语句种类分派到 lowering/ 中的实现。
-// 这里只保留块作用域、路径结束传播和函数入口；不实现具体运算、存取或调用。
+// 这里只保留块遍历、路径结束传播和函数入口；不实现具体运算、存取或调用。
 #include "ir/lowering.hpp"
 #include "ast/ast.hpp"
 #include "ir/builder.hpp"
@@ -28,6 +28,13 @@ GenerationContext::GenerationContext(
 std::optional<EmitResult>
 GenerationContext::emit_value(const Expression &expression,
                               LocalPlaces &locals) {
+    return emit_expression(expression, locals, ResultUse::Value);
+}
+
+// 统一分派表达式；块和 if 根据调用方需求决定是否保留正常结果。
+std::optional<EmitResult>
+GenerationContext::emit_expression(const Expression &expression,
+                                   LocalPlaces &locals, ResultUse use) {
     // 二元运算先求值两侧，再按源类型选择指令。
     if (const auto *binary =
             dynamic_cast<const BinaryExpression *>(&expression))
@@ -62,99 +69,45 @@ GenerationContext::emit_value(const Expression &expression,
     if (const auto *call = dynamic_cast<const CallExpression *>(&expression))
         return emit_call(*call, locals);
 
-    // if 没有正常结果时不需要读取值，可以复用不分配结果 slot 的 unit 路径。
-    // 其余有值 if 通过合并后的结果 slot 取得值，P6.2 先支持同类型整数结果。
     if (const auto *if_expression =
-            dynamic_cast<const IfExpression *>(&expression)) {
-        const auto &type = semantics.expressions.at(if_expression).type;
-        if (type.is_never())
-            return emit_if_unit(*if_expression, locals);
-        return emit_if_value(*if_expression, locals);
-    }
+            dynamic_cast<const IfExpression *>(&expression))
+        return emit_if(*if_expression, locals, use);
     // loop 的值来自 break 写入的结果 slot；unit/never 不分配数据 slot。
     if (const auto *loop = dynamic_cast<const LoopExpression *>(&expression))
         return emit_loop(*loop, locals);
 
-    // 需要值的块可能是标量/引用块，也可能是整块路径都已结束的 never 块。
-    if (const auto *block =
-            dynamic_cast<const BlockExpression *>(&expression)) {
-        const auto &type = semantics.expressions.at(block).type;
-        // 聚合块值随 P7 的布局实现。
-        if (!is_supported_value(type) && !type.is_never()) {
-            diagnostics << "IR 生成尚未支持聚合块值（P7）\n";
-            return std::nullopt;
-        }
-        LocalPlaces nested_locals = locals;
-        for (const auto &statement : block->statements) {
-            auto result = emit_statement(*statement, nested_locals);
-            if (!result)
-                return std::nullopt;
-            // 块内提前 return 后，后续语句和尾值都不再执行。
-            if (path_ended(*result))
-                return EmitResult{NoContinuation{}};
-        }
-        // 正常到达块尾时，语义检查已保证这里有标量/引用或 never 尾表达式。
-        return emit_value(*block->tail, nested_locals);
-    }
-
-    diagnostics << "IR 生成尚未支持此值表达式\n";
-    return std::nullopt;
-}
-
-// 生成 unit/发散表达式，或生成不需要块结果的代码块；unit 不对应 IR 操作数。
-std::optional<EmitResult>
-GenerationContext::emit_unit_expression(const Expression &expression,
-                                        LocalPlaces &locals) {
-    // return 的静态类型是 never，但可出现在需要 unit 的尾表达式位置。
-    if (const auto *return_expression =
-            dynamic_cast<const ReturnExpression *>(&expression))
-        return emit_return(*return_expression, locals);
     // 显式 unit 不需要生成 IR 指令。
     if (dynamic_cast<const UnitExpression *>(&expression))
         return EmitResult{UnitResult{}};
-    // unit 调用只保留副作用。
-    if (const auto *call = dynamic_cast<const CallExpression *>(&expression))
-        return emit_call(*call, locals);
     // 赋值正常完成后产生 unit；先求 RHS，再求目标并写入。
     if (const auto *assignment =
             dynamic_cast<const AssignmentExpression *>(&expression))
         return emit_assignment(*assignment, locals);
-    // if 按条件选择一条路径；unit if 不需要结果 slot，只需要在正常分支末尾汇合。
-    if (const auto *if_expression =
-            dynamic_cast<const IfExpression *>(&expression))
-        return emit_if_unit(*if_expression, locals);
     // while 的条件在独立块中每轮重新求值，正常退出后继续外层语句。
     if (const auto *while_expression =
             dynamic_cast<const WhileExpression *>(&expression))
         return emit_while(*while_expression, locals);
-    // loop 在 unit 上下文中只关心正常退出；有数据结果时由 emit_loop 决定。
-    if (const auto *loop = dynamic_cast<const LoopExpression *>(&expression))
-        return emit_loop(*loop, locals);
-    if (const auto *break_expression =
-            dynamic_cast<const BreakExpression *>(&expression))
-        return emit_break(*break_expression, locals);
-    if (const auto *continue_expression =
-            dynamic_cast<const ContinueExpression *>(&expression))
-        return emit_continue(*continue_expression, locals);
-    // 块内绑定使用独立映射，退出该块时不泄漏到外层。
+    // 每个绑定已有唯一 LocalId，块内不需要再次维护词法作用域。
     if (const auto *block =
             dynamic_cast<const BlockExpression *>(&expression)) {
-        LocalPlaces nested_locals = locals;
-        // 先按源码顺序生成块内语句，再处理可选的尾表达式。
-        for (const auto &statement : block->statements) {
-            auto result = emit_statement(*statement, nested_locals);
-            if (!result)
+        if (use == ResultUse::Value) {
+            const auto &type = semantics.expressions.at(block).type;
+            if (!is_supported_value(type) && !type.is_never()) {
+                diagnostics << "IR 生成尚未支持此块值类型\n";
                 return std::nullopt;
-            // 块内提前 return 后，后续语句和尾表达式都不再执行。
-            if (path_ended(*result))
-                return result;
+            }
         }
+        auto result = emit_statements(*block, locals);
+        if (!result || path_ended(*result))
+            return result;
         // 块用于循环体等结果被丢弃的位置时，尾表达式自身可能是有类型的发散值。
         if (!block->tail)
             return EmitResult{UnitResult{}};
-        return emit_discarded_expression(*block->tail, nested_locals);
+        return use == ResultUse::Value
+                   ? emit_value(*block->tail, locals)
+                   : emit_discarded_expression(*block->tail, locals);
     }
-    diagnostics << "IR 生成尚未支持此 unit 表达式\n";
+    diagnostics << "IR 生成尚未支持此表达式\n";
     return std::nullopt;
 }
 
@@ -169,19 +122,30 @@ GenerationContext::emit_statement(const Statement &statement,
     return emit_discarded_expression(*expression.expression, locals);
 }
 
+// 块表达式和函数体遵循同样的语句顺序和提前退出规则。
+std::optional<EmitResult>
+GenerationContext::emit_statements(const BlockExpression &block,
+                                   LocalPlaces &locals) {
+    for (const auto &statement : block.statements) {
+        auto result = emit_statement(*statement, locals);
+        if (!result || path_ended(*result))
+            return result;
+    }
+    return EmitResult{UnitResult{}};
+}
+
 // 按表达式自身的类型求值；正常结果可丢弃，但提前离开的路径必须传给外层。
 std::optional<EmitResult>
 GenerationContext::emit_discarded_expression(const Expression &expression,
                                              LocalPlaces &locals) {
     const auto &type = semantics.expressions.at(&expression).type;
     // 丢弃块结果时先处理语句，不必为不可达的尾值准备存储。
-    if (type.is_unit() || dynamic_cast<const BlockExpression *>(&expression))
-        return emit_unit_expression(expression, locals);
-    if (!is_supported_value(type) && !type.is_never()) {
+    if (!type.is_unit() && !type.is_never() && !is_supported_value(type) &&
+        !dynamic_cast<const BlockExpression *>(&expression)) {
         diagnostics << "IR 生成尚未支持丢弃此类型的表达式结果\n";
         return std::nullopt;
     }
-    auto result = emit_value(expression, locals);
+    auto result = emit_expression(expression, locals, ResultUse::Discard);
     if (!result || path_ended(*result))
         return result;
     return EmitResult{UnitResult{}};
@@ -191,9 +155,6 @@ GenerationContext::emit_discarded_expression(const Expression &expression,
 bool GenerationContext::emit_function_body(const FunctionSymbol &function,
                                            ir::IRFunctionId id) {
     builder.set_insert_point(module.function(id).add_block());
-    // 临时 slot 和循环帧都只在当前函数内有效；切换函数时清空。
-    temporary_slots.clear();
-    loop_frames_.clear();
     LocalPlaces locals;
     const auto &parameter_locals = semantics.function_locals.at(function.id);
     // 每个 IR 参数存入其 LocalId 对应的独立存储单元。
@@ -202,26 +163,16 @@ bool GenerationContext::emit_function_body(const FunctionSymbol &function,
         const auto local_id = parameter_locals.parameters[parameter_index];
         const auto &local_type = semantics.locals[local_id.index].type;
         // bool 形参存入 i8 slot，整数存入 i32 slot，引用形参保存 ptr。
-        const auto address = builder.entry_alloca(slot_type(local_type),
-                                                  slot_alignment(local_type));
+        const auto address = allocate_slot(lower_value_type(local_type));
         const auto argument = module.function(id).argument(parameter_index);
         store_value(argument, address);
         locals.emplace(local_id, address);
     }
     // 函数体语句按源码顺序生成；提前 return 后停止整条路径。
-    bool path_open = true;
-    for (const auto &statement : function.node->body->statements) {
-        auto result = emit_statement(*statement, locals);
-        if (!result)
-            return false;
-        // 已结束的路径不再处理后续语句和函数尾值。
-        if (path_ended(*result)) {
-            path_open = false;
-            break;
-        }
-    }
-    // 只有仍可继续的路径才补函数尾部与正常 ret。
-    if (!path_open)
+    const auto statements = emit_statements(*function.node->body, locals);
+    if (!statements)
+        return false;
+    if (path_ended(*statements))
         return true;
     const auto &tail = function.node->body->tail;
     if (is_supported_value(function.return_type)) {
@@ -245,7 +196,7 @@ bool GenerationContext::emit_function_body(const FunctionSymbol &function,
         builder.ret();
         return true;
     }
-    auto result = emit_unit_expression(*tail, locals);
+    auto result = emit_discarded_expression(*tail, locals);
     if (!result)
         return false;
     if (!path_ended(*result))

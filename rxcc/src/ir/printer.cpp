@@ -118,6 +118,21 @@ void print_module(const Module &module, std::ostream &destination) {
     std::ostream &output = buffer;
     output << "target datalayout = \"" << module.data_layout << "\"\n"
         << "target triple = \"" << module.target_triple << "\"\n\n";
+    // 先输出模块登记的命名结构体类型，再输出函数；字段顺序与声明顺序一致。
+    for (const auto &type : module.named_types()) {
+        output << '%' << type.name << " = type ";
+        if (type.fields.empty()) {
+            output << "{}\n\n";
+            continue;
+        }
+        output << "{ ";
+        for (std::size_t index = 0; index < type.fields.size(); ++index) {
+            if (index)
+                output << ", ";
+            output << storage_type_text(type.fields[index], module);
+        }
+        output << " }\n\n";
+    }
     for (const auto &owned : module.functions()) {
         const auto &function = *owned;
         output << (function.is_declaration() ? "declare " : "define ");

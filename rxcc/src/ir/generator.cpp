@@ -5,7 +5,6 @@
 #include "ir/generator.hpp"
 #include "ast/ast.hpp"
 #include "ir/builder.hpp"
-#include "ir/check.hpp"
 #include "ir/lowering.hpp"
 #include "ir/lowering/value.hpp"
 #include "sema/result.hpp"
@@ -74,6 +73,19 @@ std::optional<IRArtifact> generate_ir(const SemanticResult &semantics,
         std::vector<ir::IRFunctionId> functions;
         GenerationContext context(semantics, functions, module, builder,
                                   diagnostics);
+        // 先按稳定 StructId 登记全部命名结构体身份，再补齐字段。
+        // 这样 Node { children: Vec<Node> } 等经 Box/Vec 的递归类型也能有限完成。
+        for (const auto &structure : semantics.structs)
+            module.add_named_type("__rx_struct_" +
+                                  std::to_string(structure->id.index));
+        for (const auto &structure : semantics.structs) {
+            std::vector<ir::StorageType> fields;
+            fields.reserve(structure->fields.size());
+            for (const auto &field : structure->fields)
+                fields.push_back(ir::storage_type_of(
+                    structure->field_types.at(field.name)));
+            module.define_named_type(structure->id.index, std::move(fields));
+        }
         // 先登记所有函数的签名，使前向调用可以直接按 FunctionId 解析。
         for (std::size_t function_index = 0;
              function_index < function_names.size(); ++function_index) {
@@ -104,9 +116,7 @@ std::optional<IRArtifact> generate_ir(const SemanticResult &semantics,
         builder.set_insert_point(module.function(entry).add_block());
         builder.call(functions[semantics.main_function->index]);
         builder.ret(ir::Operand::constant(ir::Type::I32, 0));
-        // 只有通过结构检查的完整模块才交付给调用方；失败时随 artifact 一起释放。
-        if (!ir::check_module(module, diagnostics))
-            return std::nullopt;
+        // 完整模块仍可被调用方修改；在输出边界统一做结构和布局校验。
         return artifact;
     } catch (const std::logic_error &error) {
         // IR 构建失败属于编译器内部错误，不是源程序没有通过类型检查。

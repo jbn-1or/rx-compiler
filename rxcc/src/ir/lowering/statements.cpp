@@ -70,7 +70,7 @@ GenerationContext::emit_let(const LetStatement &statement,
     }
     // bool 使用 i8 存储单元，整数使用 i32，引用保存 ptr；
     // 写入统一经过 store_value。
-    auto address = builder.entry_alloca(slot_type(type), slot_alignment(type));
+    auto address = allocate_slot(lower_value_type(type));
     store_value(value, address);
     // 初始化已生成后才登记新绑定，支持 `let x = x` 读取旧 x。
     locals.emplace(binding, address);
@@ -88,7 +88,7 @@ GenerationContext::emit_return(const ReturnExpression &expression,
     const auto &value_record = semantics.expressions.at(expression.value.get());
     // 返回 () 的路径只发 ret void，不产生数据操作数。
     if (value_record.type.is_unit()) {
-        auto result = emit_unit_expression(*expression.value, locals);
+        auto result = emit_discarded_expression(*expression.value, locals);
         if (!result)
             return std::nullopt;
         // 操作数内部的 return 已经发过 ret，外层不能再补一条。

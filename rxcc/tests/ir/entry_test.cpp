@@ -6,10 +6,12 @@
 #include "ir/generator.hpp"
 #include "sema/sema.hpp"
 #include <iostream>
+#include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -311,6 +313,16 @@ void check_semantic_rejected(const std::string &source) {
     rx::Diagnostics diagnostics;
     const auto result = rx::SemanticAnalyzer(diagnostics).analyze(*crate);
     check(!result || !diagnostics.ok(), "非法源码必须由语义分析拒绝");
+}
+
+// 非空源入口无法复用 check_entry 的“空函数体”断言，只要求完整生成并通过 IR 自检。
+void check_generates(const std::string &source) {
+    const auto crate = parse_crate(source);
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && !text.str().empty() &&
+              diagnostics.str().empty(), "已支持的有效输入必须通过 IR 自检");
 }
 
 void check_function_names() {
@@ -1436,15 +1448,16 @@ void check_reference_operation_early_return() {
     }
 }
 
-// 引用相等仍属于 P10；Box 只有显式解引用后的排序合法，不能混作 lowering 负例。
+// 引用相等仍属于 P10；Box 显式解引用后的排序在 P9.1 已可生成，不能再作为负例。
 void check_reference_operation_boundaries() {
+    check_generates("fn main() { let a = Box::<i32>::new(1); let b = Box::<i32>::new(2); "
+                    "let less = *a < *b; }");
     for (const auto &source : {
              "fn main() { let a = 1; let b = 2; let same = &a == &b; }",
              "fn main() { let a = 1; let b = 2; let different = &a != &b; }",
              "fn main() { let a = [1]; let b = [2]; let same = &a == &b; }",
              "#[derive(PartialEq)] struct Data { value: i32 } fn main() { "
-             "let a = Data { value: 1 }; let b = Data { value: 2 }; let same = &a == &b; }",
-             "fn main() { let a = Box::<i32>::new(1); let b = Box::<i32>::new(2); let less = *a < *b; }"})
+             "let a = Data { value: 1 }; let b = Data { value: 2 }; let same = &a == &b; }"})
         check_rejected(source);
     for (const auto &source : {
              "fn main() { let a = Box::<i32>::new(1); let b = Box::<i32>::new(2); let less = a < b; }",
@@ -2437,6 +2450,398 @@ void check_array_len_ir() {
           "数组 len 模块必须通过 IR 自检");
 }
 
+// P9.1：检查分配请求使用目标布局，且实参先求值，移动不重新分配。
+void check_box_allocator_ir() {
+    const auto crate = parse_crate(R"(
+        struct Mixed { head: bool, value: i32, tail: bool }
+        fn mark() -> i32 { println_i32(11); 7 }
+        fn make() -> Box<Mixed> {
+            Box::<Mixed>::new(Mixed { head: true, value: mark(), tail: false })
+        }
+        fn other() {
+            let flag = Box::<bool>::new(true);
+            let nested = Box::<Box<bool>>::new(flag);
+            let bits = Box::<[bool; 3]>::new([false, true, false]);
+            let reference = Box::<&bool>::new(&**nested);
+        }
+        fn transfer(boxed: Box<Mixed>) -> Box<Mixed> { let moved = boxed; moved }
+        fn early() -> i32 {
+            Box::<i32>::new({ println_i32(8); return 9; 0 });
+            0
+        }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto &module = artifact.module();
+    const auto names = rx::assign_function_names(sema);
+    const auto function = [&](std::size_t index) -> const Function & {
+        return *module.find_function(names.at(index));
+    };
+    const auto *allocator = module.find_function("__rx_alloc");
+    check(allocator && allocator->linkage == Linkage::External && allocator->blocks.empty() &&
+              allocator->abi == FunctionABI{{Type::Ptr, {Type::I32, Type::I32}}, {{}, {}}, std::nullopt},
+          "分配器必须声明为外部 C ABI ptr(i32 size, i32 align)");
+
+    const auto call_instructions = [](const Function &caller) {
+        std::vector<const Instruction *> calls;
+        for (const auto &block : caller.blocks)
+            for (const auto &instruction : block.instructions)
+                if (std::holds_alternative<Call>(instruction.operation))
+                    calls.push_back(&instruction);
+        return calls;
+    };
+    const auto allocation_arguments = [](uint32_t size, uint32_t align) {
+        return std::vector{Operand::constant(Type::I32, size), Operand::constant(Type::I32, align)};
+    };
+    const auto &make = function(1);
+    const auto make_calls = call_instructions(make);
+    check(make_calls.size() == 2 && std::get<Call>(make_calls[0]->operation).function == function(0).id,
+          "构造参数的副作用必须发生在一次堆分配前");
+    const auto &alloc = std::get<Call>(make_calls[1]->operation);
+    check(alloc.function == allocator->id && alloc.arguments == allocation_arguments(12, 4) &&
+              make_calls[1]->result &&
+              return_value(make.blocks.back()) == Operand::local(Type::Ptr, *make_calls[1]->result),
+          "Mixed 分配的大小和对齐必须是 RV32 的 12/4，返回值是该分配得到的指针");
+
+    const auto other_calls = call_instructions(function(2));
+    const std::vector expected{allocation_arguments(1, 1), allocation_arguments(4, 4),
+                               allocation_arguments(3, 1), allocation_arguments(4, 4)};
+    check(other_calls.size() == expected.size(), "只有四个 Box 构造需要堆分配");
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        const auto &call = std::get<Call>(other_calls[index]->operation);
+        check(call.function == allocator->id && call.arguments == expected[index],
+              "bool、内层 Box 指针、bool 数组和引用必须按自己的布局分配");
+    }
+
+    const auto &transfer = function(3);
+    check(transfer.abi == FunctionABI{{Type::Ptr, {Type::Ptr}}, {{}}, std::nullopt} &&
+              call_instructions(transfer).empty(), "按值传递或移动 Box 只传拥有者指针");
+    const auto &early = function(4);
+    const auto early_calls = call_instructions(early);
+    check(early_calls.size() == 1 &&
+              std::get<Call>(early_calls.front()->operation).function == module.find_function("println_i32")->id &&
+              return_value(early.blocks.back()) == Operand::constant(Type::I32, 9),
+          "构造参数提前返回时只保留已有副作用，不分配堆对象");
+
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "Box 分配与移动必须通过 IR 自检");
+}
+
+// P9.2：检查 Vec 头的初始化、查询字段，以及索引到元素地址的数据流。
+void check_vec_header_and_index_ir() {
+    const auto crate = parse_crate(R"(
+        struct Mixed { head: bool, value: i32, tail: bool }
+        fn create() { Vec::<Mixed>::new(); }
+        fn length(v: &Vec<Mixed>) -> usize { v.len() }
+        fn empty(v: &Vec<Mixed>) -> bool { Vec::<Mixed>::is_empty(v) }
+        fn select(v: &Vec<Mixed>) -> &Vec<Mixed> { println_i32(1); v }
+        fn offset() -> usize { println_i32(2); 1 }
+        fn element(v: &Vec<Mixed>) -> &Mixed { &select(v)[offset()] }
+        fn early(v: &Vec<Mixed>) -> i32 { v[{ return 17; 0usize }].value }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto &module = artifact.module();
+    const auto names = rx::assign_function_names(sema);
+    const auto function = [&](std::size_t index) -> const Function & {
+        return *module.find_function(names.at(index));
+    };
+    const auto integer = [](uint32_t value) { return Operand::constant(Type::I32, value); };
+    const auto vec = StorageType::vec();
+    const auto mixed = StorageType::struct_of(sema.structs.at(0)->id.index);
+    const auto result_of = [](const Instruction &instruction) {
+        return Operand::local(instruction.type, instruction.result.value());
+    };
+
+    const auto &create = function(0);
+    check(!module.find_function("__rx_alloc"), "空 Vec 和只读查询不需要分配器");
+    const Instruction *header_slot = nullptr;
+    for (const auto &instruction : create.entry_allocas) {
+        const auto &allocation = std::get<Alloca>(instruction.operation);
+        if (allocation.storage_type == vec) {
+            check(!header_slot && allocation.alignment == 4, "空 Vec 只需一个对齐的头部槽");
+            header_slot = &instruction;
+        }
+    }
+    check(header_slot, "空 Vec 必须初始化 Vec 头");
+    const std::vector initial{Operand::constant(Type::Ptr, 0), integer(0), integer(0)};
+    const auto &initializers = create.blocks.front().instructions;
+    for (uint32_t field = 0; field < initial.size(); ++field) {
+        const auto &projection = initializers.at(2 * field);
+        const auto &gep = std::get<GetElementPtr>(projection.operation);
+        const auto &store = std::get<Store>(initializers.at(2 * field + 1).operation);
+        check(gep.source_type == vec && gep.base == result_of(*header_slot) &&
+                  gep.indices == std::vector{integer(0), integer(field)} &&
+                  store.address == result_of(projection) && store.value == initial[field],
+              "空 Vec 头的 data、len、cap 必须分别写入 null、0、0");
+    }
+    check(initializers.size() == 6, "空 Vec 构造不应访问元素缓冲区或调用运行时");
+
+    for (std::size_t index : {1u, 2u}) {
+        const auto &block = function(index).blocks.front();
+        const Instruction *length = nullptr;
+        for (std::size_t position = 0; position < block.instructions.size(); ++position) {
+            const auto &instruction = block.instructions[position];
+            if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation)) {
+                check(!length && gep->source_type == vec &&
+                          gep->indices == std::vector{integer(0), integer(1)},
+                      "Vec 查询只能投影 len，不应访问 data 或 cap");
+                length = &block.instructions.at(position + 1);
+                const auto &load = std::get<Load>(length->operation);
+                check(load.address == result_of(instruction) && load.storage_type == Type::I32,
+                      "Vec 查询必须读取传入头的当前长度，不能返回常量");
+            }
+        }
+        check(length, "Vec 查询必须读取 len");
+        if (index == 1) {
+            check(return_value(block) == result_of(*length), "len 必须返回读到的长度");
+        } else {
+            const auto &comparison = block.instructions.back();
+            const auto &equal = std::get<Compare>(comparison.operation);
+            check(equal.predicate == Comparison::Equal && equal.left == result_of(*length) &&
+                      equal.right == integer(0) && return_value(block) == result_of(comparison),
+                  "is_empty 必须比较读到的长度是否为零");
+        }
+    }
+
+    // 只借用非 Copy 元素：下标计算不能提前读缓冲区，也不能搬运元素。
+    const auto &element = function(5).blocks.front();
+    std::vector<const Instruction *> path;
+    for (const auto &instruction : element.instructions) {
+        // 忽略求值接收者之前从参数槽读取的引用。
+        if (std::holds_alternative<Call>(instruction.operation) ||
+            std::holds_alternative<GetElementPtr>(instruction.operation) ||
+            (!path.empty() && std::holds_alternative<Load>(instruction.operation)))
+            path.push_back(&instruction);
+    }
+    check(path.size() == 5 && std::get<Call>(path[0]->operation).function == function(3).id &&
+              std::get<Call>(path[1]->operation).function == function(4).id,
+          "Vec 基址和下标必须各求值一次，且基址在前");
+    const auto &data = std::get<GetElementPtr>(path[2]->operation);
+    const auto &projected = std::get<GetElementPtr>(path[4]->operation);
+    check(data.source_type == vec && data.base == result_of(*path[0]) &&
+              data.indices == std::vector{integer(0), integer(0)},
+          "求完下标后，必须从选定的 Vec 头投影 data 字段");
+    const auto &data_load = *path[3];
+    const auto &load = std::get<Load>(data_load.operation);
+    check(load.storage_type == Type::Ptr && load.address == result_of(*path[2]) &&
+              projected.base == result_of(data_load) &&
+              projected.source_type == StorageType::array_of(mixed, 0) &&
+              projected.indices == std::vector{integer(0), result_of(*path[1])} &&
+              return_value(element) == result_of(*path[4]),
+          "索引返回缓冲区中按 Mixed 布局计算的元素地址，不是头地址或副本");
+    const auto &early = function(6).blocks.front();
+    for (const auto &instruction : early.instructions)
+        check(!std::holds_alternative<GetElementPtr>(instruction.operation),
+              "下标提前返回时不能投影 Vec 头或元素");
+    check(return_value(early) == integer(17), "下标提前返回必须保留原返回值");
+
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "Vec 构造、查询和索引必须通过 IR 自检");
+}
+
+// 只执行增长分支到分配器调用为止。头的长度和容量是测试输入，不构造或分配对应的元素。
+std::pair<uint32_t, uint32_t> probe_vec_allocation(const Function &push,
+                                                  IRFunctionId allocator,
+                                                  uint32_t capacity) {
+    constexpr uint32_t header = 4;
+    std::map<uint32_t, uint32_t> memory{{header, 0}, {header + 4, capacity}, {header + 8, capacity}};
+    std::vector<uint32_t> values(push.value_types.size());
+    values.at(push.argument(0).value_id()->index) = header;
+    uint32_t slot = header + 12;
+    for (const auto &allocation : push.entry_allocas) {
+        values.at(allocation.result.value().index) = slot;
+        slot += 4;
+    }
+    const auto get = [&](const Operand &operand) {
+        if (const auto *bits = operand.constant_bits())
+            return *bits;
+        return values.at(operand.value_id()->index);
+    };
+    auto block_id = push.blocks.front().id;
+    for (std::size_t visited = 0; visited < push.blocks.size(); ++visited) {
+        const auto &block = push.block(block_id);
+        for (const auto &instruction : block.instructions) {
+            uint32_t result;
+            if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation)) {
+                check(gep->source_type == StorageType::vec() && gep->indices.size() == 2 &&
+                          get(gep->indices[0]) == 0, "分配前只应投影 Vec 头字段");
+                result = get(gep->base) + 4 * get(gep->indices[1]);
+            } else if (const auto *load = std::get_if<Load>(&instruction.operation)) {
+                result = memory.at(get(load->address));
+            } else if (const auto *store = std::get_if<Store>(&instruction.operation)) {
+                memory[get(store->address)] = get(store->value);
+                continue;
+            } else if (const auto *binary = std::get_if<BinaryOperation>(&instruction.operation)) {
+                const auto left = get(binary->left), right = get(binary->right);
+                switch (binary->operation) {
+                case BinaryOp::Add: result = left + right; break;
+                case BinaryOp::Multiply: result = left * right; break;
+                case BinaryOp::And: result = left & right; break;
+                case BinaryOp::Or: result = left | right; break;
+                default: throw std::runtime_error("分配测试遇到未支持的容量算术");
+                }
+            } else if (const auto *compare = std::get_if<Compare>(&instruction.operation)) {
+                const auto left = get(compare->left), right = get(compare->right);
+                switch (compare->predicate) {
+                case Comparison::Equal: result = left == right; break;
+                case Comparison::NotEqual: result = left != right; break;
+                case Comparison::UnsignedLessThan: result = left < right; break;
+                case Comparison::UnsignedLessThanOrEqual: result = left <= right; break;
+                case Comparison::UnsignedGreaterThan: result = left > right; break;
+                case Comparison::UnsignedGreaterThanOrEqual: result = left >= right; break;
+                default: throw std::runtime_error("分配测试遇到未支持的容量比较");
+                }
+            } else if (const auto *call = std::get_if<Call>(&instruction.operation)) {
+                check(call->function == allocator && call->arguments.size() == 2,
+                      "容量测试必须停在真正的分配器调用处");
+                return {get(call->arguments[0]), get(call->arguments[1])};
+            } else {
+                throw std::runtime_error("分配测试遇到未支持的 IR 指令");
+            }
+            values.at(instruction.result.value().index) = result;
+        }
+        const auto &end = block.terminator.value();
+        if (const auto *branch = std::get_if<Branch>(&end))
+            block_id = branch->target;
+        else if (const auto *branch = std::get_if<CondBranch>(&end))
+            block_id = get(branch->condition) ? branch->when_true : branch->when_false;
+        else
+            break;
+    }
+    throw std::runtime_error("已满 Vec 必须发出分配请求");
+}
+
+// P9.3：目标字节数可表示时不能因为容量倍增而回绕，不需要消耗目标堆内存。
+void check_vec_capacity_boundary() {
+    const auto crate = parse_crate(R"(
+        fn push_byte(values: &mut Vec<bool>) { values.push(true); }
+        fn push_word(values: &mut Vec<i32>) { values.push(7); }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics), "分配测试的输入必须通过 IR 自检");
+    const auto &module = artifact.module();
+    const auto names = rx::assign_function_names(sema);
+    const auto &byte = *module.find_function(names.at(0));
+    const auto &word = *module.find_function(names.at(1));
+    const auto *allocator = module.find_function("__rx_alloc");
+    check(allocator, "Vec 扩容应使用目标分配器");
+
+    for (const auto &[push, stride, old_capacity] : {
+             std::tuple{&byte, 1u, 0u}, std::tuple{&word, 4u, 0u},
+             std::tuple{&word, 4u, 2u}, std::tuple{&byte, 1u, 0x80000000u},
+             std::tuple{&word, 4u, 0x1fffffffu}, std::tuple{&word, 4u, 0x20000000u},
+             std::tuple{&word, 4u, 0x30000000u}, std::tuple{&word, 4u, 0x3ffffffeu}}) {
+        const auto [bytes, align] = probe_vec_allocation(*push, allocator->id, old_capacity);
+        const uint64_t required = (uint64_t{old_capacity} + 1) * stride;
+        if (bytes < required || bytes % stride != 0 || align != stride) {
+            std::ostringstream error;
+            error << "Vec push: cap=" << old_capacity << ", stride=" << stride
+                  << " requires at least " << required << " bytes, got __rx_alloc("
+                  << bytes << ", " << align << ')';
+            throw std::runtime_error(error.str());
+        }
+    }
+}
+
+// P9.4：删除只改头中的 len，返回值在进入搬运循环前已经固定。
+void check_vec_remove_ir() {
+    const auto crate = parse_crate(R"(
+        fn take(values: &mut Vec<i32>, index: usize) -> i32 { values.remove(index) }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics), "Vec remove 必须通过 IR 自检");
+    const auto &module = artifact.module();
+    const auto &take = *module.find_function(rx::assign_function_names(sema).at(0));
+    const auto result_of = [](const Instruction &instruction) {
+        return Operand::local(instruction.type, instruction.result.value());
+    };
+    const auto zero = Operand::constant(Type::I32, 0);
+    const auto one = Operand::constant(Type::I32, 1);
+    Operand length_field, data_field, length, removed, removed_address, index;
+    const auto &entry = take.blocks.front();
+    for (const auto &instruction : entry.instructions) {
+        if (const auto *projection = std::get_if<GetElementPtr>(&instruction.operation)) {
+            if (projection->source_type == StorageType::vec()) {
+                if (projection->indices == std::vector{zero, one})
+                    length_field = result_of(instruction);
+                else if (projection->indices == std::vector{zero, zero})
+                    data_field = result_of(instruction);
+            } else if (projection->source_type == StorageType::array_of(StorageType::scalar(Type::I32), 0)) {
+                removed_address = result_of(instruction);
+                index = projection->indices.at(1);
+            }
+        }
+        if (const auto *load = std::get_if<Load>(&instruction.operation);
+            load && load->storage_type == Type::I32) {
+            if (load->address == length_field)
+                length = result_of(instruction);
+            else if (load->address == removed_address)
+                removed = result_of(instruction);
+        }
+    }
+    check(length.type == Type::I32 && removed.type == Type::I32 && data_field.type == Type::Ptr,
+          "进入搬运循环前应读取头和被删元素");
+    const auto &condition = take.block(std::get<Branch>(*entry.terminator).target);
+    const auto &guard = std::get<CondBranch>(*condition.terminator);
+    const auto &compare = std::get<Compare>(condition.instructions.back().operation);
+    check(compare.predicate == Comparison::UnsignedLessThan && guard.condition == result_of(condition.instructions.back()),
+          "后缀循环必须在搬运前测试 offset < count");
+    const auto &offset = std::get<Load>(condition.instructions.front().operation);
+    check(compare.left == result_of(condition.instructions.front()), "后缀循环应测试当前 offset");
+    const auto &exit = take.block(guard.when_false);
+    check(return_value(exit) == removed, "后缀为空时应直接返回先前读出的值");
+
+    // 追踪循环边界所用的减法，避免只检查存在循环却漏掉最后一个元素的越界读。
+    const auto subtract = [&](const BasicBlock &block, const Operand &result) -> const BinaryOperation & {
+        for (const auto &instruction : block.instructions) {
+            if (instruction.result && result_of(instruction) == result) {
+                const auto &operation = std::get<BinaryOperation>(instruction.operation);
+                check(operation.operation == BinaryOp::Subtract, "长度必须来自减法");
+                return operation;
+            }
+        }
+        throw std::runtime_error("删除长度缺少定义");
+    };
+    const auto &suffix = subtract(entry, compare.right);
+    const auto &remaining = subtract(entry, suffix.left);
+    check(suffix.right == one && remaining.left == length && remaining.right == index,
+          "搬运范围必须是 len - index - 1");
+    bool starts_at_zero = false;
+    std::size_t length_writes = 0;
+    for (const auto &block : take.blocks) {
+        for (const auto &instruction : block.instructions) {
+            check(!std::holds_alternative<Call>(instruction.operation), "逐元素 remove 不应分配或调用克隆");
+            if (const auto *store = std::get_if<Store>(&instruction.operation)) {
+                check(store->address != data_field, "remove 不应更换数据指针");
+                if (block.id == entry.id && store->address == offset.address && store->value == zero)
+                    starts_at_zero = true;
+                if (store->address == length_field) {
+                    ++length_writes;
+                    check(block.id == exit.id, "长度只能在搬运结束后更新");
+                    const auto &next = subtract(exit, store->value);
+                    check(next.left == length && next.right == one, "删除后必须存回 len - 1");
+                }
+            }
+            if (const auto *projection = std::get_if<GetElementPtr>(&instruction.operation);
+                projection && projection->source_type == StorageType::vec())
+                check(projection->indices == std::vector{zero, zero} ||
+                          projection->indices == std::vector{zero, one}, "remove 不应访问 cap");
+        }
+    }
+    check(starts_at_zero && length_writes == 1, "后缀为空时应跳过搬运，且长度只写回一次");
+}
+
 void run_tests() {
     check_function_names();
     check_named_storage_layouts();
@@ -2445,6 +2850,9 @@ void run_tests() {
     check_aggregate_call_abi();
     check_method_call_abi();
     check_array_len_ir();
+    check_box_allocator_ir();
+    check_vec_header_and_index_ir();
+    check_vec_remove_ir();
     check_println();
     check_locals();
     check_scalar_constants();
@@ -2485,11 +2893,11 @@ void run_tests() {
     check_entry("const LEN: usize = 2; struct Data { values: [i32; LEN] } impl Data { const VALUE: i32 = 7; } fn main() {}");
     // P8.2：未调用的用户方法也按普通函数生成，不再属于“尚未支持”。
     check_entry("struct Data {} impl Data { fn unused(&self) {} } fn main() {}");
-    for (const auto &source : {
-             "fn main() { Box::<i32>::new(1); }",
-             "fn main() { Vec::<i32>::new(); }",
-             "fn main() { let x = { (); }; }"})
-        check_rejected(source);
+    // P9.1：Box 构造和经过 Box 的引用转换已接入。
+    check_generates("fn main() { Box::<i32>::new(1); }");
+    check_generates("fn narrow(p: &Box<i32>) -> &i32 { p } "
+                    "fn deep(p: &Box<Box<i32>>) -> &i32 { p } fn main() {}");
+    check_rejected("fn main() { let x = { (); }; }");
 
     std::ostringstream errors;
     std::optional<rx::IRArtifact> independent;
@@ -2520,6 +2928,10 @@ int main(int argc, char **argv) {
         if (argc == 2 && std::string_view(argv[1]) == "--emit-operations") {
             const auto artifact = make_scalar_operation_driver();
             return artifact.verify_and_print(std::cout, std::cerr) ? 0 : 1;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--test-vec-capacity") {
+            check_vec_capacity_boundary();
+            return 0;
         }
         return 2;
     } catch (const std::exception &error) {

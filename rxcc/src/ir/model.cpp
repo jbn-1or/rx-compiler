@@ -160,7 +160,8 @@ Operand Operand::local(Type type, ValueId value_id) {
 }
 
 // 判断操作数的位模式是否落在其类型允许的范围内：
-// i1 只能是 0/1，i8 最大 0xff，i32 接受全部 32 位；其他类型不能是常量。
+// i1 只能是 0/1，i8 最大 0xff，i32 接受全部 32 位；
+// ptr 只允许 null，其他指针常量没有可表达的来源。
 bool valid_constant(const Operand &operand) {
     const auto *bits = operand.constant_bits();
     if (!bits)
@@ -172,6 +173,8 @@ bool valid_constant(const Operand &operand) {
             return *bits <= 0xff;
         case Type::I32:
             return true;
+        case Type::Ptr:
+            return *bits == 0;
         default:
             return false;
     }

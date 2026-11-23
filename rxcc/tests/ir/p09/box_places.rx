@@ -1,0 +1,45 @@
+// Exercise field, index and method projections through Box and references.
+struct Mixed { head: bool, value: i32, tail: bool }
+
+impl Mixed {
+    fn get(&self) -> i32 { self.value }
+    fn set(&mut self, value: i32) { self.value = value; }
+}
+
+fn mark(tag: i32, value: i32) -> i32 { println_i32(tag); value }
+fn make(tag: i32, value: i32) -> Box<Mixed> {
+    println_i32(tag);
+    Box::<Mixed>::new(Mixed { head: true, value: value, tail: false })
+}
+fn select(value: &mut Box<Mixed>) -> &mut Box<Mixed> { println_i32(11); value }
+fn array() -> Box<[i32; 3]> { println_i32(50); Box::<[i32; 3]>::new([3, 5, 7]) }
+fn index() -> usize { println_i32(51); 1 }
+fn assign(place: &mut i32, value: i32) { *place = value; }
+
+fn main() {
+    let mut first = make(10, 7);
+    println_i32(make(20, 9).value);
+    println_i32(make(21, 11).get());
+    select(&mut first).set(mark(30, 42));
+    let moved = *first;
+    println_i32(moved.head as i32);
+    println_i32(moved.value);
+    println_i32(moved.tail as i32);
+
+    println_i32(array()[index()]);
+    let mut values = array();
+    values[index()] = 12;
+    println_i32(values[1]);
+
+    let mut number = 60;
+    {
+        let stored = Box::<&mut i32>::new(&mut number);
+        **stored = 61;
+    }
+    println_i32(number);
+
+    let mut deep = Box::<Box<i32>>::new(Box::<i32>::new(1));
+    assign(&mut deep, 62);
+    let shared = Box::<&i32>::new(&deep);
+    println_i32(**shared);
+}

@@ -103,6 +103,7 @@ if(BUILD_TESTING)
   target_link_libraries(ir_entry_test PRIVATE rxcc_frontend rxcc_ir)
   target_compile_options(ir_entry_test PRIVATE -Wall -Wextra)
   add_test(NAME ir_entry_test COMMAND ir_entry_test)
+  add_test(NAME ir_vec_capacity_boundary COMMAND ir_entry_test --test-vec-capacity)
 
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   add_test(NAME ir_cli_smoke

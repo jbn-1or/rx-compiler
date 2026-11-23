@@ -1,0 +1,42 @@
+// Exercise Vec heads across value boundaries without requiring push.
+struct Bag { items: Vec<i32> }
+
+fn relay(values: Vec<i32>) -> Vec<i32> { values }
+fn move_bag(bag: Bag) -> Bag { Bag { items: bag.items } }
+fn make() -> [Bag; 1] {
+    [move_bag(Bag { items: relay(Vec::<i32>::new()) })]
+}
+
+fn index() -> usize { println_i32(99); 0 }
+fn early_base(values: &Vec<i32>) -> i32 {
+    ({ println_i32(21); return 71; values })[index()]
+}
+fn early_index(values: &Vec<i32>) -> i32 {
+    values[{ println_i32(22); return 72; 0usize }]
+}
+fn early_query(values: &Vec<i32>) -> usize {
+    ({ println_i32(23); return 73; values }).len()
+}
+
+// These functions are only compiled: main never indexes an empty Vec.
+fn nested(values: &Vec<Vec<bool>>, outer: usize, inner: usize) -> bool {
+    values[outer][inner]
+}
+fn assign(values: &mut Vec<i32>, offset: usize) { values[offset] = 42; }
+fn shared(values: Vec<&mut i32>) -> i32 {
+    let reference: &i32 = values[0];
+    *reference
+}
+fn write(values: Box<&mut Vec<&mut i32>>) { *values[0] = 42; }
+
+fn main() {
+    let bags = make();
+    let items = &bags[0].items;
+    let deep = &items;
+    println_i32(deep.len() as i32);
+    println_i32(Vec::<i32>::is_empty(items) as i32);
+    println_i32(Vec::<i32>::len(items) as i32);
+    println_i32(early_base(items));
+    println_i32(early_index(items));
+    println_i32(early_query(items) as i32);
+}

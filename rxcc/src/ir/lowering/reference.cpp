@@ -32,8 +32,10 @@ GenerationContext::emit_place(const Expression &expression,
         if (path_ended(*reference))
             return PlaceResult{NoContinuation{}};
         const auto &type = semantics.expressions.at(unary->operand.get()).type;
-        if (!is_reference(type)) {
-            diagnostics << "IR 生成尚未支持 Box 解引用（P9）\n";
+        // 引用和 Box 的计算值都是指向目标的指针，一次 * 只投影一层。
+        if (type.kind != SemanticType::Kind::Reference &&
+            type.kind != SemanticType::Kind::Box) {
+            diagnostics << "IR 生成遇到不可解引用的操作数\n";
             return std::nullopt;
         }
         return Place{std::get<ir::Operand>(*reference), type.inner.get()};
@@ -42,12 +44,15 @@ GenerationContext::emit_place(const Expression &expression,
     return std::nullopt;
 }
 
-// 引用基址先求值为指针，再沿剩余引用层读取；聚合 place 不得先复制。
+// 引用/Box 基址先求值为指针，再沿剩余引用和 Box 层读取；
+// 聚合 place 不得先复制。Box 的存储也是指针，自动解引用读取同一层指针。
 std::optional<PlaceResult>
 GenerationContext::emit_base_place(const Expression &expression,
                                    LocalPlaces &locals) {
     const auto &base = semantics.expressions.at(&expression);
-    if (!is_reference(base.type) && base.place.is_place)
+    const bool indirect = is_reference(base.type) ||
+                          base.type.kind == SemanticType::Kind::Box;
+    if (!indirect && base.place.is_place)
         return emit_place(expression, locals);
 
     auto value = emit_value(expression, locals);
@@ -57,15 +62,16 @@ GenerationContext::emit_base_place(const Expression &expression,
         return PlaceResult{NoContinuation{}};
     if (const auto *aggregate = std::get_if<AggregateValue>(&*value))
         return PlaceResult{Place{aggregate->address, aggregate->type}};
-    if (is_reference(base.type)) {
+    if (indirect) {
         Place target{std::get<ir::Operand>(*value), base.type.inner.get()};
-        while (is_reference(*target.type)) {
+        while (is_reference(*target.type) ||
+               target.type->kind == SemanticType::Kind::Box) {
             target = Place{load_value(target.address, ir::Type::Ptr),
                            target.type->inner.get()};
         }
         return target;
     }
-    diagnostics << "IR 生成尚未支持此投影基址（P9）\n";
+    diagnostics << "IR 生成遇到不可投影的基址\n";
     return std::nullopt;
 }
 
@@ -78,7 +84,7 @@ GenerationContext::emit_field_place(const FieldExpression &expression,
         return base;
     const auto &current = std::get<Place>(*base);
     if (current.type->kind != SemanticType::Kind::Struct) {
-        diagnostics << "IR 生成尚未支持 Box 字段访问（P9）\n";
+        diagnostics << "IR 生成遇到非结构体字段基址\n";
         return std::nullopt;
     }
     const StructSymbol &structure = *current.type->struct_symbol;
@@ -98,25 +104,40 @@ GenerationContext::emit_field_place(const FieldExpression &expression,
 std::optional<PlaceResult>
 GenerationContext::emit_index_place(const IndexExpression &expression,
                                     LocalPlaces &locals) {
+    // 先固定容器位置，再求一次下标；只有两者都完成后才投影元素地址。
     auto base = emit_base_place(*expression.base, locals);
     if (!base || path_ended(*base))
         return base;
     const auto &current = std::get<Place>(*base);
-    if (current.type->kind != SemanticType::Kind::Array) {
-        diagnostics << "IR 生成尚未支持此容器索引（P9）\n";
-        return std::nullopt;
-    }
     auto index = emit_value(*expression.index, locals);
     if (!index)
         return std::nullopt;
     if (path_ended(*index))
         return PlaceResult{NoContinuation{}};
-    const auto storage = ir::storage_type_of(*current.type);
-    const auto address = builder.get_element_ptr(
-        storage, current.address,
-        {ir::Operand::constant(ir::Type::I32, 0),
-         std::get<ir::Operand>(*index)});
-    return PlaceResult{Place{address, current.type->inner.get()}};
+    const auto index_operand = std::get<ir::Operand>(*index);
+    const auto zero = ir::Operand::constant(ir::Type::I32, 0);
+    if (current.type->kind == SemanticType::Kind::Array) {
+        const auto storage = ir::storage_type_of(*current.type);
+        const auto address = builder.get_element_ptr(
+            storage, current.address, {zero, index_operand});
+        return PlaceResult{Place{address, current.type->inner.get()}};
+    }
+    if (current.type->kind == SemanticType::Kind::Vec) {
+        // Vec 头保存缓冲区指针；元素地址必须由该指针加下标得到，
+        // 不能把头本身的地址当作元素缓冲区。
+        const auto header_storage = ir::StorageType::vec();
+        const auto data_address = builder.get_element_ptr(
+            header_storage, current.address, {zero, zero});
+        const auto data = builder.load(ir::Type::Ptr, data_address, 4);
+        // 缓冲区长度由运行时头决定；零长度数组只用来计算元素步长。
+        const auto buffer_storage = ir::StorageType::array_of(
+            ir::storage_type_of(*current.type->inner), 0);
+        const auto address = builder.get_element_ptr(
+            buffer_storage, data, {zero, index_operand});
+        return PlaceResult{Place{address, current.type->inner.get()}};
+    }
+    diagnostics << "IR 生成遇到非数组或 Vec 的索引基址\n";
+    return std::nullopt;
 }
 
 // 生成 & 或 &mut：已有 place 直接返回其地址；
@@ -125,7 +146,7 @@ std::optional<EmitResult>
 GenerationContext::emit_borrow(const UnaryExpression &expression,
                                LocalPlaces &locals) {
     const auto &result_type = semantics.expressions.at(&expression).type;
-    // 引用目标可以是标量或可按布局保存的聚合；Box 引用仍随 P9。
+    // 引用目标可以是标量、Box 或可按布局保存的聚合。
     if (!is_storable_value(result_type)) {
         diagnostics << "IR 生成尚未支持此引用类型（P9）\n";
         return std::nullopt;
@@ -153,20 +174,14 @@ GenerationContext::emit_borrow(const UnaryExpression &expression,
     return EmitResult{materialize_value(std::get<ir::Operand>(*value))};
 }
 
-// 按 sema 已选定的调整路径执行引用转换。
-// 每个 Reference 步骤只读取当前引用保存的指针，最后仍是指向目标位置的引用；
-// 不读取目标中保存的值，也不重新推导整数或引用可变性。
+// 按 sema 已选定的调整路径执行引用/Box 转换。
+// 每个步骤只读取当前层保存的指针：引用保存目标地址，Box 保存拥有者指针，
+// 因此两者都执行一次 load ptr；不读取目标中保存的值。
 std::optional<ir::Operand>
 GenerationContext::emit_coercion(ir::Operand value,
                                  const CoercionPlan &plan) {
-    for (const auto &step : plan.steps) {
-        // Box 的指针读取随 P9 的容器布局实现；当前不能假装它是普通引用。
-        if (step.kind == CoercionStepKind::Box) {
-            diagnostics << "IR 生成尚未支持 Box 引用转换（P9）\n";
-            return std::nullopt;
-        }
+    for (std::size_t step = 0; step < plan.steps.size(); ++step)
         value = load_value(value, ir::Type::Ptr);
-    }
     return value;
 }
 

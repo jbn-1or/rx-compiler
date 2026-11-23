@@ -23,6 +23,9 @@ void value(std::ostream &output, const Operand &operand) {
         // i8 常量按无符号字节输出。
         } else if (operand.type == Type::I8) {
             output << bits;
+        // ptr 只有空指针常量，按 LLVM 的 null 输出。
+        } else if (operand.type == Type::Ptr) {
+            output << "null";
         } else {
             // i32 最高位为 1 时按负数输出，先转成 64 位再减 2^32，避免溢出。
             const int64_t number =

@@ -242,6 +242,28 @@ private:
     std::optional<EmitResult> emit_target_call(ir::IRFunctionId target,
                                                std::vector<EmitResult> arguments,
                                                const SemanticType &result_type);
+    // Box::<T>::new：申请 T 的存储并把已求好的值复制/移动到新分配。
+    std::optional<EmitResult> emit_box_new(const SemanticType &box_type,
+                                           std::vector<EmitResult> prepared);
+    // Vec::<T>::new：生成 {null, 0, 0} 头，不申请零字节缓冲区。
+    std::optional<EmitResult> emit_vec_new(const SemanticType &vec_type);
+    // Vec 的 len/is_empty：从真实头的长度字段读取，header 必须指向 {ptr,i32,i32}。
+    std::optional<EmitResult> emit_vec_query(BuiltinCallKind kind,
+                                             ir::Operand header);
+    // Vec::push：按当前头决定是否增长，搬运活动元素后写入新元素并更新 len。
+    std::optional<EmitResult> emit_vec_push(const SemanticType &vec_type,
+                                            ir::Operand header,
+                                            EmitResult element);
+    // Vec::remove：先保存被移除值，再把后缀左移一位并更新 len。
+    std::optional<EmitResult> emit_vec_remove(const SemanticType &vec_type,
+                                              ir::Operand header,
+                                              ir::Operand index);
+    // 调用 __rx_alloc，首次使用时声明外部 C ABI，后续复用。
+    ir::Operand emit_alloc(ir::Operand size, ir::Operand align);
+    // 对运行时 count 个下标生成 body；循环条件和下标都在运行时读取。
+    void for_each_runtime_index(
+        ir::Operand count,
+        const std::function<void(ir::Operand)> &body);
 
     const SemanticResult &semantics; // 语义分析结果，提供表达式、路径和调用的记录。
     const std::vector<ir::IRFunctionId> &functions; // 源 FunctionId 下标到已登记 IRFunctionId 的映射。

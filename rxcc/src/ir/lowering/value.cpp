@@ -19,22 +19,27 @@ bool is_reference(const SemanticType &type) {
     return type.kind == SemanticType::Kind::Reference;
 }
 
-// 结构体和固定数组可以按自身布局保存为独立值。
+// 结构体、固定数组和 Vec 头都按自身布局保存为独立值。
+// Vec 头固定为 {ptr,i32,i32}，元素缓冲区仍在堆上，不随头一起展开。
 bool is_aggregate_value(const SemanticType &type) {
     return type.kind == SemanticType::Kind::Struct ||
-           type.kind == SemanticType::Kind::Array;
+           type.kind == SemanticType::Kind::Array ||
+           type.kind == SemanticType::Kind::Vec;
 }
 
-// 当前 lowering 可作为局部值保存的类型：标量、引用链（可指向聚合）或聚合。
+// 当前 lowering 可作为局部值保存的类型：标量、引用/Box（都保存指针）或聚合。
 bool is_storable_value(const SemanticType &type) {
     if (is_reference(type))
         return is_storable_value(*type.inner);
+    // Box 的存储就是拥有者指针，不展开被拥有的目标布局。
+    if (type.kind == SemanticType::Kind::Box)
+        return true;
     return is_scalar(type) || is_aggregate_value(type);
 }
 
-// 计算普通值使用的 IR 类型：标量沿用标量映射，引用统一为 ptr。
+// 计算普通值使用的 IR 类型：标量沿用标量映射，引用和 Box 统一为 ptr。
 ir::Type lower_value_type(const SemanticType &type) {
-    if (is_reference(type))
+    if (is_reference(type) || type.kind == SemanticType::Kind::Box)
         return ir::Type::Ptr;
     if (type.is_int())
         return ir::Type::I32;

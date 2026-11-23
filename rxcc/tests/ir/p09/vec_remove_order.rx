@@ -1,0 +1,29 @@
+// Check evaluation order and early exits for both forms of Vec::remove.
+struct Bag { values: Vec<i32> }
+
+fn select(bag: &mut Bag) -> &mut Bag { println_i32(11); bag }
+fn index(value: usize) -> usize { println_i32(12); value }
+
+fn early_receiver(bag: &mut Bag) -> i32 {
+    ({ println_i32(21); return 71; bag }).values.remove(index(0))
+}
+
+fn early_index(bag: &mut Bag) -> i32 {
+    Vec::<i32>::remove(&mut select(bag).values, { println_i32(22); return 72; 0usize })
+}
+
+fn main() {
+    let mut bag = Bag { values: Vec::<i32>::new() };
+    bag.values.push(10);
+    bag.values.push(20);
+    bag.values.push(30);
+    println_i32(select(&mut bag).values.remove(index(1)));
+    println_i32(early_receiver(&mut bag));
+    println_i32(early_index(&mut bag));
+    println_i32(bag.values.len() as i32);
+
+    let last = bag.values.len() - 1usize;
+    println_i32(Vec::<i32>::remove(&mut select(&mut bag).values, index(last)));
+    println_i32(bag.values[0]);
+    println_i32(bag.values.len() as i32);
+}

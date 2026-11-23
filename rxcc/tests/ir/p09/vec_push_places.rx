@@ -1,0 +1,45 @@
+// Check push through projected places and growth with owned and nested elements.
+struct Owned { flag: bool, value: Box<i32> }
+struct Bag { values: Vec<Owned> }
+
+fn select(bag: &mut Bag) -> &mut Bag { println_i32(10); bag }
+fn make(tag: i32, value: i32) -> Owned {
+    println_i32(tag);
+    Owned { flag: true, value: Box::<i32>::new(value) }
+}
+fn early(bag: &mut Bag) -> i32 {
+    select(bag).values.push({ println_i32(30); return 31; make(99, 0) });
+    0
+}
+
+fn main() {
+    let mut bag = Bag { values: Vec::<Owned>::new() };
+    select(&mut bag).values.push(make(20, 7));
+    Vec::<Owned>::push(&mut bag.values, make(21, 8));
+    bag.values.push(make(22, 9));
+    println_i32(early(&mut bag));
+    *bag.values[1].value = 18;
+    println_i32(bag.values.len() as i32);
+    println_i32(*bag.values[0].value);
+    println_i32(*bag.values[1].value);
+    println_i32(*bag.values[2].value);
+    println_i32(bag.values[2].flag as i32);
+
+    let mut rows = Vec::<Vec<bool>>::new();
+    let mut first = Vec::<bool>::new();
+    first.push(true);
+    rows.push(first);
+    rows.push(Vec::<bool>::new());
+    rows[0].push(false);
+    rows[1].push(true);
+    println_i32(rows[0].len() as i32);
+    println_i32(rows[0][0] as i32);
+    println_i32(rows[0][1] as i32);
+    println_i32(rows[1][0] as i32);
+
+    let mut value = 40;
+    let mut references = Vec::<&mut i32>::new();
+    references.push(&mut value);
+    *references[0] = 41;
+    println_i32(value);
+}

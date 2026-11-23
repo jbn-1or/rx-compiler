@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the implemented P2-P8.3 IR subset with external LLVM 22 tools."""
+"""Validate the P2-P9.4 IR and execution fixtures with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -1655,6 +1655,15 @@ def main():
             run([args.compiler, "--stage", "ir", str(p08 / f"{stem}.rx"), "-o", str(output)])
             modules.append((name, output, (p08 / f"{stem}.out").read_bytes(), b""))
 
+        p09 = p08.parent / "p09"
+        for stem in ("boxes", "box_places", "empty_vec", "vec_places",
+                     "vec_growth", "vec_two_phase", "vec_push_places",
+                     "vec_remove", "remove_owned", "vec_remove_order"):
+            name = f"p9-{stem}"
+            output = temp / f"{name}.ll"
+            run([args.compiler, "--stage", "ir", str(p09 / f"{stem}.rx"), "-o", str(output)])
+            modules.append((name, output, (p09 / f"{stem}.out").read_bytes(), b""))
+
         for name, command, expected in (
             ("model-smoke", [args.model_test], b""),
             ("model-values", [args.model_test, "--emit-model"], b""),
@@ -1705,24 +1714,15 @@ def main():
 
         # All are semantically valid. Reject unsupported lowering even in unused bodies.
         for index, contents in enumerate((
-            "fn main() { Box::<i32>::new(1); }",
-            "fn main() { Vec::<i32>::new(); }",
-            # 同名的 Vec len 仍依赖运行时容器，不能走数组常量分支。
-            "fn size(v: &Vec<i32>) -> usize { v.len() } fn main() {}",
             "fn main() { let x = { (); }; }",
             # 引用相等需要 P10 的结构化读取，不能比较地址后声称完成。
             "fn main() { let a = 1; let b = 1; let ra = &a; let rb = &b; "
              "println_i32((ra == rb) as i32); }",
             "fn main() { let a = 1; let b = 2; println_i32((&a != &b) as i32); }",
             "fn main() { let a = [1i32]; println_i32((a == a) as i32); }",
-            # 不能把投影得到的 Vec 当作标量来比较或写进新的聚合值。
+            # Vec 元素相等仍需 P10 的结构化比较，不能比较头部或缓冲区地址。
             "struct Bag { items: Vec<i32> } fn unused(a: &Bag, b: &Bag) -> bool { "
              "a.items == b.items } fn main() {}",
-            "struct Bag { items: Vec<i32> } fn unused(a: Bag) -> Bag { "
-             "Bag { items: a.items } } fn main() {}",
-            # Box 转换路径仍需 P9；不能把被擦除为 ptr 的源类型直接混用。
-            "fn narrow(p: &Box<i32>) -> &i32 { p } fn main() {}",
-            "fn narrow(p: &Box<Box<i32>>) -> &i32 { p } fn main() {}",
         )):
             unsupported = temp / f"unsupported-{index}.rx"
             unsupported.write_text(contents, encoding="utf-8")
@@ -1750,8 +1750,8 @@ def main():
         run([args.llvm_as, str(supported_method_ir), "-o", str(temp / "supported-method.bc")])
         run([args.opt, "-passes=verify", "-disable-output", str(supported_method_ir)])
 
-        # P8：检查特定诊断，避免把解析失败或后端不支持误认为语义规则正确。
-        call_diagnostics = {
+        # 检查特定诊断，避免把解析失败或后端不支持误认为语义规则正确。
+        expected_diagnostics = {
             "struct Data { n: i32 } impl Data { fn get(&self) -> i32 { self.n } } "
             "fn main() { let x = Data { n: 1 }; Data::get(x); }":
                 "type mismatch: expected &Data, found Data",
@@ -1770,6 +1770,25 @@ def main():
                 "call expects 0 argument(s), found 1",
             "fn main() { let values = [1, 2]; let size: i32 = values.len(); }":
                 "type mismatch: expected i32, found usize",
+            "fn main() { let b = Box::<i32>::new(1); *b = 2; }":
+                "assignment target is not mutable",
+            "fn bad(b: &Box<&mut i32>) { ***b = 1; } fn main() {}":
+                "assignment target is not mutable",
+            "struct Data { n: i32 } impl Data { fn set(&mut self) { self.n = 1; } } "
+            "fn bad(b: &Box<Data>) { b.set(); } fn main() {}":
+                "cannot mutably borrow an immutable or shared place",
+            (p09 / "immutable_vec_write.rx").read_text(encoding="utf-8"):
+                "assignment target is not mutable",
+            "fn bad(values: Box<Vec<&mut i32>>) { *values[0] = 1; } fn main() {}":
+                "assignment target is not mutable",
+            "fn bad(values: Vec<&mut i32>) { let item: &mut i32 = values[0]; } fn main() {}":
+                "cannot mutably reborrow through shared access",
+            "fn bad(values: Vec<Vec<i32>>) { values[0].push(1); } fn main() {}":
+                "cannot mutably borrow an immutable or shared place",
+            "fn bad(values: &Vec<i32>) { values.remove(0); } fn main() {}":
+                "cannot mutably borrow an immutable or shared place",
+            "fn bad(values: &mut Vec<i32>, index: i32) { values.remove(index); } fn main() {}":
+                "type mismatch: expected usize, found i32",
         }
         for index, contents in enumerate((
             "fn main(value: i32) {}",
@@ -1858,12 +1877,12 @@ def main():
             "fn main() { let mut a = [1, 2]; a = [3]; }",
             "struct A { n: i32 } struct B { n: i32 } "
             "fn main() { let mut a = A { n: 1 }; a = B { n: 2 }; }",
-            *call_diagnostics,
+            *expected_diagnostics,
         )):
             invalid_source = temp / f"semantic-error-{index}.rx"
             invalid_source.write_text(contents, encoding="utf-8")
             semantic = run([args.compiler, "--stage", "semantic", str(invalid_source)], expected=1)
-            diagnostic = call_diagnostics.get(contents)
+            diagnostic = expected_diagnostics.get(contents)
             if diagnostic is not None and diagnostic not in semantic.stderr:
                 raise RuntimeError(f"{invalid_source.name}: expected {diagnostic!r}, got {semantic.stderr!r}")
             output.write_bytes(b"preserve on semantic failure\n")
@@ -1881,7 +1900,16 @@ def main():
                                'extern int scanf(const char *, ...);\n'
                                'int get_i32(void) { int value; (void)scanf("%d", &value); return value; }\n'
                                'void print_i32(int value) { (void)printf("%d", value); }\n'
-                               'void println_i32(int value) { (void)printf("%d\\n", value); }\n',
+                               'void println_i32(int value) { (void)printf("%d\\n", value); }\n'
+                               'extern void *malloc(unsigned int);\n'
+                               'void *__rx_alloc(unsigned int size, unsigned int align) {\n'
+                               '    if (size && (align == 1 || align == 4)) {\n'
+                               '        void *p = malloc(size);\n'
+                               '        if (p && !((__UINTPTR_TYPE__)p & (align - 1))) return p;\n'
+                               '    }\n'
+                               '    (void)printf("invalid __rx_alloc request or result\\n");\n'
+                               '    return 0;\n'
+                               '}\n',
                                encoding="utf-8")
             runtime_assembly = temp / "runtime.s"
             run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
@@ -1905,7 +1933,7 @@ def main():
                     if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
                         raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
                                            f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
-    print(f"P2-P8.3 IR tests passed: {len(modules)} modules verified" +
+    print(f"P2-P9.4 IR fixtures passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

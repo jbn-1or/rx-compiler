@@ -1,16 +1,28 @@
 struct Owned { value: Box<i32> }
+
+fn take(v: &mut Vec<Owned>) -> Owned { v.remove(0) }
+fn take_inner(v: &mut Vec<Vec<i32>>) -> Vec<i32> { v.remove(0) }
+
 fn main() {
     let mut v = Vec::<Owned>::new();
     v.push(Owned { value: Box::<i32>::new(7) });
     v.push(Owned { value: Box::<i32>::new(8) });
-    let first = v.remove(0);
+    let first = take(&mut v);
+    let second = take(&mut v);
+    v.push(Owned { value: Box::<i32>::new(70) });
     println_i32(*first.value);
-    let second = v.remove(0);
     println_i32(*second.value);
     let mut inner = Vec::<i32>::new();
     inner.push(9);
     let mut outer = Vec::<Vec<i32>>::new();
     outer.push(inner);
-    let moved = outer.remove(0);
+    let mut next = Vec::<i32>::new();
+    next.push(10);
+    outer.push(next);
+    let mut moved = take_inner(&mut outer);
+    outer[0][0] = 11;
+    moved.push(12);
     println_i32(moved[0]);
+    println_i32(moved[1]);
+    println_i32(outer[0][0]);
 }

@@ -822,6 +822,185 @@ void check_aggregate_coercion_queries() {
                         writable, {Step::Box});
 }
 
+// P8.1：同名函数按声明区分；点调用记录的调整不改变原接收者的类型。
+void check_user_call_targets() {
+    const auto crate = parse_crate(R"(
+        struct Data { value: i32 }
+        struct Other { value: i32 }
+        fn get(x: &Data) -> i32 { x.value + 1 }
+        impl Data {
+            const START: i32 = 7;
+            fn new(value: i32) -> Self { Self { value: value } }
+            fn initial() -> Self { Self::new(Self::START) }
+            fn get(&self) -> i32 { self.value }
+            fn clone(&self, delta: i32) -> i32 { self.value + delta }
+            fn set(&mut self, value: i32) { self.value = value; }
+        }
+        impl Other { fn get(&self) -> i32 { self.value } }
+        fn calls(mut x: Data, r: &Data, deep: &&Data, y: &Other) {
+            x.get();
+            r.get();
+            deep.get();
+            y.get();
+            x.clone(2);
+            x.set(8);
+            Data::get(deep);
+            Other::get(y);
+            get(r);
+            Data::new(Data::START);
+        }
+        fn main() {}
+    )");
+    const auto result = analyze_fixture(*crate);
+    const auto &block = *checked_ast<rx::Function>(crate->items.at(5)).body;
+    const auto &data = *result.structs.at(0);
+    const auto &other = *result.structs.at(1);
+    const auto &get = checked_ast<rx::Function>(crate->items.at(2));
+    const auto &data_get = *static_cast<const rx::FunctionSymbol *>(data.associated_items.at("get"));
+    const auto &other_get = *static_cast<const rx::FunctionSymbol *>(other.associated_items.at("get"));
+    const auto &clone = *static_cast<const rx::FunctionSymbol *>(data.associated_items.at("clone"));
+    const auto &set = *static_cast<const rx::FunctionSymbol *>(data.associated_items.at("set"));
+    const auto &make = *static_cast<const rx::FunctionSymbol *>(data.associated_items.at("new"));
+    const auto &initial = *static_cast<const rx::FunctionSymbol *>(data.associated_items.at("initial"));
+    const auto &start = *static_cast<const rx::ConstantSymbol *>(data.associated_items.at("START"));
+    using T = rx::SemanticType;
+    using Borrow = rx::ReceiverAdjustment::Borrow;
+    const auto data_type = T::struct_(&data);
+    const auto shared = T::reference(false, data_type);
+    const auto deep = T::reference(false, shared);
+    const auto other_shared = T::reference(false, T::struct_(&other));
+    const auto i32 = T::int_(T::IntKind::I32);
+
+    const auto expect_dot = [&](std::size_t index, rx::FunctionId target,
+                                const T &source, const T &receiver,
+                                std::size_t dereferences, Borrow borrow)
+        -> const rx::ResolvedMethod & {
+        const auto &call = checked_ast<rx::MethodCallExpression>(&statement_expression(block, index));
+        const auto &resolved = result.method_calls.at(&call);
+        check(std::get<rx::FunctionId>(resolved.target) == target,
+              "dot call must retain the selected user declaration ID");
+        check(resolved.receiver.dereferences == dereferences && resolved.receiver.borrow == borrow &&
+                  resolved.signature.receiver && resolved.signature.receiver->same_type(receiver) &&
+                  result.expressions.at(call.receiver.get()).type.same_type(source),
+              "dot call must retain the exact adjustment and the unchanged receiver type");
+        return resolved;
+    };
+    expect_dot(0, data_get.id, data_type, shared, 0, Borrow::Shared);
+    expect_dot(1, data_get.id, shared, shared, 0, Borrow::None);
+    expect_dot(2, data_get.id, deep, shared, 1, Borrow::None);
+    expect_dot(3, other_get.id, other_shared, other_shared, 0, Borrow::None);
+    const auto &resolved_clone = expect_dot(4, clone.id, data_type, shared, 0, Borrow::Shared);
+    check(resolved_clone.signature.parameters.size() == 1 &&
+              resolved_clone.signature.parameters.front().same_type(i32) &&
+              resolved_clone.signature.return_type.same_type(i32),
+          "inherent clone must retain its user-declared parameter and result types");
+    expect_dot(5, set.id, data_type, T::reference(true, data_type), 0, Borrow::Mutable);
+
+    const auto expect_direct = [&](std::size_t index, rx::FunctionId target) -> const rx::CallExpression & {
+        const auto &call = checked_ast<rx::CallExpression>(&statement_expression(block, index));
+        check(std::get<rx::FunctionId>(result.ordinary_calls.at(&call)) == target,
+              "direct calls must distinguish same-named methods and free functions");
+        return call;
+    };
+    const auto &qualified = expect_direct(6, data_get.id);
+    check_coercion_plan(result, {&qualified, rx::UseKind::Argument, 0},
+                        *qualified.arguments.at(0), deep, shared, {rx::CoercionStepKind::Reference});
+    expect_direct(7, other_get.id);
+    expect_direct(8, result.function_declarations.at(&get));
+    const auto &named_make = expect_direct(9, make.id);
+    const auto &self_make = checked_ast<rx::CallExpression>(initial.node->body->tail);
+    check(std::get<rx::FunctionId>(result.ordinary_calls.at(&self_make)) == make.id &&
+              result.expressions.at(&self_make).type.same_type(data_type),
+          "Self::new must select the same function and nominal result type as Data::new");
+    for (const auto *call : {&named_make, &self_make}) {
+        const auto &path = checked_ast<rx::PathExpression>(call->arguments.at(0));
+        check(std::get<rx::ConstantId>(result.paths.at(&path)) == start.id,
+              "Data::START and Self::START must resolve to the same constant");
+    }
+}
+
+// P8.1：内置目标记录操作种类和具体所属类型，不依赖方法拼写或返回类型猜测。
+void check_builtin_call_targets() {
+    const auto crate = parse_crate(R"(
+        #[derive(Clone)]
+        struct Item { value: i32 }
+        impl Item { fn read(&self) -> i32 { self.value } }
+        fn calls(array: &&[i32; 3], wrapped: &Box<Item>, item: &Item) {
+            let mut values = Vec::<bool>::new();
+            Box::<i32>::new(1);
+            array.len();
+            values.len();
+            values.is_empty();
+            values.push(true);
+            values.remove(0);
+            wrapped.clone();
+            wrapped.read();
+            Box::<Item>::clone(wrapped);
+            Item::clone(item);
+            Vec::<bool>::len(&values);
+        }
+        fn main() {}
+    )");
+    const auto result = analyze_fixture(*crate);
+    const auto &block = *checked_ast<rx::Function>(crate->items.at(2)).body;
+    using T = rx::SemanticType;
+    using Kind = rx::BuiltinCallKind;
+    using Borrow = rx::ReceiverAdjustment::Borrow;
+    const auto i32 = T::int_(T::IntKind::I32);
+    const auto usize = T::int_(T::IntKind::Usize);
+    const auto boolean = T::bool_();
+    const auto array = T::array(i32, 3);
+    const auto vec = T::vec(boolean);
+    const auto item = T::struct_(result.structs.at(0).get());
+    const auto boxed = T::boxed(item);
+
+    const auto expect_target = [](const rx::CallTarget &target, Kind kind, const T &owner) {
+        const auto &builtin = std::get<rx::BuiltinCall>(target);
+        check(builtin.kind == kind && builtin.owner.same_type(owner),
+              "builtin calls must retain the exact operation and its concrete owner type");
+    };
+    const auto expect_dot = [&](std::size_t index, Kind kind, const T &owner, const T &returned,
+                                std::size_t dereferences, Borrow borrow,
+                                std::initializer_list<T> parameters = {}) {
+        const auto &call = checked_ast<rx::MethodCallExpression>(&statement_expression(block, index));
+        const auto &resolved = result.method_calls.at(&call);
+        expect_target(resolved.target, kind, owner);
+        const auto &signature = resolved.signature;
+        check(resolved.receiver.dereferences == dereferences && resolved.receiver.borrow == borrow &&
+                  signature.receiver && signature.receiver->same_type(T::reference(borrow == Borrow::Mutable, owner)) &&
+                  signature.return_type.same_type(returned) && signature.parameters.size() == parameters.size(),
+              "builtin dot calls must retain their adjustment and signature");
+        std::size_t parameter = 0;
+        for (const auto &type : parameters)
+            check(signature.parameters.at(parameter++).same_type(type),
+                  "builtin dot calls must retain ordinary parameter types");
+    };
+    const auto &values = checked_ast<rx::LetStatement>(block.statements.at(0));
+    const auto &vec_new = checked_ast<rx::CallExpression>(values.initializer);
+    expect_target(result.ordinary_calls.at(&vec_new), Kind::VecNew, vec);
+    const auto expect_direct = [&](std::size_t index, Kind kind, const T &owner) {
+        const auto &call = checked_ast<rx::CallExpression>(&statement_expression(block, index));
+        expect_target(result.ordinary_calls.at(&call), kind, owner);
+    };
+    expect_direct(1, Kind::BoxNew, T::boxed(i32));
+    expect_dot(2, Kind::ArrayLen, array, usize, 1, Borrow::None);
+    expect_dot(3, Kind::VecLen, vec, usize, 0, Borrow::Shared);
+    expect_dot(4, Kind::VecIsEmpty, vec, boolean, 0, Borrow::Shared);
+    expect_dot(5, Kind::VecPush, vec, T::unit(), 0, Borrow::Mutable, {boolean});
+    expect_dot(6, Kind::VecRemove, vec, boolean, 0, Borrow::Mutable, {usize});
+    // Box 自己的 clone 先命中；同一接收者调用 read 则确实要穿过引用和 Box。
+    expect_dot(7, Kind::Clone, boxed, boxed, 0, Borrow::None);
+    const auto &read = checked_ast<rx::MethodCallExpression>(&statement_expression(block, 8));
+    const auto &resolved = result.method_calls.at(&read);
+    const auto &method = *static_cast<const rx::FunctionSymbol *>(item.struct_symbol->associated_items.at("read"));
+    check(std::get<rx::FunctionId>(resolved.target) == method.id &&
+              resolved.receiver.dereferences == 2 && resolved.receiver.borrow == Borrow::Shared,
+          "pointee method must retain both dereferences and the final shared borrow");
+    expect_direct(9, Kind::Clone, boxed);
+    expect_direct(10, Kind::Clone, item);
+    expect_direct(11, Kind::VecLen, vec);
+}
+
 // 列表先定最终元素类型再记录每条边；重复元素只记录一次，并保留原始类型。
 void check_array_coercion_queries() {
     const auto crate = parse_crate(R"(
@@ -1187,6 +1366,8 @@ int main() {
     check_reference_coercion_queries();
     check_control_flow_coercion_queries();
     check_aggregate_coercion_queries();
+    check_user_call_targets();
+    check_builtin_call_targets();
     check_array_coercion_queries();
     check_semantic_result_ownership();
     check_failed_semantic_result();

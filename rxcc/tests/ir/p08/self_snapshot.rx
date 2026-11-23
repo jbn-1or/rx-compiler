@@ -1,0 +1,28 @@
+// A Copy receiver is fixed before an argument changes the original.
+#[derive(Clone, Copy)]
+struct Data { value: i32 }
+
+impl Data {
+    fn updated(mut self, delta: i32, extra: &i32, include_extra: bool) -> Self {
+        self.value += delta;
+        if include_extra { self.value += *extra; }
+        self
+    }
+}
+
+fn main() {
+    let mut original = Data { value: 7 };
+    let extra = 4;
+    let reference = &extra;
+    let deep = &reference;
+    let dotted = original.updated({ println_i32(10); original.value = 40; 3 }, deep, true);
+    println_i32(dotted.value);
+    println_i32(original.value);
+
+    let borrowed = &original;
+    let from_reference = borrowed.updated(2, deep, false);
+    let explicit = Data::updated(original, 1, deep, true);
+    println_i32(from_reference.value);
+    println_i32(explicit.value);
+    println_i32(original.value);
+}

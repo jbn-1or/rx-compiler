@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the implemented P2-P7.4 IR subset with external LLVM 22 tools."""
+"""Validate the implemented P2-P8.3 IR subset with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -1645,6 +1645,16 @@ def main():
             run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
             modules.append((name, output, expected, b""))
 
+        # 方法用例与前几阶段共用 LLVM 校验和 RV32 O0/O2 执行回路。
+        p08 = Path(__file__).resolve().parent / "ir" / "p08"
+        for stem in ("methods", "inherent_clone", "qualified_calls", "receiver_order",
+                     "self_snapshot", "receiver_places", "receiver_early_exit",
+                     "array_len", "array_len_places"):
+            name = f"p8-{stem}"
+            output = temp / f"{name}.ll"
+            run([args.compiler, "--stage", "ir", str(p08 / f"{stem}.rx"), "-o", str(output)])
+            modules.append((name, output, (p08 / f"{stem}.out").read_bytes(), b""))
+
         for name, command, expected in (
             ("model-smoke", [args.model_test], b""),
             ("model-values", [args.model_test, "--emit-model"], b""),
@@ -1697,8 +1707,9 @@ def main():
         for index, contents in enumerate((
             "fn main() { Box::<i32>::new(1); }",
             "fn main() { Vec::<i32>::new(); }",
+            # 同名的 Vec len 仍依赖运行时容器，不能走数组常量分支。
+            "fn size(v: &Vec<i32>) -> usize { v.len() } fn main() {}",
             "fn main() { let x = { (); }; }",
-            "struct Data {} impl Data { fn unused(&self) {} } fn main() {}",
             # 引用相等需要 P10 的结构化读取，不能比较地址后声称完成。
             "fn main() { let a = 1; let b = 1; let ra = &a; let rb = &b; "
              "println_i32((ra == rb) as i32); }",
@@ -1728,6 +1739,38 @@ def main():
                 if prior is not None and target.read_bytes() != prior:
                     raise RuntimeError("unsupported lowering truncated existing output")
 
+        # P8.2：用户方法作为普通函数生成，即使未被调用也不再要求拒绝。
+        supported_method = temp / "supported-method.rx"
+        supported_method.write_text(
+            "struct Data {} impl Data { fn unused(&self) {} } fn main() {}",
+            encoding="utf-8")
+        supported_method_ir = temp / "supported-method.ll"
+        run([args.compiler, "--stage", "semantic", str(supported_method)])
+        run([args.compiler, "--stage", "ir", str(supported_method), "-o", str(supported_method_ir)])
+        run([args.llvm_as, str(supported_method_ir), "-o", str(temp / "supported-method.bc")])
+        run([args.opt, "-passes=verify", "-disable-output", str(supported_method_ir)])
+
+        # P8：检查特定诊断，避免把解析失败或后端不支持误认为语义规则正确。
+        call_diagnostics = {
+            "struct Data { n: i32 } impl Data { fn get(&self) -> i32 { self.n } } "
+            "fn main() { let x = Data { n: 1 }; Data::get(x); }":
+                "type mismatch: expected &Data, found Data",
+            # Box 的 &self clone 先命中；内部按值 clone 虽接收 i32，也不能回退到它。
+            "#[derive(Clone)] struct Item { n: i32 } "
+            "impl Item { fn clone(self, delta: i32) -> i32 { self.n + delta } } "
+            "fn bad(x: Box<Item>) { x.clone(2); } fn main() {}":
+                "call expects 0 argument(s), found 1",
+            "struct Data { n: i32 } impl Data { fn set(&mut self) { self.n = 1; } } "
+            "fn main() { let x = Data { n: 0 }; x.set(); }":
+                "cannot mutably borrow an immutable or shared place",
+            "struct Data { n: i32 } impl Data { fn set(&mut self) { self.n = 1; } } "
+            "fn bad(x: &&mut Data) { x.set(); } fn main() {}":
+                "cannot mutably borrow an immutable or shared place",
+            "fn main() { let values = [1, 2]; values.len(1); }":
+                "call expects 0 argument(s), found 1",
+            "fn main() { let values = [1, 2]; let size: i32 = values.len(); }":
+                "type mismatch: expected i32, found usize",
+        }
         for index, contents in enumerate((
             "fn main(value: i32) {}",
             "fn main<'a>() {}",
@@ -1815,10 +1858,14 @@ def main():
             "fn main() { let mut a = [1, 2]; a = [3]; }",
             "struct A { n: i32 } struct B { n: i32 } "
             "fn main() { let mut a = A { n: 1 }; a = B { n: 2 }; }",
+            *call_diagnostics,
         )):
             invalid_source = temp / f"semantic-error-{index}.rx"
             invalid_source.write_text(contents, encoding="utf-8")
             semantic = run([args.compiler, "--stage", "semantic", str(invalid_source)], expected=1)
+            diagnostic = call_diagnostics.get(contents)
+            if diagnostic is not None and diagnostic not in semantic.stderr:
+                raise RuntimeError(f"{invalid_source.name}: expected {diagnostic!r}, got {semantic.stderr!r}")
             output.write_bytes(b"preserve on semantic failure\n")
             result = run([args.compiler, "--stage", "ir", str(invalid_source), "-o", str(output)], expected=1)
             if not semantic.stderr.strip() or result.stderr != semantic.stderr:
@@ -1858,7 +1905,7 @@ def main():
                     if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
                         raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
                                            f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
-    print(f"P2-P7.4 IR tests passed: {len(modules)} modules verified" +
+    print(f"P2-P8.3 IR tests passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

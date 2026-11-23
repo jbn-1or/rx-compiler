@@ -90,14 +90,16 @@ ExpressionResult BodyChecker::check_call(const CallExpression &call) {
     // 单段路径：普通函数或内置函数。
     if (path->segments.size() == 1)
         return check_ordinary_call(*path, call);
-    // 多段路径：先解析 S::method 的签名，再按显式参数表检查实参。
-    const auto signature = resolve_qualified_callee(*path);
+    // 多段路径：先解析 S::method 的具体目标和签名，再按显式参数表检查实参。
+    const auto resolved = resolve_qualified_callee(*path);
     bool diverges = false;
-    if (!signature ||
-        !check_arguments(&call, signature->explicit_parameters(),
+    if (!resolved ||
+        !check_arguments(&call, resolved->signature.explicit_parameters(),
                          call.arguments, call.span, diverges))
         return ExpressionResult::error();
-    return ExpressionResult::value(signature->return_type, diverges);
+    // 限定调用与单段调用共用同一张目标表，后续阶段只按身份生成。
+    analyzer_.result_.ordinary_calls.insert_or_assign(&call, resolved->target);
+    return ExpressionResult::value(resolved->signature.return_type, diverges);
 }
 
 // 检查单段调用：名字只能指向普通函数或内置函数。
@@ -163,9 +165,9 @@ ExpressionResult BodyChecker::check_ordinary_call(const PathExpression &path,
     return ExpressionResult::value(signature->return_type, diverges);
 }
 
-// 解析 S::method 这类显式关联调用的签名。路径必须恰好两段：
+// 解析 S::method 这类显式关联调用的具体目标和签名。路径必须恰好两段：
 // 第一段是类型（含 Self），第二段是关联函数或内置方法。
-std::optional<CallableSignature>
+std::optional<ResolvedCall>
 BodyChecker::resolve_qualified_callee(const PathExpression &path) {
     if (path.segments.size() != 2) {
         diagnostics_.error(path.span, "call path must have exactly two segments");
@@ -188,11 +190,13 @@ BodyChecker::resolve_qualified_callee(const PathExpression &path) {
         return resolve_struct_member(*owner.struct_symbol, member, path.span);
     // 其他类型只提供内置构造器 new 和少量内置方法。
     if (member.name == "new") {
-        if (auto constructor = container_constructor_signature(owner))
-            return constructor;
+        if (auto constructor = builtin_container_constructor(owner))
+            return ResolvedCall{
+                BuiltinCall{constructor->kind, owner},
+                std::move(constructor->signature)};
     }
-    const auto signature = builtin_method_signature(owner, member.name);
-    if (!signature) {
+    auto method = builtin_method(owner, member.name);
+    if (!method) {
         diagnostics_.error(path.span, "type " + owner.toString() +
                                          " has no member named " + member.name);
         return std::nullopt;
@@ -203,12 +207,13 @@ BodyChecker::resolve_qualified_callee(const PathExpression &path) {
                                          " does not support clone");
         return std::nullopt;
     }
-    return signature;
+    return ResolvedCall{BuiltinCall{method->kind, owner},
+                        std::move(method->signature)};
 }
 
-// 在结构体的关联项里查找 S::member：普通关联函数直接取声明签名，
+// 在结构体的关联项里查找 S::member：普通关联函数直接取声明目标和签名，
 // 关联常量不可调用；声明里没有的 clone 可回退到派生的内置实现。
-std::optional<CallableSignature>
+std::optional<ResolvedCall>
 BodyChecker::resolve_struct_member(const StructSymbol &structure,
                                   const PathSegment &member, Span at) {
     const auto item = structure.associated_items.find(member.name);
@@ -219,12 +224,17 @@ BodyChecker::resolve_struct_member(const StructSymbol &structure,
                                        " is not callable");
             return std::nullopt;
         }
-        return function_signature(static_cast<const FunctionSymbol &>(*item->second));
+        const auto &function =
+            static_cast<const FunctionSymbol &>(*item->second);
+        return ResolvedCall{function.id, function_signature(function)};
     }
     const auto owner = SemanticType::struct_(&structure);
     // 显式关联调用先查 inherent 成员，未找到时才回退到派生 Clone。
-    if (member.name == "clone" && analyzer_.has_trait(owner, Derive::Clone))
-        return builtin_method_signature(owner, member.name);
+    if (member.name == "clone" && analyzer_.has_trait(owner, Derive::Clone)) {
+        if (auto method = builtin_method(owner, member.name))
+            return ResolvedCall{BuiltinCall{method->kind, owner},
+                                std::move(method->signature)};
+    }
     diagnostics_.error(at, "struct " + structure.name +
                                " has no associated item named " + member.name);
     return std::nullopt;

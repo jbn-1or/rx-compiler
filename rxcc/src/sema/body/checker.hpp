@@ -72,15 +72,15 @@ private:
     // 单段被调用者——局部绑定优先（N13），再查值名字空间与同名结构体。
     ExpressionResult check_ordinary_call(const PathExpression &path,
                                          const CallExpression &call);
-    // `Type::member` 形式的两段被调用者解析，返回统一的调用签名。
-    std::optional<CallableSignature>
+    // `Type::member` 形式的两段被调用者解析，返回具体目标和统一签名。
+    std::optional<ResolvedCall>
     resolve_qualified_callee(const PathExpression &path);
-    // 在结构体关联项里找签名；找不到时按派生 Clone 回退。
-    std::optional<CallableSignature> resolve_struct_member(
+    // 在结构体关联项里找目标；找不到时按派生 Clone 回退。
+    std::optional<ResolvedCall> resolve_struct_member(
         const StructSymbol &structure, const PathSegment &member, Span at);
     // calls/method.cpp：点调用候选查找、接收者调整与普通实参检查。
     ExpressionResult check_method_call(const MethodCallExpression &call);
-    std::optional<CallableSignature> lookup_method_signature(
+    std::optional<ResolvedCall> lookup_method(
         const SemanticType &candidate, const std::string &name);
     std::optional<ResolvedMethod> resolve_method(const SemanticType &receiver_type,
                                                  const std::string &name);

@@ -1,0 +1,27 @@
+// Check array length after place projection, including when the result is discarded.
+const WIDTH: usize = 3;
+
+struct Data { value: i32 }
+impl Data {
+    fn len(&self) -> usize { println_i32(40); self.value as usize }
+}
+
+fn select(rows: &[[i32; WIDTH]; 2]) -> &[[i32; WIDTH]; 2] {
+    println_i32(9);
+    rows
+}
+
+fn index() -> usize { println_i32(10); 1 }
+
+fn main() {
+    let rows = [[1, 2, 3], [4, 5, 6]];
+    let row = &rows[0];
+    let deep = &&row;
+    println_i32(rows.len() as i32);
+    println_i32(rows[0].len() as i32);
+    println_i32(deep.len() as i32);
+    println_i32(select(&rows)[index()].len() as i32);
+    select(&rows)[index()].len();
+    let other = Data { value: 8 };
+    println_i32(other.len() as i32);
+}

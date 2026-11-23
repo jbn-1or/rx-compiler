@@ -85,6 +85,10 @@ GenerationContext::emit_expression(const Expression &expression,
     // 调用表达式由统一的目标解析和参数求值逻辑生成。
     if (const auto *call = dynamic_cast<const CallExpression *>(&expression))
         return emit_call(*call, locals);
+    // 点方法先按已选路径调整接收者，再复用普通调用的实参和结果处理。
+    if (const auto *method =
+            dynamic_cast<const MethodCallExpression *>(&expression))
+        return emit_method_call(*method, locals);
 
     if (const auto *if_expression =
             dynamic_cast<const IfExpression *>(&expression))
@@ -176,15 +180,22 @@ bool GenerationContext::emit_function_body(const FunctionSymbol &function,
         parameter_offset = 1;
     }
     const auto &parameter_locals = semantics.function_locals.at(function.id);
-    // 每个源形参存入自己的 LocalId 存储；按值聚合先从实参快照复制到独立 slot。
-    for (std::size_t parameter_index = 0;
-         parameter_index < function.parameters.size(); ++parameter_index) {
-        const auto local_id = parameter_locals.parameters[parameter_index];
+    // 方法接收者位于形参表首位；self 与普通参数使用同一套存储和复制规则。
+    std::vector<LocalId> binding_ids;
+    binding_ids.reserve(parameter_locals.parameters.size() + 1);
+    if (parameter_locals.self)
+        binding_ids.push_back(*parameter_locals.self);
+    binding_ids.insert(binding_ids.end(), parameter_locals.parameters.begin(),
+                       parameter_locals.parameters.end());
+    // 每个源绑定存入自己的 LocalId 存储；按值聚合先从实参快照复制到独立 slot。
+    for (std::size_t binding_index = 0; binding_index < binding_ids.size();
+         ++binding_index) {
+        const auto local_id = binding_ids[binding_index];
         const auto &local_type = semantics.locals[local_id.index].type;
         const auto &abi_storage =
-            ir_function.abi.parameter_storage[parameter_offset + parameter_index];
+            ir_function.abi.parameter_storage[parameter_offset + binding_index];
         const auto argument =
-            ir_function.argument(parameter_offset + parameter_index);
+            ir_function.argument(parameter_offset + binding_index);
         const bool by_value =
             abi_storage.kind != ir::StorageType::Kind::Unit;
         const auto address = allocate_storage_slot(

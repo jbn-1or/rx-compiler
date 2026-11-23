@@ -21,21 +21,19 @@ bool validate_functions(const SemanticResult &semantics,
                         std::ostream &diagnostics) {
     for (const auto &owned : semantics.functions) {
         const auto &function = *owned;
-        // 当前生成器只接收顶层普通函数。
-        if (function.owner) {
-            diagnostics << "IR 生成尚未支持方法或关联函数\n";
-            return false;
-        }
         // 签名支持标量、引用链（可指向聚合）和按值聚合参数/返回。
         const bool supported_return =
             function.return_type.is_unit() ||
             is_storable_value(function.return_type);
+        // 方法接收者作为首个参数参与同一套 ABI 检查。
+        const bool supported_receiver =
+            !function.receiver || is_storable_value(function.receiver->type);
         const bool supported_parameters =
             std::all_of(function.parameters.begin(), function.parameters.end(),
                         [](const ResolvedParameter &parameter) {
                              return is_storable_value(parameter.type);
                         });
-        if (!supported_parameters || !supported_return) {
+        if (!supported_receiver || !supported_parameters || !supported_return) {
             diagnostics << "IR 生成尚未支持此函数签名"
                            "（聚合容器操作等仍需后续阶段）\n";
             return false;
@@ -57,16 +55,21 @@ ir::FunctionABI make_function_abi(const FunctionSymbol &function) {
                          ? ir::Type::Void
                          : lower_value_type(function.return_type);
     }
-    for (const auto &parameter : function.parameters) {
-        if (is_aggregate_value(parameter.type)) {
+    // 一个源参数或方法的 self 在这里降级；按值聚合传 ptr 快照。
+    const auto append_parameter = [&abi](const SemanticType &type) {
+        if (is_aggregate_value(type)) {
             abi.signature.parameters.push_back(ir::Type::Ptr);
-            abi.parameter_storage.push_back(
-                ir::storage_type_of(parameter.type));
+            abi.parameter_storage.push_back(ir::storage_type_of(type));
         } else {
-            abi.signature.parameters.push_back(lower_value_type(parameter.type));
+            abi.signature.parameters.push_back(lower_value_type(type));
             abi.parameter_storage.push_back(ir::StorageType{});
         }
-    }
+    };
+    // 方法接收者位于形参表首位，显式关联调用和点调用都按此顺序传参。
+    if (function.receiver)
+        append_parameter(function.receiver->type);
+    for (const auto &parameter : function.parameters)
+        append_parameter(parameter.type);
     return abi;
 }
 

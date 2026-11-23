@@ -7,7 +7,7 @@
     "metadata": {
       "testpoint": "P8-01",
       "requires": "P8.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -18,7 +18,7 @@
     "metadata": {
       "testpoint": "P8-01",
       "requires": "P8.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -35,7 +35,7 @@
     "metadata": {
       "testpoint": "P8-02",
       "requires": "P8.1",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -45,8 +45,8 @@
     "description": "同名用户 clone 遵守真实参数和返回类型",
     "metadata": {
       "testpoint": "P8-02",
-      "requires": "P8.1",
-      "ir_status": "planned"
+      "requires": "P8.2",
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -56,6 +56,34 @@
     ]
   },
   {
+    "source": "qualified_calls.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "限定调用的同名目标、Self 和带接收者的聚合返回",
+    "metadata": {
+      "testpoint": "P8-03",
+      "requires": "P8.1",
+      "ir_status": "covered"
+    }
+  },
+  {
+    "source": "qualified_calls.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "限定调用的同名目标、Self 和带接收者的聚合返回",
+    "metadata": {
+      "testpoint": "P8-03",
+      "requires": "P8.2",
+      "ir_status": "covered"
+    },
+    "io": [
+      {
+        "input": null,
+        "output": "qualified_calls.out"
+      }
+    ]
+  },
+  {
     "source": "receiver_order.rx",
     "stage": "semantic",
     "compilation_success": true,
@@ -63,7 +91,7 @@
     "metadata": {
       "testpoint": "P8-05",
       "requires": "P8.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -74,7 +102,7 @@
     "metadata": {
       "testpoint": "P8-05",
       "requires": "P8.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -84,6 +112,75 @@
     ]
   },
   {
+    "source": "self_snapshot.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "按值 self 在普通参数求值前固定快照",
+    "metadata": {
+      "testpoint": "P8-06",
+      "requires": "P8.2",
+      "ir_status": "covered"
+    }
+  },
+  {
+    "source": "self_snapshot.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "按值 self 在普通参数求值前固定快照",
+    "metadata": {
+      "testpoint": "P8-06",
+      "requires": "P8.2",
+      "ir_status": "covered"
+    },
+    "io": [{ "input": null, "output": "self_snapshot.out" }]
+  },
+  {
+    "source": "receiver_places.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "索引位置、多层引用与重借用保留原对象地址",
+    "metadata": {
+      "testpoint": "P8-07",
+      "requires": "P8.2",
+      "ir_status": "covered"
+    }
+  },
+  {
+    "source": "receiver_places.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "索引位置、多层引用与重借用保留原对象地址",
+    "metadata": {
+      "testpoint": "P8-07",
+      "requires": "P8.2",
+      "ir_status": "covered"
+    },
+    "io": [{ "input": null, "output": "receiver_places.out" }]
+  },
+  {
+    "source": "receiver_early_exit.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "接收者、下标或第一个实参提前返回，跳过剩余调用",
+    "metadata": {
+      "testpoint": "P8-13",
+      "requires": "P8.2",
+      "ir_status": "covered"
+    }
+  },
+  {
+    "source": "receiver_early_exit.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "接收者、下标或第一个实参提前返回，跳过剩余调用",
+    "metadata": {
+      "testpoint": "P8-13",
+      "requires": "P8.2",
+      "ir_status": "covered"
+    },
+    "io": [{ "input": null, "output": "receiver_early_exit.out" }]
+  },
+  {
     "source": "array_len.rx",
     "stage": "semantic",
     "compilation_success": true,
@@ -91,7 +188,7 @@
     "metadata": {
       "testpoint": "P8-09",
       "requires": "P8.3",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -102,7 +199,7 @@
     "metadata": {
       "testpoint": "P8-09",
       "requires": "P8.3",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -110,5 +207,28 @@
         "output": "array_len.out"
       }
     ]
+  },
+  {
+    "source": "array_len_places.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "投影和多层引用的数组 len；丢弃长度时仍求接收者；同名用户方法保持普通调用",
+    "metadata": {
+      "testpoint": "P8-11",
+      "requires": "P8.3",
+      "ir_status": "covered"
+    }
+  },
+  {
+    "source": "array_len_places.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "投影和多层引用的数组 len；丢弃长度时仍求接收者；同名用户方法保持普通调用",
+    "metadata": {
+      "testpoint": "P8-11",
+      "requires": "P8.3",
+      "ir_status": "covered"
+    },
+    "io": [{ "input": null, "output": "array_len_places.out" }]
   }
 ]

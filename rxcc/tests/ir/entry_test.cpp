@@ -329,7 +329,9 @@ void check_function_names() {
     for (const auto &name : names)
         check(unique.insert(name).second && name != "main" && name != "println_i32", "内部名字必须唯一");
     check(rx::assign_function_names(sema) == names, "分配名称必须确定");
-    check(!rx::generate_ir(sema, diagnostics), "方法命名不表示方法 lowering 已实现");
+    // P8.2 接入后，方法按普通函数生成，命名结果不再代表“尚未支持”。
+    check(rx::generate_ir(sema, diagnostics).has_value(),
+          "方法命名与接收者 lowering 接入后应能生成模块");
 }
 
 void check_println() {
@@ -2304,12 +2306,145 @@ void check_control_flow_integration() {
           "只有独立的机器入口负责调用源 main 并返回状态 0");
 }
 
+// P8.2：直接检查调用目标、ABI 和接收者地址，不依赖 SSA 编号或 IR 文本。
+void check_method_call_abi() {
+    const auto crate = parse_crate(R"(
+        #[derive(Clone, Copy)]
+        struct Data { value: i32 }
+        impl Data {
+            fn set(&mut self, value: i32) { self.value = value; }
+            fn get(&self) -> i32 { self.value }
+            fn shifted(mut self, delta: i32) -> Self {
+                self.value += delta;
+                self
+            }
+        }
+        fn main() {
+            let mut x = Data { value: 7 };
+            x.set(8);
+            x.get();
+            x.shifted(2);
+            Data::shifted(x, 3);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto &module = artifact.module();
+    const auto names = rx::assign_function_names(sema);
+    const auto &data = *sema.structs.at(0);
+    const auto method = [&](const char *name) -> const Function & {
+        const auto &symbol = *static_cast<const rx::FunctionSymbol *>(data.associated_items.at(name));
+        return *module.find_function(names.at(symbol.id.index));
+    };
+    const auto &set = method("set");
+    const auto &get = method("get");
+    const auto &shifted = method("shifted");
+    const auto &caller = *module.find_function(names.at(sema.main_function->index));
+    const auto storage = StorageType::struct_of(data.id.index);
+    check(set.abi == FunctionABI{{Type::Void, {Type::Ptr, Type::I32}}, {{}, {}}, std::nullopt} &&
+              get.abi == FunctionABI{{Type::I32, {Type::Ptr}}, {{}}, std::nullopt},
+          "借用接收者应是首个源参数，不是按值聚合");
+    check(shifted.abi == FunctionABI{{Type::Void, {Type::Ptr, Type::Ptr, Type::I32}},
+                                     {{}, storage, {}}, storage},
+          "按值 self 的存储在隐藏结果地址之后、普通参数之前");
+
+    std::vector<const Call *> calls;
+    for (const auto &block : caller.blocks)
+        for (const auto &instruction : block.instructions)
+            if (const auto *call = std::get_if<Call>(&instruction.operation))
+                calls.push_back(call);
+    check(calls.size() == 4 && calls.at(0)->function == set.id && calls.at(1)->function == get.id &&
+              calls.at(2)->function == shifted.id && calls.at(3)->function == shifted.id,
+          "点调用和限定调用应直接调用 sema 选中的同一个方法定义");
+    const auto original = calls.at(0)->arguments.at(0);
+    check(original == calls.at(1)->arguments.at(0) &&
+              calls.at(0)->arguments.at(1) == Operand::constant(Type::I32, 8),
+          "共享和可变借用必须指向同一个原始对象");
+    for (std::size_t index = 2; index < calls.size(); ++index) {
+        const auto &arguments = calls.at(index)->arguments;
+        check(arguments.size() == 3 && arguments[0] != arguments[1] &&
+                  arguments[0] != original && arguments[1] != original &&
+                  arguments[2] == Operand::constant(Type::I32, static_cast<uint32_t>(index)),
+              "聚合结果、按值 self 快照与原对象必须独立，普通实参不能错位");
+    }
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "方法定义和两种调用形式必须通过 IR 自检");
+}
+
+// P8.3：长度来自类型；只有接收者本身可能需要调用或搬运数据。
+void check_array_len_ir() {
+    const auto crate = parse_crate(R"(
+        const WIDTH: usize = 3;
+        fn outer(rows: &[[i32; WIDTH]; 2]) -> usize { rows.len() }
+        fn row(rows: &[[i32; WIDTH]; 2]) -> usize { rows[0].len() }
+        fn nested(rows: &&[i32; WIDTH]) -> usize { rows.len() }
+        fn make() -> [i32; WIDTH] { println_i32(9); [1, 2, 3] }
+        fn temporary() -> usize { make().len() }
+        fn early() -> usize { ({ return 17; make() }).len() }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto &module = artifact.module();
+    const auto names = rx::assign_function_names(sema);
+    const auto function = [&](const char *name) -> const Function & {
+        for (const auto &source : sema.functions)
+            if (source->name == name)
+                return *module.find_function(names.at(source->id.index));
+        throw std::runtime_error("缺少数组 len 用例的源函数");
+    };
+
+    const auto check_length = [&](const char *name, uint32_t expected, bool evaluates_make = false) {
+        const auto &caller = function(name);
+        if (!evaluates_make) {
+            for (const auto &allocation : caller.entry_allocas)
+                check(std::get<Alloca>(allocation.operation).storage_type == Type::Ptr,
+                      "读取已有数组的长度不能分配聚合快照");
+        }
+        std::size_t calls = 0;
+        bool returned = false;
+        for (const auto &block : caller.blocks) {
+            for (const auto &instruction : block.instructions) {
+                if (const auto *call = std::get_if<Call>(&instruction.operation)) {
+                    check(evaluates_make && call->function == function("make").id,
+                          "数组 len 不能发出自己的调用或执行不可达的接收者");
+                    ++calls;
+                }
+                if (!evaluates_make) {
+                    if (const auto *load = std::get_if<Load>(&instruction.operation))
+                        check(load->storage_type == Type::Ptr, "数组 len 不应读取元素");
+                    if (const auto *store = std::get_if<Store>(&instruction.operation))
+                        check(store->value.type == Type::Ptr, "数组 len 不应复制元素");
+                }
+            }
+            if (const auto *ret = std::get_if<Return>(&block.terminator.value())) {
+                check(ret->value == Operand::constant(Type::I32, expected),
+                      "结果应为类型记录中的长度，或接收者的提前返回值");
+                returned = true;
+            }
+        }
+        check(returned && calls == (evaluates_make ? 1u : 0u),
+              "已结束的路径直接返回；正常路径对临时数组接收者恰好求值一次");
+    };
+    check_length("outer", 2);
+    check_length("row", 3);
+    check_length("nested", 3);
+    check_length("temporary", 3, true);
+    check_length("early", 17);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "数组 len 模块必须通过 IR 自检");
+}
+
 void run_tests() {
     check_function_names();
     check_named_storage_layouts();
     check_repeat_reference_conversion();
     check_shallow_reference_copy();
     check_aggregate_call_abi();
+    check_method_call_abi();
+    check_array_len_ir();
     check_println();
     check_locals();
     check_scalar_constants();
@@ -2348,11 +2483,12 @@ void run_tests() {
     check_entry("fn main() -> () {}");
     check_entry("fn __rx_fn_1() {} fn main() {} fn helper() {}");
     check_entry("const LEN: usize = 2; struct Data { values: [i32; LEN] } impl Data { const VALUE: i32 = 7; } fn main() {}");
+    // P8.2：未调用的用户方法也按普通函数生成，不再属于“尚未支持”。
+    check_entry("struct Data {} impl Data { fn unused(&self) {} } fn main() {}");
     for (const auto &source : {
              "fn main() { Box::<i32>::new(1); }",
              "fn main() { Vec::<i32>::new(); }",
-             "fn main() { let x = { (); }; }",
-             "struct Data {} impl Data { fn unused(&self) {} } fn main() {}"})
+             "fn main() { let x = { (); }; }"})
         check_rejected(source);
 
     std::ostringstream errors;

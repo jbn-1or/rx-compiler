@@ -7,12 +7,12 @@
 
 namespace rx {
 
-// 判断某个候选接收者类型是否提供名为 name 的方法，并返回其签名。
+// 判断某个候选接收者类型是否提供名为 name 的方法，并返回其具体目标和签名。
 // 先查结构体声明里的方法（接收者类型必须与候选完全一致），
 // 再查内置方法；clone 还要求类型实现 Clone。
-std::optional<CallableSignature>
-BodyChecker::lookup_method_signature(const SemanticType &candidate,
-                                     const std::string &name) {
+std::optional<ResolvedCall>
+BodyChecker::lookup_method(const SemanticType &candidate,
+                           const std::string &name) {
     // 剥掉一层引用，找到声明方法所属的结构体类型。
     const SemanticType *owner = &candidate;
     if (owner->kind == SemanticType::Kind::Reference && owner->inner)
@@ -24,20 +24,21 @@ BodyChecker::lookup_method_signature(const SemanticType &candidate,
             const auto &function = static_cast<const FunctionSymbol &>(*item->second);
             // 声明的接收者必须与候选类型完全相同，这里不做额外调整。
             if (function.receiver && function.receiver->type.same_type(candidate))
-                return function_signature(function);
+                return ResolvedCall{function.id, function_signature(function)};
         }
     }
     // 内置方法只按引用接收者提供，先排除值类型候选。
     if (candidate.kind != SemanticType::Kind::Reference || !candidate.inner)
         return std::nullopt;
-    auto signature = builtin_method_signature(*candidate.inner, name);
+    auto method = builtin_method(*candidate.inner, name);
     // 内置签名可能声明 &mut self，必须与当前候选的引用形式一致。
-    if (!signature || !signature->receiver->same_type(candidate))
+    if (!method || !method->signature.receiver->same_type(candidate))
         return std::nullopt;
     // clone 的接收者规则之外，还要求可派生的 Clone 能力。
     if (name == "clone" && !analyzer_.has_trait(*candidate.inner, Derive::Clone))
         return std::nullopt;
-    return signature;
+    return ResolvedCall{BuiltinCall{method->kind, *candidate.inner},
+                        std::move(method->signature)};
 }
 
 // 按候选顺序解析方法：从接收者类型开始，每层依次尝试 T、&T、&mut T，
@@ -56,9 +57,11 @@ BodyChecker::resolve_method(const SemanticType &receiver_type,
             std::pair{SemanticType::reference(true, *layer), Borrow::Mutable},
         };
         for (const auto &[candidate, borrow] : candidates) {
-            // 命中后记录解引用层数和借用方式，供接收者权限检查复用。
-            if (auto signature = lookup_method_signature(candidate, name))
-                return ResolvedMethod{std::move(*signature), {dereferences, borrow}};
+            // 命中后同时保存具体目标和调整路径，后续阶段不再重新查找。
+            if (auto resolved = lookup_method(candidate, name))
+                return ResolvedMethod{std::move(resolved->target),
+                                      std::move(resolved->signature),
+                                      {dereferences, borrow}};
         }
         // 只有引用和 Box 能继续向内解，其他类型到此为止。
         if (layer->kind != SemanticType::Kind::Reference &&
@@ -141,6 +144,8 @@ ExpressionResult BodyChecker::check_method_call(const MethodCallExpression &call
         arguments_diverge);
     if (!receiver_ok || !arguments_ok)
         return ExpressionResult::error();
+    // 保存已选目标、签名和接收者调整；生成器只按这份记录执行。
+    analyzer_.result_.method_calls.insert_or_assign(&call, *method);
     return ExpressionResult::value(method->signature.return_type,
                                    receiver.diverges || arguments_diverge);
 }

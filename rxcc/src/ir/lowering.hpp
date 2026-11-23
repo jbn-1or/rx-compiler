@@ -25,6 +25,7 @@ struct LoopExpression;
 struct WhileExpression;
 struct BreakExpression;
 struct ContinueExpression;
+struct MethodCallExpression;
 
 namespace ir {
 class IRBuilder;
@@ -226,10 +227,21 @@ private:
     emit_assignment(const AssignmentExpression &expression,
                      LocalPlaces &locals);
 
-    // lowering/call.cpp：普通调用与 builtin 调用。
+    // lowering/call.cpp：普通调用、点方法调用与 builtin 调用。
     // 根据语义目标准备实参并生成调用。
     std::optional<EmitResult> emit_call(const CallExpression &call,
                                         LocalPlaces &locals);
+    // 点方法：先按已选路径求值接收者一次，再按顺序求普通实参并调用。
+    std::optional<EmitResult> emit_method_call(const MethodCallExpression &call,
+                                               LocalPlaces &locals);
+    // 按 ReceiverAdjustment 把接收者准备成声明的接收者值或地址。
+    std::optional<EmitResult> emit_receiver(const Expression &receiver,
+                                            const ResolvedMethod &method,
+                                            LocalPlaces &locals);
+    // 把已经按调用顺序求好的实参传给目标函数，并按 ABI 处理聚合结果。
+    std::optional<EmitResult> emit_target_call(ir::IRFunctionId target,
+                                               std::vector<EmitResult> arguments,
+                                               const SemanticType &result_type);
 
     const SemanticResult &semantics; // 语义分析结果，提供表达式、路径和调用的记录。
     const std::vector<ir::IRFunctionId> &functions; // 源 FunctionId 下标到已登记 IRFunctionId 的映射。

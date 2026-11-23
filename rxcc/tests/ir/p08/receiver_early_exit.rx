@@ -1,0 +1,31 @@
+// A return in the receiver or first argument must skip the rest of the call.
+struct Data { value: i32 }
+
+impl Data {
+    fn sum(&self, left: i32, right: i32) -> i32 {
+        println_i32(40);
+        self.value + left + right
+    }
+}
+
+fn make(tag: i32) -> Data { println_i32(tag); Data { value: 10 } }
+fn mark(tag: i32, value: i32) -> i32 { println_i32(tag); value }
+
+fn receiver_exit(stop: bool) -> i32 {
+    (if stop { return 71; } else { make(10) }).sum(mark(20, 20), mark(30, 30))
+}
+
+fn argument_exit() -> i32 {
+    make(11).sum({ println_i32(21); return 72; 0 }, mark(98, 0))
+}
+
+fn index_exit() -> i32 {
+    [make(12)][{ return 73; 0usize }].sum(mark(99, 0), mark(99, 0))
+}
+
+fn main() {
+    println_i32(receiver_exit(true));
+    println_i32(receiver_exit(false));
+    println_i32(argument_exit());
+    println_i32(index_exit());
+}

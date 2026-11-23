@@ -27,7 +27,6 @@ struct IntegerLiteralFact {
 };
 
 using PathTarget = std::variant<LocalId, ConstantId, FunctionId>;
-using CallTarget = std::variant<FunctionId, BuiltinIO>;
 
 // 用父节点、用途和序号区分表达式的不同使用位置。
 // 序号从零开始；只有一个位置时也填 0。节点与其他结果表一样由 Crate 持有。
@@ -127,7 +126,10 @@ struct SemanticResult {
     std::map<UseSite, CoercionPlan> coercion_plans;
     std::unordered_map<const PathExpression *, PathTarget> paths;
     std::unordered_map<const IntegerLiteral *, IntegerLiteralFact> integer_literals;
+    // 普通调用和限定调用共用这张目标表；键是源码中的调用节点。
     std::unordered_map<const CallExpression *, CallTarget> ordinary_calls;
+    // 点方法的目标、签名和接收者调整；生成器按已选目标执行，不重新查找。
+    std::unordered_map<const MethodCallExpression *, ResolvedMethod> method_calls;
     // 保存常量初始化器、数组长度、重复次数及其操作数的求值结果。
     // ConstantValue 不是 AST 节点，直接用它自身的地址查询。
     std::unordered_map<const ConstantValue *, EvaluatedConstant> constant_values;

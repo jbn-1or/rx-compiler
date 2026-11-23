@@ -1,0 +1,29 @@
+// P8.1: exercise explicit calls without dot receiver lowering.
+struct Data { value: i32 }
+struct Other { value: i32 }
+
+fn get(x: &Data) -> i32 { x.value + 100 }
+
+impl Data {
+    const START: i32 = 7;
+    fn new(value: i32) -> Self { Self { value: value } }
+    fn initial() -> Self { Self::new(Self::START) }
+    fn get(&self) -> i32 { self.value }
+    fn with_delta(&self, delta: i32) -> Self { Self::new(self.value + delta) }
+    fn clone(&self, delta: i32) -> i32 { self.value + delta }
+}
+
+impl Other {
+    fn get(&self) -> i32 { self.value + 10 }
+}
+
+fn main() {
+    let x = Data::initial();
+    let y = Other { value: 3 };
+    let changed = Data::with_delta(&x, 2);
+    println_i32(Data::get(&x));
+    println_i32(Other::get(&y));
+    println_i32(get(&x));
+    println_i32(Data::get(&changed));
+    println_i32(Data::clone(&x, 5));
+}

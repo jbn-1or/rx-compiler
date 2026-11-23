@@ -1,0 +1,34 @@
+// Indexed places and nested references must keep the original object address.
+struct Data { value: i32 }
+
+impl Data {
+    fn set(&mut self, value: i32) { self.value = value; }
+    fn view(&self) -> &i32 { &self.value }
+}
+
+fn slots(values: &mut [Data; 2]) -> &mut [Data; 2] {
+    println_i32(10);
+    values
+}
+
+fn index() -> usize { println_i32(11); 1 }
+fn argument() -> i32 { println_i32(12); 40 }
+
+fn main() {
+    let mut values = [Data { value: 5 }, Data { value: 7 }];
+    slots(&mut values)[index()].set(argument());
+    println_i32(values[1].value);
+
+    {
+        let mut reference = &mut values[1];
+        let nested = &mut reference;
+        nested.set(41);
+        nested.set(42);
+        (&mut reference).set(43);
+    }
+    let shared = &values[1];
+    let deep = &&shared;
+    println_i32(*deep.view());
+    println_i32(*(&shared).view());
+    println_i32(values[0].value);
+}

@@ -27,12 +27,39 @@ uint32_t align_up(uint64_t offset, uint32_t alignment) {
 
 } // namespace
 
+// 从计算值类型构造标量存储类型，供旧调用点自然转换。
+StorageType::StorageType(Type type) : kind(Kind::Scalar), scalar_type(type) {}
+
 // 创建给定标量种类的存储类型。
 StorageType StorageType::scalar(Type type) {
-    StorageType result;
-    result.kind = Kind::Scalar;
-    result.scalar_type = type;
-    return result;
+    return StorageType(type);
+}
+
+// 递归比较存储类型结构：数组比较元素和长度，命名结构体比较模块内下标。
+bool StorageType::same_type(const StorageType &other) const {
+    if (kind != other.kind)
+        return false;
+    switch (kind) {
+        case Kind::Unit:
+        case Kind::Vec:
+            return true;
+        case Kind::Scalar:
+            return scalar_type == other.scalar_type;
+        case Kind::Array:
+            if (length != other.length)
+                return false;
+            if (!element || !other.element)
+                return element == other.element;
+            return element->same_type(*other.element);
+        case Kind::Struct:
+            return struct_index == other.struct_index;
+    }
+    return false;
+}
+
+// 标量存储类型与计算值类型比较；聚合存储类型不冒充任何标量。
+bool StorageType::operator==(Type scalar) const {
+    return kind == Kind::Scalar && scalar_type == scalar;
 }
 
 // 创建数组存储类型，元素按值保存在共享指针中。

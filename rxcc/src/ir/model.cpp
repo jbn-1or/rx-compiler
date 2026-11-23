@@ -128,6 +128,28 @@ bool valid_storage(Type type, uint32_t alignment) {
            alignment != 0 && (alignment & (alignment - 1)) == 0;
 }
 
+// 自有存储类型用于 alloca、GEP 或 aggregate load/store：
+// 标量沿用与上面相同的受限集合；数组、命名结构体和 Vec 头只在这里检查对齐与结构完整性，
+// 具体字段和布局由 check_module 的布局服务核对。
+bool valid_storage(const StorageType &type, uint32_t alignment) {
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0)
+        return false;
+    switch (type.kind) {
+        case StorageType::Kind::Unit:
+            return false;
+        case StorageType::Kind::Scalar:
+            return valid_storage(type.scalar_type, alignment);
+        case StorageType::Kind::Array:
+            return type.element &&
+                   valid_storage(*type.element, alignment);
+        case StorageType::Kind::Struct:
+            return true;
+        case StorageType::Kind::Vec:
+            return true;
+    }
+    return false;
+}
+
 // 用指定类型和 32 个二进制位创建常量操作数，不重新推导源语言整数类型。
 Operand Operand::constant(Type type, uint32_t bits) {
     return {type, bits};
@@ -157,12 +179,13 @@ bool valid_constant(const Operand &operand) {
 
 // 保存函数身份、名称、签名和链接属性，并为参数预分配值 ID。
 Function::Function(IRFunctionId function_id, std::string name,
-                   Signature signature, Linkage linkage)
+                   FunctionABI abi, Linkage linkage)
     : id(function_id), name(std::move(name)), linkage(linkage),
-      signature(std::move(signature)) {
-    value_types.reserve(this->signature.parameters.size());
-    parameters.reserve(this->signature.parameters.size());
-    for (const auto type : this->signature.parameters)
+      abi(std::move(abi)) {
+    const auto &parameter_types = this->abi.signature.parameters;
+    value_types.reserve(parameter_types.size());
+    parameters.reserve(parameter_types.size());
+    for (const auto type : parameter_types)
         parameters.push_back(new_value(type));
 }
 
@@ -227,11 +250,6 @@ bool is_symbol_character(char character) {
            (character >= '0' && character <= '9');
 }
 
-// 判断类型是否不能作为函数参数；void 和未知类型都不合法。
-bool invalid_parameter_type(Type type) {
-    return type == Type::Void || !is_known_type(type);
-}
-
 } // namespace
 
 // 检查函数名能否直接写入 LLVM 文本而不加引号；首字符不能是数字。
@@ -240,19 +258,54 @@ bool valid_symbol_name(const std::string &name) {
            std::all_of(name.begin(), name.end(), is_symbol_character);
 }
 
-// 检查名称和参数、返回类型，创建函数并分配 ID，函数体随后再添加。
+// 检查 ABI 的形参表、按值聚合标记和隐藏结果指针位置是否自洽。
+bool valid_function_abi(const FunctionABI &abi) {
+    const auto &signature = abi.signature;
+    if (!is_known_type(signature.result) ||
+        abi.parameter_storage.size() != signature.parameters.size())
+        return false;
+    for (std::size_t index = 0; index < signature.parameters.size(); ++index) {
+        const auto type = signature.parameters[index];
+        if (type == Type::Void || !is_known_type(type))
+            return false;
+        const bool by_value =
+            abi.parameter_storage[index].kind != StorageType::Kind::Unit;
+        if (by_value && type != Type::Ptr)
+            return false;
+    }
+    if (abi.result_storage) {
+        // 聚合返回使用调用者提供的第一个 ptr 作为隐藏结果位置，IR 本身返回 void。
+        if (abi.result_storage->kind == StorageType::Kind::Unit ||
+            abi.result_storage->kind == StorageType::Kind::Scalar)
+            return false;
+        if (signature.result != Type::Void || signature.parameters.empty() ||
+            signature.parameters.front() != Type::Ptr ||
+            abi.parameter_storage.front().kind != StorageType::Kind::Unit)
+            return false;
+    }
+    return true;
+}
+
+// 只有普通签名时，所有形参都直接传递，不带聚合存储信息。
 IRFunctionId Module::add_function(std::string function_name,
                                   Signature signature, Linkage linkage) {
-    // 名称不能重复，参数不能是 void；检查失败时不向模块添加函数。
-    if (!valid_symbol_name(function_name) || find_function(function_name) ||
-        !is_known_type(signature.result) ||
-        std::any_of(signature.parameters.begin(),
-                    signature.parameters.end(), invalid_parameter_type))
-        throw std::logic_error("IR 函数名称重复、非法或签名无效");
+    FunctionABI abi;
+    abi.parameter_storage.resize(signature.parameters.size());
+    abi.signature = std::move(signature);
+    return add_function_abi(std::move(function_name), std::move(abi), linkage);
+}
+
+// 名称和 ABI 均有效时才登记函数，并按其签名分配参数 ID。
+IRFunctionId Module::add_function_abi(std::string function_name,
+                                      FunctionABI abi, Linkage linkage) {
+    if (!valid_function_abi(abi))
+        throw std::logic_error("IR FunctionABI 形状无效");
+    if (!valid_symbol_name(function_name) || find_function(function_name))
+        throw std::logic_error("IR 函数名称重复或非法");
     // 用模块编号和当前函数数量组成新函数的 ID。
     const IRFunctionId function_id{identity_, functions_.size()};
     auto function = std::make_unique<Function>(
-        function_id, std::move(function_name), std::move(signature), linkage);
+        function_id, std::move(function_name), std::move(abi), linkage);
     const auto &stored = functions_.emplace_back(std::move(function));
     try {
         functions_by_name_.emplace(stored->name, stored.get());
@@ -279,6 +332,55 @@ bool Module::contains(IRFunctionId function_id) const {
            function_id.index < functions_.size() &&
            functions_[function_id.index]->id == function_id;
 }
+// 按存储类型逐层检查 GEP 下标：第一个下标是基址偏移，
+// 后续下标分别选择字段或数组元素；字段/Vec 字段必须是非负常量且在范围内。
+bool valid_gep_indices(const Module &module, const StorageType &source_type,
+                       const std::vector<Operand> &indices) {
+    if (indices.size() < 2)
+        return false;
+    for (const auto &index : indices)
+        if (index.type != Type::I32)
+            return false;
+    if (source_type.kind == StorageType::Kind::Unit ||
+        source_type.kind == StorageType::Kind::Scalar)
+        return false;
+    StorageType current = source_type;
+    // 第一个下标只沿基址移动，不改变被投影的对象类型。
+    for (std::size_t position = 1; position < indices.size(); ++position) {
+        const auto &index = indices[position];
+        switch (current.kind) {
+            case StorageType::Kind::Struct: {
+                const auto *bits = index.constant_bits();
+                if (!bits || current.struct_index >= module.named_types().size())
+                    return false;
+                const auto &named = module.named_type(current.struct_index);
+                if (!named.defined || *bits >= named.fields.size())
+                    return false;
+                current = named.fields[*bits];
+                break;
+            }
+            case StorageType::Kind::Array:
+                if (!current.element)
+                    return false;
+                current = *current.element;
+                break;
+            case StorageType::Kind::Vec: {
+                const auto *bits = index.constant_bits();
+                if (!bits || *bits >= 3)
+                    return false;
+                current = *bits == 0
+                              ? StorageType::scalar(Type::Ptr)
+                              : StorageType::scalar(Type::I32);
+                break;
+            }
+            case StorageType::Kind::Unit:
+            case StorageType::Kind::Scalar:
+                return false;
+        }
+    }
+    return true;
+}
+
 // 登记一个命名结构体类型；名称必须可以直接写入 LLVM 文本且不能重复。
 std::size_t Module::add_named_type(std::string type_name) {
     if (!valid_symbol_name(type_name))

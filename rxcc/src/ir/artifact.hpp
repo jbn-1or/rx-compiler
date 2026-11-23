@@ -5,6 +5,8 @@
 #include "ir/model.hpp"
 #include <iosfwd>
 #include <memory>
+#include <optional>
+#include <string>
 
 namespace rx {
 
@@ -22,6 +24,8 @@ public:
     // 返回保存的模块；生成器通过非 const 版本添加函数和指令。
     ir::Module &module() { return *module_; }
     const ir::Module &module() const { return *module_; }
+    // 校验通过后返回完整文本，调用方可在成功后才打开目标文件。
+    std::optional<std::string> verified_text(std::ostream &diagnostics) const;
     // 检查模块并输出 LLVM 文本；检查或写入失败时返回 false 并输出错误信息。
     // 检查失败时不会写入 output；写入中途失败时可能已写入部分文本。
     bool verify_and_print(std::ostream &output,

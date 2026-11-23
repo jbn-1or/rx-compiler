@@ -22,7 +22,7 @@ GenerationContext::GenerationContext(
     const std::vector<ir::IRFunctionId> &functions, ir::Module &module,
     ir::IRBuilder &builder, std::ostream &diagnostics)
     : semantics(semantics), functions(functions), module(module),
-      builder(builder), diagnostics(diagnostics) {}
+      layouts_(module), builder(builder), diagnostics(diagnostics) {}
 
 // 生成需要数据值的表达式；路径已结束时返回 NoContinuation 而不是伪造值。
 std::optional<EmitResult>
@@ -35,23 +35,40 @@ GenerationContext::emit_value(const Expression &expression,
 std::optional<EmitResult>
 GenerationContext::emit_expression(const Expression &expression,
                                    LocalPlaces &locals, ResultUse use) {
+    // 局部路径、显式解引用和投影都从原位置取值；借用和写入则直接用 emit_place。
+    if (semantics.expressions.at(&expression).place.is_place) {
+        auto place = emit_place(expression, locals);
+        if (!place)
+            return std::nullopt;
+        if (path_ended(*place))
+            return NoContinuation{};
+        const auto &source = std::get<Place>(*place);
+        return read_stored_value(source.address, *source.type,
+                                 StorageOrigin::SourcePlace);
+    }
     // 二元运算先求值两侧，再按源类型选择指令。
     if (const auto *binary =
             dynamic_cast<const BinaryExpression *>(&expression))
-        return emit_binary(*binary, locals);
-    // 一元运算分两类：借用/解引用走 place，取负/取反读取操作数及其引用目标。
+        return emit_binary(*binary, locals, use);
+    // 解引用已按 place 处理；其余一元表达式是借用、取负或取反。
     if (const auto *unary = dynamic_cast<const UnaryExpression *>(&expression))
         return emit_unary(*unary, locals);
     // as 转换只改源类型或把 bool 零扩展，不引入数值转换。
     if (const auto *cast = dynamic_cast<const CastExpression *>(&expression))
         return emit_cast(*cast, locals);
-    // 字面量和路径不产生嵌套求值，复用基础读取逻辑。
-    // 引用路径只读出指针，不会顺便读取目标内容。
+    // 排除局部路径后，只剩字面量和编译期常量路径。
     if (dynamic_cast<const IntegerLiteral *>(&expression) ||
         dynamic_cast<const BooleanLiteral *>(&expression) ||
         dynamic_cast<const PathExpression *>(&expression)) {
-        return EmitResult{emit_leaf(expression, locals)};
+        return emit_constant(expression);
     }
+
+    // 结构体和数组构造返回独立临时存储。
+    if (const auto *structure =
+            dynamic_cast<const StructExpression *>(&expression))
+        return emit_struct(*structure, locals);
+    if (const auto *array = dynamic_cast<const ArrayExpression *>(&expression))
+        return emit_array(*array, locals);
 
     // return 不需要也不能产生操作数，只结束当前路径。
     if (const auto *return_expression =
@@ -74,7 +91,7 @@ GenerationContext::emit_expression(const Expression &expression,
         return emit_if(*if_expression, locals, use);
     // loop 的值来自 break 写入的结果 slot；unit/never 不分配数据 slot。
     if (const auto *loop = dynamic_cast<const LoopExpression *>(&expression))
-        return emit_loop(*loop, locals);
+        return emit_loop(*loop, locals, use);
 
     // 显式 unit 不需要生成 IR 指令。
     if (dynamic_cast<const UnitExpression *>(&expression))
@@ -90,13 +107,6 @@ GenerationContext::emit_expression(const Expression &expression,
     // 每个绑定已有唯一 LocalId，块内不需要再次维护词法作用域。
     if (const auto *block =
             dynamic_cast<const BlockExpression *>(&expression)) {
-        if (use == ResultUse::Value) {
-            const auto &type = semantics.expressions.at(block).type;
-            if (!is_supported_value(type) && !type.is_never()) {
-                diagnostics << "IR 生成尚未支持此块值类型\n";
-                return std::nullopt;
-            }
-        }
         auto result = emit_statements(*block, locals);
         if (!result || path_ended(*result))
             return result;
@@ -140,7 +150,7 @@ GenerationContext::emit_discarded_expression(const Expression &expression,
                                              LocalPlaces &locals) {
     const auto &type = semantics.expressions.at(&expression).type;
     // 丢弃块结果时先处理语句，不必为不可达的尾值准备存储。
-    if (!type.is_unit() && !type.is_never() && !is_supported_value(type) &&
+    if (!type.is_unit() && !type.is_never() && !is_storable_value(type) &&
         !dynamic_cast<const BlockExpression *>(&expression)) {
         diagnostics << "IR 生成尚未支持丢弃此类型的表达式结果\n";
         return std::nullopt;
@@ -156,16 +166,33 @@ bool GenerationContext::emit_function_body(const FunctionSymbol &function,
                                            ir::IRFunctionId id) {
     builder.set_insert_point(module.function(id).add_block());
     LocalPlaces locals;
+    auto &ir_function = module.function(id);
+    current_return_type_ = &function.return_type;
+    function_result_pointer_.reset();
+    std::size_t parameter_offset = 0;
+    // 聚合返回的第一个降级形参由调用者提供，保存最终结果的地址。
+    if (ir_function.abi.result_storage) {
+        function_result_pointer_ = ir_function.argument(0);
+        parameter_offset = 1;
+    }
     const auto &parameter_locals = semantics.function_locals.at(function.id);
-    // 每个 IR 参数存入其 LocalId 对应的独立存储单元。
+    // 每个源形参存入自己的 LocalId 存储；按值聚合先从实参快照复制到独立 slot。
     for (std::size_t parameter_index = 0;
          parameter_index < function.parameters.size(); ++parameter_index) {
         const auto local_id = parameter_locals.parameters[parameter_index];
         const auto &local_type = semantics.locals[local_id.index].type;
-        // bool 形参存入 i8 slot，整数存入 i32 slot，引用形参保存 ptr。
-        const auto address = allocate_slot(lower_value_type(local_type));
-        const auto argument = module.function(id).argument(parameter_index);
-        store_value(argument, address);
+        const auto &abi_storage =
+            ir_function.abi.parameter_storage[parameter_offset + parameter_index];
+        const auto argument =
+            ir_function.argument(parameter_offset + parameter_index);
+        const bool by_value =
+            abi_storage.kind != ir::StorageType::Kind::Unit;
+        const auto address = allocate_storage_slot(
+            by_value ? abi_storage : ir::storage_type_of(local_type));
+        if (by_value)
+            copy_value(address, argument, local_type);
+        else
+            store_value(argument, address);
         locals.emplace(local_id, address);
     }
     // 函数体语句按源码顺序生成；提前 return 后停止整条路径。
@@ -174,34 +201,8 @@ bool GenerationContext::emit_function_body(const FunctionSymbol &function,
         return false;
     if (path_ended(*statements))
         return true;
-    const auto &tail = function.node->body->tail;
-    if (is_supported_value(function.return_type)) {
-        const auto value = emit_value(*tail, locals);
-        if (!value)
-            return false;
-        // 尾表达式本身提前 return 时，它已经发过 ret。
-        if (!path_ended(*value)) {
-            // 函数尾值是固定使用位置；使用 sema 记录到 FunctionBody 的计划。
-            auto coerced = emit_coercion_at(
-                UseSite{function.node, UseKind::FunctionBody, 0},
-                std::get<ir::Operand>(*value));
-            if (!coerced)
-                return false;
-            builder.ret(*coerced);
-        }
-        return true;
-    }
-    // unit 尾表达式只执行副作用，随后仍正常返回 void。
-    if (!tail) {
-        builder.ret();
-        return true;
-    }
-    auto result = emit_discarded_expression(*tail, locals);
-    if (!result)
-        return false;
-    if (!path_ended(*result))
-        builder.ret();
-    return true;
+    return emit_return_value(function.node->body->tail.get(),
+                             {function.node, UseKind::FunctionBody, 0}, locals).has_value();
 }
 
 } // namespace rx

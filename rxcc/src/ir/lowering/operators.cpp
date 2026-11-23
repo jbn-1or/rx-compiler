@@ -11,93 +11,50 @@ namespace rx {
 ir::Operand
 GenerationContext::finish_scalar_operand(ir::Operand value,
                                          const SemanticType &type) {
-    // sema 已保证运算操作数最多是一层共享引用，且其目标是直接标量。
-    if (is_reference(type))
-        return load_value(value, *type.inner);
+    // 排序允许多层引用；其他标量运算的层数限制已由 sema 检查。
+    const SemanticType *current = &type;
+    while (is_reference(*current)) {
+        current = current->inner.get();
+        value = load_value(value, *current);
+    }
     return value;
 }
 
 // 先求值左操作数，再求值右操作数；引用目标要等两侧都求值后才读取。
 std::optional<EmitResult>
 GenerationContext::emit_binary(const BinaryExpression &expression,
-                               LocalPlaces &locals) {
+                               LocalPlaces &locals, ResultUse use) {
     // 短路运算不能先求值两侧，必须在控制流中按左侧结果选择是否执行右侧。
     if (expression.operation == BinaryOperator::LogicalAnd ||
         expression.operation == BinaryOperator::LogicalOr)
-        return emit_logical(expression, locals);
+        return emit_logical(expression, locals, use);
     const auto &left_type =
         semantics.expressions.at(expression.left.get()).type;
     const auto &right_type =
         semantics.expressions.at(expression.right.get()).type;
     // 非短路运算先完成两侧求值，引用操作数在这里只得到指针。
     auto left = emit_value(*expression.left, locals);
-    if (!left)
-        return std::nullopt;
-    // 左操作数提前 return 时，右操作数和运算本身都不能再生成。
-    if (path_ended(*left))
-        return EmitResult{NoContinuation{}};
+    if (!left || path_ended(*left))
+        return left;
     auto right = emit_value(*expression.right, locals);
-    if (!right)
+    if (!right || path_ended(*right))
+        return right;
+
+    // 非标量相等留到 P10，不能把聚合值取成标量，也不能用地址比较代替。
+    if ((expression.operation == BinaryOperator::Equal ||
+         expression.operation == BinaryOperator::NotEqual) &&
+        !is_scalar(left_type)) {
+        diagnostics << "IR 生成尚未支持非标量相等比较（P10）\n";
         return std::nullopt;
-    if (path_ended(*right))
-        return EmitResult{NoContinuation{}};
-    auto left_value = std::get<ir::Operand>(*left);
-    auto right_value = std::get<ir::Operand>(*right);
-
-    // 相等需要按任意类型结构化读取；引用相等留到 P10，不能误比较地址。
-    if (expression.operation == BinaryOperator::Equal ||
-        expression.operation == BinaryOperator::NotEqual) {
-        if (is_reference(left_type) || is_reference(right_type)) {
-            diagnostics << "IR 生成尚未支持引用相等比较（P10）\n";
-            return std::nullopt;
-        }
-        auto result = emit_binary_operation(expression.operation, left_type,
-                                            left_value, right_value);
-        if (!result)
-            return std::nullopt;
-        return EmitResult{*result};
     }
-
-    // 排序比较按源类型记录的引用层级逐层读取，最后比较目标标量。
-    if (expression.operation == BinaryOperator::LessThan ||
-        expression.operation == BinaryOperator::LessThanOrEqual ||
-        expression.operation == BinaryOperator::GreaterThan ||
-        expression.operation == BinaryOperator::GreaterThanOrEqual) {
-        // 沿着引用层走到最终标量类型；sema 已保证两侧层级和基础类型匹配。
-        const SemanticType *base_type = &left_type;
-        while (is_reference(*base_type))
-            base_type = base_type->inner.get();
-        const auto load_reference_chain =
-            [&](ir::Operand value, const SemanticType &type) {
-                std::size_t depth = 0;
-                const SemanticType *current = &type;
-                while (is_reference(*current)) {
-                    ++depth;
-                    current = current->inner.get();
-                }
-                // 除最后一层外，每层读取的是下一层引用指针。
-                for (std::size_t index = 0; index + 1 < depth; ++index)
-                    value = load_value(value, ir::Type::Ptr);
-                // 最后一层读取最终标量；depth 为 0 时值已经就是标量。
-                if (depth > 0)
-                    value = load_value(value, *base_type);
-                return value;
-            };
-        auto left_scalar = load_reference_chain(left_value, left_type);
-        auto right_scalar = load_reference_chain(right_value, right_type);
-        auto result = emit_binary_operation(expression.operation, *base_type,
-                                            left_scalar, right_scalar);
-        if (!result)
-            return std::nullopt;
-        return EmitResult{*result};
-    }
-
-    // 算术、位运算和移位只允许一层共享引用；sema 已完成兼容性判断。
-    const auto &operand_type =
-        is_reference(left_type) ? *left_type.inner : left_type;
-    auto left_scalar = finish_scalar_operand(left_value, left_type);
-    auto right_scalar = finish_scalar_operand(right_value, right_type);
-    auto result = emit_binary_operation(expression.operation, operand_type,
+    const auto left_scalar =
+        finish_scalar_operand(std::get<ir::Operand>(*left), left_type);
+    const auto right_scalar =
+        finish_scalar_operand(std::get<ir::Operand>(*right), right_type);
+    const SemanticType *operand_type = &left_type;
+    while (is_reference(*operand_type))
+        operand_type = operand_type->inner.get();
+    auto result = emit_binary_operation(expression.operation, *operand_type,
                                         left_scalar, right_scalar);
     if (!result)
         return std::nullopt;
@@ -186,7 +143,7 @@ std::optional<ir::Operand> GenerationContext::emit_binary_operation(
     return std::nullopt;
 }
 
-// 生成一元运算：借用和解引用走 place 路径，取负和取反读取标量或一层共享引用的目标。
+// 生成借用、取负和取反；显式解引用由表达式分派按 place 读取。
 std::optional<EmitResult>
 GenerationContext::emit_unary(const UnaryExpression &expression,
                               LocalPlaces &locals) {
@@ -194,10 +151,6 @@ GenerationContext::emit_unary(const UnaryExpression &expression,
     if (expression.operation == UnaryOperator::Borrow ||
         expression.operation == UnaryOperator::MutableBorrow)
         return emit_borrow(expression, locals);
-    // 显式解引用先得到指针值，再按目标类型读取；不能复用普通值求值。
-    if (expression.operation == UnaryOperator::Dereference)
-        return emit_dereference(expression, locals);
-
     // 一元运算只有一个操作数：先求值它，再读取共享引用的目标。
     const auto &operand_type =
         semantics.expressions.at(expression.operand.get()).type;

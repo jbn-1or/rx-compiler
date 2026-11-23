@@ -43,14 +43,23 @@ struct StorageType {
     uint64_t length = 0; // 数组长度；仅 Kind::Array 使用。
     std::size_t struct_index = 0; // 模块内类型下标；仅 Kind::Struct 使用。
 
-    // 创建给定标量种类、没有子结构的存储类型。
+    StorageType() = default;
+    // 创建给定标量种类的存储类型。
     static StorageType scalar(Type type);
+    // 从计算值类型构造标量存储类型；调用方需保证它是可存储的标量。
+    StorageType(Type type);
     // 创建数组存储类型，元素类型和长度由调用方提供。
     static StorageType array_of(const StorageType &element, uint64_t length);
     // 创建指向模块类型表中某个命名结构体的存储类型。
     static StorageType struct_of(std::size_t struct_index);
     // 创建固定大小的 Vec 头，不携带源元素类型。
     static StorageType vec();
+
+    // 按结构判断两个存储类型是否表示同一种存储布局。
+    bool same_type(const StorageType &other) const;
+    bool operator==(const StorageType &other) const { return same_type(other); }
+    // 标量存储类型与计算值类型比较，保持旧模型的自然调用方式。
+    bool operator==(Type scalar) const;
 };
 
 // 标量计算值使用的存储类型；i1 在内存中使用 i8。

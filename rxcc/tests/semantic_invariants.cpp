@@ -822,6 +822,59 @@ void check_aggregate_coercion_queries() {
                         writable, {Step::Box});
 }
 
+// 列表先定最终元素类型再记录每条边；重复元素只记录一次，并保留原始类型。
+void check_array_coercion_queries() {
+    const auto crate = parse_crate(R"(
+        fn facts(deep: &&i32, shared: &i32, writable: &mut i32) {
+            let inferred = [deep, deep, shared];
+            let reversed = [shared, deep];
+            let fixed: [&i32; 2] = [deep, shared];
+            let repeat: [&i32; 2] = [deep; 2];
+            let identity = [123; 2];
+            let reborrowed = [writable, shared];
+        }
+        fn main() {}
+    )");
+    const auto result = analyze_fixture(*crate);
+    const auto &function = checked_ast<rx::Function>(crate->items.at(0));
+    const auto i32 = rx::SemanticType::int_(rx::SemanticType::IntKind::I32);
+    const auto shared = rx::SemanticType::reference(false, i32);
+    const auto deep = rx::SemanticType::reference(false, shared);
+    const auto writable = rx::SemanticType::reference(true, i32);
+    const auto array_at = [&](std::size_t index) -> const rx::ArrayExpression & {
+        const auto &binding = checked_ast<rx::LetStatement>(function.body->statements.at(index));
+        return checked_ast<rx::ArrayExpression>(binding.initializer);
+    };
+    using Step = rx::CoercionStepKind;
+    using Use = rx::UseKind;
+    const auto &inferred = array_at(0);
+    check(result.expressions.at(&inferred).type.same_type(rx::SemanticType::array(shared, 3)),
+          "所有数组元素必须使用同一个最终 LUB");
+    check_coercion_plan(result, {&inferred, Use::ArrayElement, 0},
+                        *inferred.elements.at(0), deep, shared, {Step::Reference});
+    check_coercion_plan(result, {&inferred, Use::ArrayElement, 1},
+                        *inferred.elements.at(1), deep, shared, {Step::Reference});
+    check_coercion_plan(result, {&inferred, Use::ArrayElement, 2},
+                        *inferred.elements.at(2), shared, shared, {});
+    const auto &reversed = array_at(1);
+    check_coercion_plan(result, {&reversed, Use::ArrayElement, 1},
+                        *reversed.elements.at(1), deep, shared, {Step::Reference});
+    const auto &fixed = array_at(2);
+    check_coercion_plan(result, {&fixed, Use::ArrayElement, 0},
+                        *fixed.elements.at(0), deep, shared, {Step::Reference});
+    const auto &repeat = array_at(3);
+    check_coercion_plan(result, {&repeat, Use::ArrayElement, 0},
+                        *repeat.repeat_value, deep, shared, {Step::Reference});
+    check(!result.coercion_plans.count({&repeat, Use::ArrayElement, 1}),
+          "重复元素只有一个转换位置，不按数组长度记录");
+    const auto &identity = array_at(4);
+    check_coercion_plan(result, {&identity, Use::ArrayElement, 0},
+                        *identity.repeat_value, i32, i32, {});
+    const auto &reborrowed = array_at(5);
+    check_coercion_plan(result, {&reborrowed, Use::ArrayElement, 0},
+                        *reborrowed.elements.at(0), writable, shared, {});
+}
+
 void check_semantic_result_ownership() {
     static_assert(!std::is_copy_constructible_v<rx::SemanticResult>);
     static_assert(!std::is_copy_assignable_v<rx::SemanticResult>);
@@ -1134,6 +1187,7 @@ int main() {
     check_reference_coercion_queries();
     check_control_flow_coercion_queries();
     check_aggregate_coercion_queries();
+    check_array_coercion_queries();
     check_semantic_result_ownership();
     check_failed_semantic_result();
     check_block_tail_reborrow();

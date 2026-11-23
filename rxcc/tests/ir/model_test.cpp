@@ -3,6 +3,7 @@
 #include "ir/builder.hpp"
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <locale>
 #include <sstream>
 #include <stdexcept>
@@ -100,14 +101,14 @@ void add_pointer_storage(Module &module) {
     const auto &store = std::get<Store>(pointer_block.instructions[0].operation);
     check(store.value == roundtrip.argument(0) && store.address == slot &&
               std::get<Load>(pointer_block.instructions[1].operation).address == slot &&
-              pointer_block.terminator->value == loaded,
+              std::get<Return>(*pointer_block.terminator).value == loaded,
           "ptr 往返必须保存形参、读取同一 slot 并返回读取结果");
     const auto &caller_block = function.blocks[0];
     const auto &call = std::get<Call>(caller_block.instructions[1].operation);
     check(std::get<Store>(caller_block.instructions[0].operation).address == address &&
               call.function == id && call.arguments.size() == 1 && call.arguments[0] == address &&
               std::get<Load>(caller_block.instructions[2].operation).address == *returned &&
-              caller_block.terminator->value == value,
+              std::get<Return>(*caller_block.terminator).value == value,
           "调用必须传入原地址，用返回的指针读取整数，再返回该整数");
 }
 
@@ -254,15 +255,15 @@ void check_branch_models() {
     reject([](Module &, Function &f) { f.blocks.at(1).terminator = Branch{f.blocks.front().id}; },
            "跳回入口块的 br 必须被拒绝");
     reject([](Module &, Function &f) {
-        auto &branch = std::get<CondBranch>(f.blocks.front().terminator->instruction);
+        auto &branch = std::get<CondBranch>(*f.blocks.front().terminator);
         branch.when_false = BlockId{f.id, invalid_index};
     }, "condbr 的 false 目标不存在时必须被拒绝");
     reject([](Module &, Function &f) {
-        auto &branch = std::get<CondBranch>(f.blocks.front().terminator->instruction);
+        auto &branch = std::get<CondBranch>(*f.blocks.front().terminator);
         branch.when_true = f.blocks.front().id;
     }, "condbr 的 true 边不能为入口块增加前驱");
     reject([](Module &, Function &f) {
-        auto &branch = std::get<CondBranch>(f.blocks.front().terminator->instruction);
+        auto &branch = std::get<CondBranch>(*f.blocks.front().terminator);
         branch.condition = Operand::constant(Type::I32, 1);
     }, "condbr 的条件必须为 i1");
     reject([](Module &, Function &f) {
@@ -270,7 +271,7 @@ void check_branch_models() {
         const auto zero = Operand::constant(Type::I32, 0);
         f.blocks.at(1).instructions.push_back({
             *value.value_id(), Type::I1, Compare{Comparison::Equal, zero, zero}});
-        std::get<CondBranch>(f.blocks.front().terminator->instruction).condition = value;
+        std::get<CondBranch>(*f.blocks.front().terminator).condition = value;
     }, "即使条件为 i1，也不能在定义它的分支执行前使用");
 }
 
@@ -330,7 +331,7 @@ void check_dominance() {
                   text.str().empty() && !diagnostics.str().empty(), message);
     };
     reject([](Function &function, Operand value, Operand) {
-        function.signature.result = Type::I32;
+        function.abi.signature.result = Type::I32;
         function.blocks.back().terminator = Return{value};
     }, "merge 的 ret 不能读取只在 then 中定义的值");
     reject([](Function &function, Operand value, Operand one) {
@@ -410,6 +411,169 @@ template <class F> void reject_model(F corrupt) {
           "损坏的模块必须诊断且不得输出部分文本");
 }
 
+// 直接查询目标布局，覆盖空存储和接近 32 位上限的对象，不实际分配它们。
+void check_layout_limits() {
+    Module module;
+    const auto byte = StorageType::scalar(Type::I8);
+    const auto word = StorageType::scalar(Type::I32);
+    const auto pointer = StorageType::scalar(Type::Ptr);
+    const auto max_size = std::numeric_limits<uint32_t>::max();
+    const auto largest = StorageType::array_of(byte, max_size);
+    const auto field_sum = module.add_named_type("field_sum");
+    const auto field_align = module.add_named_type("field_align");
+    const auto tail_align = module.add_named_type("tail_align");
+    module.define_named_type(field_sum, {largest, byte});
+    module.define_named_type(field_align, {largest, word});
+    module.define_named_type(tail_align, {word, StorageType::array_of(byte, max_size - 4)});
+
+    LayoutService layouts(module);
+    check(layouts.layout(StorageType{}) == Layout{0, 1, {}}, "unit 大小为 0、对齐为 1");
+    check(layouts.layout(byte) == Layout{1, 1, {}} &&
+              layouts.layout(word) == Layout{4, 4, {}} &&
+              layouts.layout(pointer) == Layout{4, 4, {}}, "标量布局必须取 RV32 大小和对齐");
+    check(layouts.layout(StorageType::vec()) == Layout{12, 4, {0, 4, 8}},
+          "Vec 头应连续存放 RV32 地址、长度和容量");
+    check(layouts.layout(StorageType::array_of(word, 0)) == Layout{0, 4, {}},
+          "零长度数组仍保留元素对齐");
+    check(layouts.layout(largest) == Layout{max_size, 1, {}} &&
+              layouts.layout(StorageType::array_of(word, max_size / 4)) == Layout{max_size - 3, 4, {}},
+          "布局上限内的数组不能被误拒绝");
+    rejects([&] { layouts.layout(StorageType::array_of(word, uint64_t{max_size} / 4 + 1)); });
+    // 2^62 乘 4 连宿主 uint64_t 也装不下，必须在乘法前拒绝。
+    rejects([&] { layouts.layout(StorageType::array_of(word, uint64_t{1} << 62)); });
+
+    // 同一个结束位置分别触发下一字段对齐和结构体尾部对齐溢出。
+    rejects([&] { layouts.layout(StorageType::struct_of(field_sum)); });
+    rejects([&] { layouts.layout(StorageType::struct_of(field_align)); });
+    rejects([&] { layouts.layout(StorageType::struct_of(tail_align)); });
+}
+
+// 前端不会产生这些类型表；手工模型需要被自有 verifier 拒绝，且不能吐出部分 LLVM 文本。
+void check_invalid_named_layouts() {
+    reject_model([](Module &m) { m.add_named_type("unfinished"); });
+    reject_model([](Module &m) {
+        const auto type = m.add_named_type("dangling");
+        m.define_named_type(type, {StorageType::struct_of(type + 1)});
+    });
+    reject_model([](Module &m) {
+        const auto first = m.add_named_type("first");
+        const auto second = m.add_named_type("second");
+        m.define_named_type(first, {StorageType::array_of(StorageType::struct_of(second), 1)});
+        m.define_named_type(second, {StorageType::struct_of(first)});
+    });
+    reject_model([](Module &m) {
+        const auto type = m.add_named_type("oversized");
+        m.define_named_type(type, {StorageType::array_of(StorageType::scalar(Type::I32), 1073741824)});
+    });
+}
+
+// 验证聚合分配、动态数组下标和字段投影的类型；非法操作数不能进入指令表。
+void check_aggregate_gep() {
+    auto artifact = make_module();
+    auto &module = artifact.module();
+    const auto record = module.add_named_type("record");
+    module.define_named_type(record, {StorageType::scalar(Type::I8), StorageType::scalar(Type::I32)});
+    const auto element = StorageType::struct_of(record);
+    const auto array = StorageType::array_of(element, 2);
+    const auto id = module.add_function("project", {Type::I32, {Type::I32}}, Linkage::Internal);
+    auto &function = module.function(id);
+    IRBuilder builder(module);
+    builder.set_insert_point(function.add_block());
+    const auto base = builder.entry_alloca(array, 4);
+    const auto zero = Operand::constant(Type::I32, 0);
+    const auto one = Operand::constant(Type::I32, 1);
+    const auto index = function.argument(0);
+    rejects([&] { builder.get_element_ptr(array, zero, {zero, index}); });
+    const auto boolean = Operand::constant(Type::I1, 1);
+    rejects([&] { builder.get_element_ptr(array, base, {zero, boolean}); });
+    check(function.blocks.front().instructions.empty(), "非法 GEP 不得发指令");
+
+    const auto item = builder.get_element_ptr(array, base, {zero, index});
+    const auto out_of_range = Operand::constant(Type::I32, 2);
+    rejects([&] { builder.get_element_ptr(element, item, {zero, out_of_range}); });
+    rejects([&] { builder.get_element_ptr(element, item, {zero, index}); });
+    const auto field = builder.get_element_ptr(element, item, {zero, one});
+    builder.store(Type::I32, one, field, 4);
+    builder.ret(builder.load(Type::I32, field, 4));
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "合法的两级投影必须通过自有检查");
+    const auto printed = text.str();
+    check(printed.find("alloca [2 x %record], align 4") != std::string::npos &&
+              printed.find("getelementptr [2 x %record], ptr %v_1, i32 0, i32 %v_0") != std::string::npos &&
+              printed.find("getelementptr %record, ptr %v_2, i32 0, i32 1") != std::string::npos,
+          "GEP 必须保留显式存储类型，数组使用动态下标，字段使用声明序号");
+
+    // 手工损坏已生成的指令，确认模块检查不依赖 builder 的检查。
+    auto &gep = std::get<GetElementPtr>(function.blocks.front().instructions.front().operation);
+    gep.indices.back() = boolean;
+    std::ostringstream invalid_text, invalid_diagnostics;
+    check(!artifact.verify_and_print(invalid_text, invalid_diagnostics) &&
+              invalid_text.str().empty() && !invalid_diagnostics.str().empty(),
+          "检查器必须拒绝错误类型的 GEP 下标，不输出部分 IR");
+    gep.indices.back() = index;
+    auto &field_gep = std::get<GetElementPtr>(function.blocks.front().instructions[1].operation);
+    field_gep.indices.back() = out_of_range;
+    std::ostringstream invalid_field_text, invalid_field_diagnostics;
+    check(!artifact.verify_and_print(invalid_field_text, invalid_field_diagnostics) &&
+              invalid_field_text.str().empty() && !invalid_field_diagnostics.str().empty(),
+          "检查器必须独立拒绝越界的结构体字段序号");
+}
+
+// 聚合 ABI 的隐藏位置和实参数量由构建器检查；输出前还要独立检查模块元数据。
+void check_aggregate_abi_validation() {
+    const auto array = StorageType::array_of(StorageType::scalar(Type::I32), 2);
+    const FunctionABI valid{{Type::Void, {Type::Ptr, Type::I32}}, {{}, {}}, array};
+    auto artifact = make_module();
+    auto &module = artifact.module();
+    for (const FunctionABI &invalid : {
+             FunctionABI{{Type::Void, {Type::I32, Type::Ptr}}, {{}, {}}, array},
+             FunctionABI{{Type::Void, {Type::Ptr}}, {array}, array},
+             FunctionABI{{Type::I32, {Type::Ptr}}, {{}}, array},
+             FunctionABI{{Type::Void, {Type::Ptr}}, {}, array},
+             FunctionABI{{Type::Void, {Type::I32}}, {array}, std::nullopt},
+         }) {
+        rejects([&] { module.add_function_abi("rejected_abi", invalid, Linkage::External); });
+        check(!module.find_function("rejected_abi"), "无效 ABI 不能登记到模块");
+    }
+
+    const auto callee = module.add_function_abi("fill", valid, Linkage::External);
+    const auto caller = module.add_function("invoke", {Type::Void, {}}, Linkage::Internal);
+    auto &function = module.function(caller);
+    IRBuilder builder(module);
+    builder.set_insert_point(function.add_block());
+    const auto slot = builder.entry_alloca(array, 4);
+    const auto number = Operand::constant(Type::I32, 17);
+    rejects([&] { builder.call(callee, {number}); });
+    rejects([&] { builder.call(callee, {number, slot}); });
+    check(function.blocks.front().instructions.empty(), "无效调用不能进入指令表");
+    check(!builder.call(callee, {slot, number}), "通过地址返回的调用不产生 SSA 结果");
+    builder.ret();
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics), "合法的聚合返回调用必须通过校验");
+
+    // 绕过 builder 后修改 Call，确认 check_module 也会检查隐藏参数及其位置。
+    auto &call = std::get<Call>(function.blocks.front().instructions.front().operation);
+    for (const auto &invalid : {std::vector{number}, std::vector{number, slot}}) {
+        call.arguments = invalid;
+        std::ostringstream output, errors;
+        check(!artifact.verify_and_print(output, errors) && output.str().empty() && !errors.str().empty(),
+              "错误数量或位置的隐藏参数必须被模块校验拒绝");
+    }
+    reject_model([&](Module &m) {
+        const auto id = m.add_function_abi("wrong_result", valid, Linkage::External);
+        m.function(id).abi.signature.parameters.front() = Type::I32;
+    });
+    reject_model([&](Module &m) {
+        const auto id = m.add_function_abi("wrong_layout", valid, Linkage::External);
+        m.function(id).abi.result_storage = StorageType::struct_of(999);
+    });
+    reject_model([&](Module &m) {
+        const auto id = m.add_function_abi("stale_signature", valid, Linkage::External);
+        m.function(id).abi.signature.parameters.back() = Type::I1;
+    });
+}
+
 void check_invalid_models() {
     reject_model([](Module &m) { m.find_function("main")->blocks[0].terminator.reset(); });
     reject_model([](Module &m) { m.find_function("main")->blocks[0].terminator = Return{}; });
@@ -446,7 +610,7 @@ void check_invalid_models() {
         block.instructions.push_back(block.instructions[0]);
     });
     reject_model([](Module &m) {
-        m.find_function("external_io")->signature.parameters[0] = Type::Void;
+        m.find_function("external_io")->abi.signature.parameters[0] = Type::Void;
     });
     reject_model([](Module &m) { m.find_function("__rx_fn_0")->blocks.clear(); });
     reject_model([](Module &m) { std::get<Alloca>(m.find_function("storage")->entry_allocas[0].operation).alignment = 3; });
@@ -658,6 +822,10 @@ void run_tests() {
     check_branch_builder();
     check_branch_models();
     check_dominance();
+    check_layout_limits();
+    check_invalid_named_layouts();
+    check_aggregate_gep();
+    check_aggregate_abi_validation();
     auto storage = make_module();
     add_storage(storage.module());
     std::ostringstream storage_text;

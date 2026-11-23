@@ -1,5 +1,5 @@
 // 提供向基本块添加指令的接口，并检查操作数、存储和返回值的类型。
-// 添加指令前先选择一个基本块；添加 ret 后，不再继续向该块添加指令。
+// 添加指令前先选择一个基本块；返回或跳转后关闭该插入点。
 #pragma once
 #include "ir/model.hpp"
 
@@ -12,23 +12,17 @@ public:
     explicit IRBuilder(Module &module) : module_(module) {}
     // 选择后续指令要添加到的基本块；已经结束的块仍不能继续添加指令。
     void set_insert_point(BlockId block_id);
-    // 取消当前选中的基本块，不删除已经添加的指令。
-    void clear_insert_point() { insertion_.reset(); }
     // 返回当前选中块的 ID；没有选中块时返回空值。
     std::optional<BlockId> insert_point() const { return insertion_; }
-    // 返回当前选中的基本块；没有选中块时返回 nullptr。
-    BasicBlock *current_block() const;
-    // 判断当前是否选中了一个尚未结束、可以继续添加 IR 指令的基本块。
-    bool is_open() const;
-    // 判断当前块是否可继续添加指令，且操作数的类型和所属函数是否正确。
-    // 不检查值是否已在使用前定义，这项检查由 check_module 完成。
-    bool can_use(const Operand &operand) const;
 
     // 添加函数调用并返回结果操作数；被调用函数返回 void 时返回空值。
     std::optional<Operand> call(IRFunctionId function_id,
                                 std::vector<Operand> arguments = {});
     // 在当前函数入口分配固定存储，不改变当前插入点。
-    Operand entry_alloca(Type storage_type, uint32_t alignment);
+    Operand entry_alloca(StorageType storage_type, uint32_t alignment);
+    // 从基址按存储类型和下标计算字段/数组地址，结果为 ptr，不附加 inbounds。
+    Operand get_element_ptr(StorageType source_type, Operand base,
+                            std::vector<Operand> indices);
     // 从地址读取指定存储类型的值，并为结果分配值 ID；保存引用的 ptr slot
     // 读取后仍是地址，不会自动读取目标内容。
     Operand load(Type storage_type, Operand address, uint32_t alignment);
@@ -59,13 +53,11 @@ private:
     // 返回当前块所属的函数；没有选中块或块已经结束时抛出 logic_error。
     Function &open_function() const;
     // 添加普通指令；有数据结果时分配值 ID，无结果时返回空操作数。
-    Operand append(Type type, Operation operation);
+    Operand append(Function &function, Type type, Operation operation);
     // 检查跳转目标是否属于当前函数、存在且不是入口块。
     void require_target(const Function &function, BlockId target) const;
     // 设置当前块的终结指令，并取消选中的基本块。
-    void terminate(Terminator terminator);
-    // 检查操作数能否用于当前函数；不符合条件时抛出 logic_error。
-    void require_operand(const Operand &operand) const;
+    void terminate(Function &function, Terminator terminator);
     Module &module_; // 正在构建的模块引用；使用构建器期间，调用方不能释放这个模块。
     std::optional<BlockId> insertion_; // 当前选中块的 ID；未选择块或添加终结指令后为空。
 };

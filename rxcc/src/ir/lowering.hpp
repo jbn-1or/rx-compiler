@@ -5,6 +5,7 @@
 #include "ir/lowering/value.hpp"
 #include "ir/model.hpp"
 #include "sema/result.hpp"
+#include <functional>
 #include <map>
 #include <optional>
 #include <ostream>
@@ -15,6 +16,11 @@ namespace rx {
 
 struct FunctionSymbol;
 struct IfExpression;
+struct ArrayExpression;
+struct StructExpression;
+struct FieldExpression;
+struct IndexExpression;
+struct StructSymbol;
 struct LoopExpression;
 struct WhileExpression;
 struct BreakExpression;
@@ -28,12 +34,18 @@ class Module;
 // 保存每个局部绑定在入口分配中的地址；名称解析仍来自语义结果。
 using LocalPlaces = std::map<LocalId, ir::Operand>;
 
+// 已经求得的独立聚合值；address 是入口分配的值存储，不等同于源变量的 place。
+struct AggregateValue {
+    ir::Operand address; // 聚合值存储地址，IR 类型必须为 ptr。
+    const SemanticType *type; // 这个值保存的源聚合类型。
+};
 // 表达式正常完成但没有数据值，例如 () 或已经产生副作用的 unit 调用。
 struct UnitResult {};
 // 当前执行路径已经由 return 结束，外层不能再生成任何指令。
 struct NoContinuation {};
 // 一条表达式或语句的生成结果；生成失败仍用外层 std::nullopt 表示。
-using EmitResult = std::variant<ir::Operand, UnitResult, NoContinuation>;
+using EmitResult =
+    std::variant<ir::Operand, AggregateValue, UnitResult, NoContinuation>;
 
 // 保存一次 place 求值得到的地址和该位置中保存的源类型。
 // 引用变量自身的 slot 保存指针；读取 slot 与读取目标内容是两次不同的 load。
@@ -70,8 +82,7 @@ private:
         LoopId id; // 这个帧对应的语义循环身份。
         ir::BlockId continue_target; // while 回到条件块，loop 回到循环体块。
         std::optional<ir::BlockId> break_target; // 退出块；loop 在首次 break 时创建。
-        const SemanticType *result_type = nullptr; // 非空表示 loop 有数据结果。
-        std::optional<ir::Operand> result_slot; // 有数据结果时保存入口 result slot。
+        std::optional<Place> result; // 仅在调用方需要 break 的值时保存结果位置。
     };
 
     // lowering.cpp：表达式和语句分派。
@@ -91,33 +102,66 @@ private:
     std::optional<EmitResult> emit_discarded_expression(const Expression &expression,
                                                         LocalPlaces &locals);
 
+    // lowering/aggregate.cpp：聚合构造、值快照和存储搬运。
+    // 查找字段在声明列表中的序号；sema 已保证字段存在。
+    std::size_t field_declaration_index(const StructSymbol &structure,
+                                        const std::string &name) const;
+    // 按源码顺序构造结构体或数组，返回独立临时存储中的聚合值。
+    std::optional<EmitResult> emit_struct(const StructExpression &expression,
+                                          LocalPlaces &locals);
+    std::optional<EmitResult> emit_array(const ArrayExpression &expression,
+                                         LocalPlaces &locals);
+    // 求值一个固定使用位置并按 sema 的记录调整到目标类型。
+    std::optional<EmitResult>
+    emit_prepared_value(const Expression &expression, LocalPlaces &locals,
+                        const UseSite &site);
+    // 对已经求好的结果执行 sema 记录的调整；聚合值保持同一存储。
+    std::optional<EmitResult> adjust_value(const EmitResult &value,
+                                           const UseSite &site);
+    // 把已准备好的标量或聚合值写入目标存储。
+    void store_prepared_value(const ir::Operand &destination,
+                              const EmitResult &prepared,
+                              const SemanticType &type);
+    // 按完整聚合结构把 source 存储搬运到 destination；数组使用有界循环。
+    void copy_value(const ir::Operand &destination, const ir::Operand &source,
+                    const SemanticType &type);
+    // 源位置可能被后续表达式修改，私有结果槽则已经是独立的值。
+    enum class StorageOrigin { SourcePlace, PrivateSlot };
+    std::optional<EmitResult> read_stored_value(
+        const ir::Operand &address, const SemanticType &type,
+        StorageOrigin origin = StorageOrigin::PrivateSlot);
+    // 对每个下标生成 body；小数组直接展开，大数组生成计数循环。
+    void for_each_array_index(
+        uint64_t count,
+        const std::function<void(ir::Operand)> &body);
+
     // lowering/control_flow.cpp：if 的分块、跳转和正常边汇合。
     // 仅在调用方需要数据结果时创建 slot，供正常分支写入并在汇合块读回。
     std::optional<EmitResult> emit_if(const IfExpression &expression,
                                      LocalPlaces &locals, ResultUse use);
     // 生成 && / ||：先求左操作数，只有需要时再求右操作数。
     std::optional<EmitResult> emit_logical(const BinaryExpression &expression,
-                                           LocalPlaces &locals);
+                                           LocalPlaces &locals, ResultUse use);
     // 生成 while：cond 每轮重新求值，body 正常结束回到 cond，false 边进入 exit。
     std::optional<EmitResult> emit_while(const WhileExpression &expression,
                                          LocalPlaces &locals);
     // 生成 loop：body 正常结束跳回自身；有结果时 break 写入口 slot，exit 读回。
     std::optional<EmitResult> emit_loop(const LoopExpression &expression,
-                                        LocalPlaces &locals);
+                                        LocalPlaces &locals, ResultUse use);
     // 生成 break/continue：查 sema 记录的 LoopId，再跳到当前循环帧的目标块。
     std::optional<EmitResult> emit_break(const BreakExpression &expression,
                                          LocalPlaces &locals);
     std::optional<EmitResult> emit_continue(
         const ContinueExpression &expression, LocalPlaces &locals);
-    // 按 LoopId 查找生成期的循环帧；找不到说明消 lower 与 sema 身份不一致。
-    LoopFrame *find_loop_frame(LoopId id);
+    LoopFrame &active_loop(LoopId target);
 
     // lowering/value.cpp：基础值、存储表示和固定临时 slot。
+    // 按存储类型和布局服务分配入口 slot，标量与聚合共用。
+    ir::Operand allocate_storage_slot(const ir::StorageType &storage_type);
     // 按标量的 RV32 存储类型和对齐要求分配入口 slot。
     ir::Operand allocate_slot(ir::Type value_type);
-    // 计算字面量、路径以及引用本地读取；引用路径只加载保存的指针。
-    ir::Operand emit_leaf(const Expression &expression,
-                           const LocalPlaces &locals);
+    // 计算字面量或常量路径，不读取局部变量。
+    ir::Operand emit_constant(const Expression &expression);
     // 从存储单元读回普通值；bool 读取 i8 后再截断成 i1，引用读取 ptr，整数读取 i32。
     ir::Operand load_value(const ir::Operand &address,
                            const SemanticType &type);
@@ -131,12 +175,17 @@ private:
     // 计算位置表达式的地址；引用本身不在这里读取目标内容。
     std::optional<PlaceResult> emit_place(const Expression &expression,
                                           LocalPlaces &locals);
+    // 求值字段/索引的基表达式，沿引用取得底层聚合的原位置或临时存储。
+    std::optional<PlaceResult> emit_base_place(const Expression &expression,
+                                               LocalPlaces &locals);
+    // 沿已确认的引用自动解引用后，用 GEP 投影字段或数组元素。
+    std::optional<PlaceResult> emit_field_place(const FieldExpression &expression,
+                                                LocalPlaces &locals);
+    std::optional<PlaceResult> emit_index_place(const IndexExpression &expression,
+                                                LocalPlaces &locals);
     // 生成 & / &mut：已有 place 直接取地址，值表达式只物化一次。
     std::optional<EmitResult> emit_borrow(const UnaryExpression &expression,
                                           LocalPlaces &locals);
-    // 生成一次内置解引用：先得到地址，再按目标源类型读取值。
-    std::optional<EmitResult>
-    emit_dereference(const UnaryExpression &expression, LocalPlaces &locals);
     // 按 sema 已选定的路径执行引用调整；每步只读取一层指针。
     std::optional<ir::Operand> emit_coercion(ir::Operand value,
                                              const CoercionPlan &plan);
@@ -147,7 +196,7 @@ private:
     // lowering/operators.cpp：操作数读取时机和标量运算。
     // 先求值左操作数，再求值右操作数，最后按源类型选择二元指令。
     std::optional<EmitResult> emit_binary(const BinaryExpression &expression,
-                                          LocalPlaces &locals);
+                                          LocalPlaces &locals, ResultUse use);
     // 生成一元取负或按位取反；共享引用操作数在求值后读取目标。
     std::optional<EmitResult> emit_unary(const UnaryExpression &expression,
                                          LocalPlaces &locals);
@@ -167,7 +216,9 @@ private:
     // 先生成初始化器，再为 LocalId 分配并登记存储位置。
     std::optional<EmitResult> emit_let(const LetStatement &statement,
                                        LocalPlaces &locals);
-    // 生成 return：先求值操作数，再发 ret 并结束当前路径。
+    // 显式 return 与函数尾返回共用发射逻辑；site 标识各自的语义转换记录。
+    std::optional<EmitResult> emit_return_value(const Expression *value,
+                                                const UseSite &site, LocalPlaces &locals);
     std::optional<EmitResult> emit_return(const ReturnExpression &expression,
                                           LocalPlaces &locals);
     // 生成普通或复合赋值：RHS 优先，目标地址只求一次，最后写入。
@@ -183,10 +234,13 @@ private:
     const SemanticResult &semantics; // 语义分析结果，提供表达式、路径和调用的记录。
     const std::vector<ir::IRFunctionId> &functions; // 源 FunctionId 下标到已登记 IRFunctionId 的映射。
     ir::Module &module; // 正在构建的 IR 模块。
+    ir::LayoutService layouts_; // 复用命名结构体布局缓存，提供 slot 对齐和搬运步长。
     ir::IRBuilder &builder; // 向当前基本块添加指令的构建器。
     std::ostream &diagnostics; // 收集 IR 生成期间错误信息的输出流。
     // 当前正在生成的循环帧，按嵌套顺序保存；break/continue 用 LoopId 定位目标。
     std::vector<LoopFrame> loop_frames_;
+    const SemanticType *current_return_type_ = nullptr; // 当前函数的源返回类型。
+    std::optional<ir::Operand> function_result_pointer_; // 聚合返回的调用者结果地址。
 };
 
 } // namespace rx

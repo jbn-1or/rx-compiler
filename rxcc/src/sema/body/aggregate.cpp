@@ -221,8 +221,11 @@ BodyChecker::check_array(const ArrayExpression &expression,
             check_expression(*expression.repeat_value, expected_element);
         bool ok = !element.type.is_error();
 
-        if (has_fixed_target &&
-            !require_coerce(element, *expected_element, expression.repeat_value->span))
+        // 重复元素是固定使用位置；有期望数组时按最终元素类型记录调整路径。
+        if (!require_coerce_at(
+                UseSite{&expression, UseKind::ArrayElement, 0}, element,
+                has_fixed_target ? *expected_element : element.type,
+                expression.repeat_value->span))
             ok = false;
 
         // 次数必须是能算出来的 usize 常量，不能用普通变量或别的类型。
@@ -287,7 +290,9 @@ BodyChecker::check_array(const ArrayExpression &expression,
         // 元素类型本身已经出错，后面不再重复报错。
         if (expected_element->is_error())
             ok = false;
-        for (const auto &element : expression.elements) {
+        for (std::size_t index = 0;
+             index < expression.elements.size(); ++index) {
+            const auto &element = expression.elements[index];
             // 数组里少了一个元素表达式。
             if (!element) {
                 diagnostics_.error(expression.span,
@@ -298,7 +303,9 @@ BodyChecker::check_array(const ArrayExpression &expression,
             const ExpressionResult value =
                 check_expression(*element, expected_element);
             diverges = diverges || value.diverges;
-            if (!require_coerce(value, *expected_element, element->span))
+            if (!require_coerce_at(
+                    UseSite{&expression, UseKind::ArrayElement, index}, value,
+                    *expected_element, element->span))
                 ok = false;
         }
         // 写的元素个数和外面要求的长度不一样。
@@ -344,6 +351,13 @@ BodyChecker::check_array(const ArrayExpression &expression,
                            "array elements do not have a common type");
         return ExpressionResult::error();
     }
+    // 最终 LUB 确定后，为每个源码元素记录到该共同类型的调整路径。
+    for (std::size_t index = 0; index < elements.size(); ++index)
+        if (!require_coerce_at(
+                UseSite{&expression, UseKind::ArrayElement, index},
+                elements[index], element_type,
+                expression.elements[index]->span))
+            return ExpressionResult::error();
     return ExpressionResult::value(
         SemanticType::array(element_type, elements.size()), diverges);
 }

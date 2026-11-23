@@ -26,23 +26,48 @@ bool validate_functions(const SemanticResult &semantics,
             diagnostics << "IR 生成尚未支持方法或关联函数\n";
             return false;
         }
-        // 当前接受标量或标量引用形参，以及标量、标量引用或 unit 返回类型。
+        // 签名支持标量、引用链（可指向聚合）和按值聚合参数/返回。
         const bool supported_return =
             function.return_type.is_unit() ||
-            is_supported_value(function.return_type);
+            is_storable_value(function.return_type);
         const bool supported_parameters =
             std::all_of(function.parameters.begin(), function.parameters.end(),
                         [](const ResolvedParameter &parameter) {
-                            return is_supported_value(parameter.type);
+                             return is_storable_value(parameter.type);
                         });
         if (!supported_parameters || !supported_return) {
             diagnostics << "IR 生成尚未支持此函数签名"
-                           "（仅支持整数/bool/引用参数以及整数/bool/引用/unit 返回）\n";
+                           "（聚合容器操作等仍需后续阶段）\n";
             return false;
         }
         // 函数体的语句列表和尾表达式会在 lowering 时按源码顺序处理。
     }
     return true;
+}
+
+// 把源函数签名降级成共享 ABI：按值聚合参数用 ptr 快照，聚合返回用隐藏首参数。
+ir::FunctionABI make_function_abi(const FunctionSymbol &function) {
+    ir::FunctionABI abi;
+    if (is_aggregate_value(function.return_type)) {
+        abi.result_storage = ir::storage_type_of(function.return_type);
+        abi.signature.parameters.push_back(ir::Type::Ptr);
+        abi.parameter_storage.push_back(ir::StorageType{});
+    } else {
+        abi.signature.result = function.return_type.is_unit()
+                         ? ir::Type::Void
+                         : lower_value_type(function.return_type);
+    }
+    for (const auto &parameter : function.parameters) {
+        if (is_aggregate_value(parameter.type)) {
+            abi.signature.parameters.push_back(ir::Type::Ptr);
+            abi.parameter_storage.push_back(
+                ir::storage_type_of(parameter.type));
+        } else {
+            abi.signature.parameters.push_back(lower_value_type(parameter.type));
+            abi.parameter_storage.push_back(ir::StorageType{});
+        }
+    }
+    return abi;
 }
 
 } // namespace
@@ -71,8 +96,6 @@ std::optional<IRArtifact> generate_ir(const SemanticResult &semantics,
         ir::IRBuilder builder(module);
         // functions[源 FunctionId.index] 保存对应的 IRFunctionId，不混用两种 ID。
         std::vector<ir::IRFunctionId> functions;
-        GenerationContext context(semantics, functions, module, builder,
-                                  diagnostics);
         // 先按稳定 StructId 登记全部命名结构体身份，再补齐字段。
         // 这样 Node { children: Vec<Node> } 等经 Box/Vec 的递归类型也能有限完成。
         for (const auto &structure : semantics.structs)
@@ -86,23 +109,16 @@ std::optional<IRArtifact> generate_ir(const SemanticResult &semantics,
                     structure->field_types.at(field.name)));
             module.define_named_type(structure->id.index, std::move(fields));
         }
-        // 先登记所有函数的签名，使前向调用可以直接按 FunctionId 解析。
+        // 先登记所有函数的 ABI，使前向调用可以直接按 FunctionId 解析。
         for (std::size_t function_index = 0;
              function_index < function_names.size(); ++function_index) {
             const auto &source = *semantics.functions[function_index];
-            std::vector<ir::Type> parameters;
-            parameters.reserve(source.parameters.size());
-            // 每个形参按源类型映射成 i1、i32 或引用的 ptr。
-            for (const auto &parameter : source.parameters)
-                parameters.push_back(lower_value_type(parameter.type));
-            const auto result = source.return_type.is_unit()
-                                    ? ir::Type::Void
-                                    : lower_value_type(source.return_type);
-            functions.push_back(module.add_function(
+            functions.push_back(module.add_function_abi(
                 function_names[function_index],
-                {result, std::move(parameters)}, ir::Linkage::Internal));
+                make_function_abi(source), ir::Linkage::Internal));
         }
         // 按源码顺序生成所有函数体，包括未被调用的函数。
+        GenerationContext context(semantics, functions, module, builder, diagnostics);
         for (std::size_t function_index = 0;
              function_index < functions.size(); ++function_index) {
             if (!context.emit_function_body(

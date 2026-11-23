@@ -5,23 +5,13 @@
 #include "ir/layout.hpp"
 #include "ir/lowering.hpp"
 #include <cstdint>
+#include <stdexcept>
 #include <variant>
 
 namespace rx {
-// 局部绑定、临时值和分支结果都使用同一套标量存储规则。
-ir::Operand GenerationContext::allocate_slot(ir::Type value_type) {
-    const auto storage_type = ir::scalar_storage_type(value_type);
-    return builder.entry_alloca(storage_type, ir::scalar_layout(storage_type).align);
-}
-
 // 判断源类型是否是当前生成器支持的标量（整数或 bool）。
 bool is_scalar(const SemanticType &type) {
     return type.is_int() || type.kind == SemanticType::Kind::Bool;
-}
-
-// 计算标量值使用的 IR 类型：bool 为 i1，整数为 i32。
-ir::Type lower_scalar_type(const SemanticType &type) {
-    return type.kind == SemanticType::Kind::Bool ? ir::Type::I1 : ir::Type::I32;
 }
 
 // 判断源类型是否是引用；引用的计算值和存储单元都只保存目标地址。
@@ -29,27 +19,45 @@ bool is_reference(const SemanticType &type) {
     return type.kind == SemanticType::Kind::Reference;
 }
 
-// 判断源类型是否是当前可保存和读取的普通值。
-// 引用可以继续指向引用，但最内层必须是标量；聚合引用留到后续阶段。
-bool is_supported_value(const SemanticType &type) {
-    if (is_scalar(type))
-        return true;
-    if (!is_reference(type))
-        return false;
-    return is_supported_value(*type.inner);
+// 结构体和固定数组可以按自身布局保存为独立值。
+bool is_aggregate_value(const SemanticType &type) {
+    return type.kind == SemanticType::Kind::Struct ||
+           type.kind == SemanticType::Kind::Array;
+}
+
+// 当前 lowering 可作为局部值保存的类型：标量、引用链（可指向聚合）或聚合。
+bool is_storable_value(const SemanticType &type) {
+    if (is_reference(type))
+        return is_storable_value(*type.inner);
+    return is_scalar(type) || is_aggregate_value(type);
 }
 
 // 计算普通值使用的 IR 类型：标量沿用标量映射，引用统一为 ptr。
 ir::Type lower_value_type(const SemanticType &type) {
     if (is_reference(type))
         return ir::Type::Ptr;
-    return lower_scalar_type(type);
+    if (type.is_int())
+        return ir::Type::I32;
+    if (type.kind == SemanticType::Kind::Bool)
+        return ir::Type::I1;
+    throw std::logic_error("该源类型不能映射为单个 IR 操作数");
 }
 
-// 把字面量、路径或引用本地读取生成为 IR 操作数。
-// 引用路径只加载 slot 中保存的指针，不会顺便读取目标内容。
-ir::Operand GenerationContext::emit_leaf(const Expression &expression,
-                                         const LocalPlaces &locals) {
+// 按存储类型和对齐分配入口 slot；标量和聚合使用同一套布局服务。
+ir::Operand
+GenerationContext::allocate_storage_slot(const ir::StorageType &storage_type) {
+    return builder.entry_alloca(storage_type,
+                                layouts_.layout(storage_type).align);
+}
+
+// 计算值 slot 先映射成存储类型：bool 使用 i8，整数 i32，引用 ptr。
+ir::Operand GenerationContext::allocate_slot(ir::Type value_type) {
+    return allocate_storage_slot(
+        ir::StorageType::scalar(ir::scalar_storage_type(value_type)));
+}
+
+// 把字面量或常量路径生成为 IR 操作数；局部路径走统一的 place 读取。
+ir::Operand GenerationContext::emit_constant(const Expression &expression) {
     // 整数文字直接使用语义阶段保存的类型和位模式。
     if (const auto *literal =
             dynamic_cast<const IntegerLiteral *>(&expression)) {
@@ -63,12 +71,6 @@ ir::Operand GenerationContext::emit_leaf(const Expression &expression,
     }
     const auto &path = static_cast<const PathExpression &>(expression);
     const auto &target = semantics.paths.at(&path);
-    // 局部变量按 LocalId 找存储位置，不能按名称处理遮蔽。
-    if (const auto *local_id = std::get_if<LocalId>(&target)) {
-        const auto &type = semantics.locals[local_id->index].type;
-        // 标量和引用读取统一经过 load_value：bool 补 trunc，引用读出 ptr。
-        return load_value(locals.at(*local_id), type);
-    }
     // 常量路径从已求值缓存取值，不生成运行时存储。
     const auto constant_id = std::get<ConstantId>(target);
     const auto &value = semantics.constants[constant_id.index]->evaluated;
@@ -81,7 +83,7 @@ ir::Operand GenerationContext::emit_leaf(const Expression &expression,
         bits = static_cast<uint32_t>(std::get<int64_t>(value.value));
     else
         bits = static_cast<uint32_t>(std::get<uint64_t>(value.value));
-    return ir::Operand::constant(lower_scalar_type(value.type), bits);
+    return ir::Operand::constant(lower_value_type(value.type), bits);
 }
 
 // 把普通值写入它的存储单元；bool 先 zext 成 i8，引用直接写 ptr，整数写 i32。

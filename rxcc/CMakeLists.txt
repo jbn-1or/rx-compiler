@@ -74,6 +74,7 @@ add_library(rxcc_ir STATIC
   src/ir/artifact.cpp src/ir/lowering.cpp src/ir/generator.cpp
   src/ir/layout.cpp
   src/ir/lowering/value.cpp src/ir/lowering/operators.cpp
+  src/ir/lowering/aggregate.cpp
   src/ir/lowering/reference.cpp src/ir/lowering/statements.cpp
   src/ir/lowering/control_flow.cpp src/ir/lowering/call.cpp)
 target_include_directories(rxcc_ir PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")

@@ -17,6 +17,8 @@
 
 namespace rx::ir {
 
+class Module;
+
 // Void 表示没有返回数据；I1 表示布尔计算值；I8 是 bool 的存储单元；
 // I32 表示 32 位整数；Ptr 表示不透明地址。
 enum class Type { Void, I1, I8, I32, Ptr };
@@ -81,6 +83,18 @@ struct Signature {
     bool operator==(const Signature &) const = default;
 };
 
+// 内部调用的共享 ABI：声明、定义、调用和 return 都读取这一份描述。
+// parameter_storage 与签名的形参表等长，只有按值聚合形参在对应位置保存自己的存储类型。
+// result_storage 有值时，签名返回 Void，结果写入调用者提供的第一个 ptr 形参。
+struct FunctionABI {
+    Signature signature; // 降级后的 LLVM 返回类型和形参类型，包含隐藏结果指针。
+    std::vector<StorageType> parameter_storage; // 每个降级形参的按值聚合存储；非聚合为 Unit。
+    std::optional<StorageType> result_storage; // 聚合返回的调用者结果存储类型；直接返回为空。
+    bool operator==(const FunctionABI &) const = default;
+};
+// 检查 ABI 自身的形状是否自洽，不访问模块类型表；具体布局由 check_module 再验证。
+bool valid_function_abi(const FunctionABI &abi);
+
 // 保存 call 指令要调用哪个函数、传入哪些参数，不保存调用结果。
 struct Call {
     IRFunctionId function; // 被调用函数的 IR ID，通过模块查询函数名、返回类型和参数类型。
@@ -88,9 +102,19 @@ struct Call {
 };
 // 保存 alloca 指令要分配的存储类型和对齐值。
 struct Alloca {
-    Type storage_type; // 分配出的存储单元保存的 IR 类型；支持 i32、bool 的 i8 和引用的 ptr。
+    StorageType storage_type; // 分配出的存储单元保存的存储类型，允许命名结构体和数组。
     uint32_t alignment; // 分配地址的对齐字节数，必须是非零的 2 的幂。
 };
+// 保存 getelementptr 指令：从基址按存储类型和下标计算字段或元素地址。
+// 初版不保存 inbounds 等范围承诺；字段投影使用两个下标 {0, declaration_index}。
+struct GetElementPtr {
+    StorageType source_type; // 基址指向的存储类型，决定下标如何解释。
+    Operand base; // 基址操作数，IR 类型必须为 ptr。
+    std::vector<Operand> indices; // 依次为指针下标和字段/数组下标，均为 i32。
+};
+// 检查 GEP 至少包含指针下标和一次字段/元素投影，且各层下标适合当前存储类型。
+bool valid_gep_indices(const Module &module, const StorageType &source_type,
+                       const std::vector<Operand> &indices);
 // 保存 load 指令从哪个地址读取哪种类型。
 struct Load {
     Type storage_type; // 读取的 IR 类型；支持 i32、i8 和 ptr。
@@ -106,6 +130,8 @@ struct Store {
 };
 // 存储类型支持 i32、i8 和 ptr；对齐必须是非零的 2 的幂。
 bool valid_storage(Type type, uint32_t alignment);
+// 自有存储类型可用于 alloca：标量沿用上面的规则，聚合只要求合法对齐和完整结构。
+bool valid_storage(const StorageType &type, uint32_t alignment);
 // 保存 zext 指令：把较窄整数的无符号位模式扩展成较宽整数。
 struct ZExt {
     Operand value; // 要扩展的输入值，类型必须是整数。
@@ -170,8 +196,8 @@ struct Compare {
     Operand right;        // 后求值的右操作数
 };
 // 普通指令的具体操作：调用、入口分配、读写、二元运算、移位、比较和整数扩展/截断。
-using Operation = std::variant<Call, Alloca, Load, Store, ZExt, Trunc,
-                               BinaryOperation, Compare>;
+using Operation = std::variant<Call, Alloca, GetElementPtr, Load, Store, ZExt,
+                               Trunc, BinaryOperation, Compare>;
 // 保存一条普通指令的操作、结果类型，以及有返回数据时分配的结果 ID。
 struct Instruction {
     std::optional<ValueId> result; // 结果值的 ID；无结果指令为空。
@@ -194,21 +220,7 @@ struct CondBranch {
     BlockId when_false; // 条件为 false 时进入的目标块。
 };
 // 表示一条终结指令：ret、br 或 condbr。
-// value 保留 ret 的返回值，让只关心返回值的调用方可以直接读取；
-// instruction 记录终结指令的具体种类和跳转目标。
-struct Terminator {
-    std::optional<Operand> value; // ret 的返回值；br 和 condbr 为空。
-    std::variant<Return, Branch, CondBranch> instruction; // 终结指令的具体内容。
-
-    // 默认构造为空 ret void，便于手工补全只有一种结束方式的测试块。
-    Terminator() : instruction(Return{}) {}
-    // 从 ret 构造，同时同步 value，保证两个视图读到一致的数据。
-    Terminator(Return ret) : value(ret.value), instruction(ret) {}
-    // 从无条件跳转构造。
-    Terminator(Branch branch) : instruction(branch) {}
-    // 从条件跳转构造。
-    Terminator(CondBranch branch) : instruction(branch) {}
-};
+using Terminator = std::variant<Return, Branch, CondBranch>;
 // 保存一段顺序执行的指令，最后必须有一条结束该块的终结指令。
 struct BasicBlock {
     BlockId id; // 这个块的 ID，用来查找块，并生成 bb_<下标> 形式的标签。
@@ -220,12 +232,12 @@ struct BasicBlock {
 // 参数和指令结果使用同一张值类型表，基本块使用另一张表单独编号。
 struct Function {
     // 保存函数身份、名称、签名和链接属性，并为参数预分配值 ID。
-    Function(IRFunctionId function_id, std::string name, Signature signature,
+    Function(IRFunctionId function_id, std::string name, FunctionABI abi,
              Linkage linkage);
     IRFunctionId id; // 这个函数的 IR ID，在添加到模块时分配，不直接使用语义分析的 FunctionId。
     const std::string name; // 这个不可变的 LLVM 全局符号名同时用于函数表的名称索引。
     Linkage linkage; // 符号链接属性，决定是否仅在模块内部可见。
-    Signature signature; // 函数的返回类型和参数类型，供调用和返回检查使用。
+    FunctionABI abi; // 函数签名和按值聚合存储信息。
     std::vector<Operand> parameters; // 按声明顺序保存的参数操作数，它们占用本函数最前面的值编号。
     std::vector<Type> value_types; // 记录每个参数和指令结果的类型，ValueId.index 是这张表的下标。
     std::vector<Instruction> entry_allocas; // 固定分配总是在入口正文之前输出，不改变正文的求值顺序。
@@ -277,6 +289,9 @@ public:
     // 添加函数并分配函数和参数的 ID；名称不能重复，函数体随后再添加。
     IRFunctionId add_function(std::string name, Signature signature,
                               Linkage linkage);
+    // 按共享 ABI 添加函数，保留按值聚合和隐藏结果指针信息。
+    IRFunctionId add_function_abi(std::string name, FunctionABI abi,
+                                  Linkage linkage);
     // 按函数名查找，找不到时返回 nullptr。
     Function *find_function(const std::string &name);
     const Function *find_function(const std::string &name) const;

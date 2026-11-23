@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the implemented P2-P6.8 IR subset with external LLVM 22 tools."""
+"""Validate the implemented P2-P7.4 IR subset with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -89,7 +89,10 @@ def main():
             ("declarations", "const N: usize = 2; struct Data { values: [i32; N] } "
              "impl Data { const VALUE: i32 = 7; } fn main() {}"),
             ("forward-struct-layout", "struct Outer { pair: [Inner; 2] } "
-             "struct Inner { flag: bool, value: i32 } fn main() {}"),
+             "struct Inner { flag: bool, value: i32, tail: bool } "
+             "struct Node { children: Vec<Node>, next: Box<Node> } "
+             "struct Matrix<'a> { bits: [[bool; 3]; 2], refer: &'a [Inner; 2], word: usize } "
+             "fn main() {}"),
         ):
             source = temp / f"{name}.rx"
             output = temp / f"{name}.ll"
@@ -107,16 +110,21 @@ def main():
                 raise RuntimeError("identical source must produce deterministic text")
             modules.append((name, output, b"", b""))
 
-        huge_source = temp / "oversized-layout.rx"
-        huge_source.write_text("struct Huge { values: [i32; 1073741824usize] } fn main() {}",
-                               encoding="utf-8")
-        preserved = temp / "oversized-layout.ll"
-        preserved.write_bytes(b"existing output\n")
-        run([args.compiler, "--stage", "semantic", str(huge_source)])
-        rejected = run([args.compiler, "--stage", "ir", str(huge_source), "-o", str(preserved)],
-                       expected=1)
-        if "布局" not in rejected.stderr or preserved.read_bytes() != b"existing output\n":
-            raise RuntimeError("layout verification must reject overflow without replacing old output")
+        for name, fields in (
+            ("oversized-array", "values: [i32; 1073741824usize]"),
+            ("oversized-field-sum", "values: [bool; 4294967295usize], last: bool"),
+            ("oversized-field-align", "values: [bool; 4294967295usize], last: i32"),
+            ("oversized-tail-align", "first: i32, values: [bool; 4294967291usize]"),
+        ):
+            source = temp / f"{name}.rx"
+            source.write_text(f"struct Huge {{ {fields} }} fn main() {{}}", encoding="utf-8")
+            output = temp / f"{name}.ll"
+            output.write_bytes(b"existing output\n")
+            run([args.compiler, "--stage", "semantic", str(source)])
+            rejected = run([args.compiler, "--stage", "ir", str(source), "-o", str(output)],
+                           expected=1)
+            if "布局" not in rejected.stderr or output.read_bytes() != b"existing output\n":
+                raise RuntimeError(f"{name}: layout overflow must be diagnosed without replacing output")
 
         if (temp / "plain-helper.ll").read_bytes() != (temp / "lifetime-helper.ll").read_bytes():
             raise RuntimeError("a helper's lifetime parameter must erase to the same P2 IR")
@@ -1188,6 +1196,14 @@ def main():
              b"", b""),
             ("p67-break-value", break_value.read_text(encoding="utf-8"),
              break_value.with_suffix(".out").read_bytes(), b""),
+            ("discarded-loop-and-logic", """
+                fn run() {
+                    loop { break { println_i32(1); 7 }; };
+                    (get_i32() != 0) && { println_i32(2); true };
+                    (get_i32() != 0) || { println_i32(3); false };
+                }
+                fn main() { run(); run(); }
+             """, b"1\n2\n1\n3\n", b"1 1 0 0\n"),
             ("p67-reference-lub", reference_lub.read_text(encoding="utf-8"),
              reference_lub.with_suffix(".out").read_bytes(), b""),
             ("p67-nested-break-value", """
@@ -1289,6 +1305,346 @@ def main():
             run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
             modules.append((name, output, expected, stdin_data))
 
+        p07 = Path(__file__).resolve().parent / "ir" / "p07"
+        for name, contents, expected in (
+            ("p72-construction-order", (p07 / "construction_order.rx").read_text(encoding="utf-8"),
+             (p07 / "construction_order.out").read_bytes()),
+            ("p72-repeat-coercion", (p07 / "repeat_coercion.rx").read_text(encoding="utf-8"),
+             (p07 / "repeat_coercion.out").read_bytes()),
+            ("p72-diverging-array-element",
+             "fn main() { [{ println_i32(7); return; }]; println_i32(99); }", b"7\n"),
+            ("p72-diverging-array-branches", """
+                fn choose(flag: bool) {
+                    let unused = if flag { [{ println_i32(7); return; }] }
+                                 else { [{ println_i32(8); return; }; 1] };
+                    println_i32(99);
+                }
+                fn main() { choose(true); choose(false); }
+             """, b"7\n8\n"),
+            ("p72-places", """
+                struct Cell { flag: bool, value: i32, tail: bool }
+                struct Board { cells: [Cell; 2] }
+                fn mark(x: i32) -> i32 { println_i32(x); x }
+                fn index() -> usize { println_i32(20); 1 }
+                fn main() {
+                    let mut board = Board { cells: [
+                        Cell { value: mark(1), flag: true, tail: false },
+                        Cell { value: mark(2), flag: false, tail: true },
+                    ] };
+                    ({ println_i32(10); &mut board }).cells[index()].value = mark(30);
+                    let p = &mut board.cells[1].value;
+                    *p += 1;
+                    let rows = &board.cells;
+                    let nested = &rows;
+                    println_i32(nested[1].value);
+                    println_i32(nested[0].value);
+                    println_i32(nested[0].flag as i32);
+                    println_i32(nested[1].flag as i32);
+                    println_i32(nested[1].tail as i32);
+
+                    let temporary = &mut [mark(40), mark(41)][index()];
+                    *temporary += 2;
+                    println_i32(*temporary);
+                    let from_block = { [[4, 5], [6, 7]] };
+                    println_i32(from_block[1][0]);
+                }
+                fn unused() { println_i32(99); let x = [1, 2]; }
+             """, b"1\n2\n30\n10\n20\n31\n1\n1\n0\n1\n40\n41\n20\n43\n6\n"),
+            ("p72-array-lub", """
+                struct Refs<'a> { left: &'a i32, right: &'a i32 }
+                fn main() {
+                    let mut a = 11;
+                    let mut b = 22;
+                    let first = &a;
+                    let second = &b;
+                    let fixed = Refs { right: &second, left: &first };
+                    println_i32(*fixed.left); println_i32(*fixed.right);
+                    let inferred = [&first, &b];
+                    let reversed = [&a, &second];
+                    println_i32(*inferred[0]); println_i32(*inferred[1]);
+                    println_i32(*reversed[0]); println_i32(*reversed[1]);
+                    let annotated: [&i32; 2] = [&a, &second];
+                    println_i32(*annotated[0]); println_i32(*annotated[1]);
+                    let shared_first = [&a, &mut b];
+                    println_i32(*shared_first[0]); println_i32(*shared_first[1]);
+                    let mutable_first = [&mut a, &b];
+                    println_i32(*mutable_first[0]); println_i32(*mutable_first[1]);
+                }
+             """, b"11\n22\n" * 6),
+            ("p72-repeat-large", """
+                const LENGTH: usize = 513;
+                #[derive(Clone, Copy)]
+                struct Item { flag: bool, word: i32 }
+                struct Token { value: i32 }
+                fn mark(x: i32) -> i32 { println_i32(x); x }
+                fn main() {
+                    let mut items = [Item { word: mark(17), flag: true }; LENGTH];
+                    items[256].word = 23;
+                    println_i32(items[0].word);
+                    println_i32(items[256].word);
+                    println_i32(items[512].word);
+                    println_i32(items[512].flag as i32);
+                    let token = Token { value: mark(29) };
+                    let singleton = [token; 1];
+                    println_i32(singleton[0].value);
+                    let x = 31;
+                    let reference = &x;
+                    let pointers: [&i32; LENGTH] = [&reference; LENGTH];
+                    println_i32(*pointers[0]); println_i32(*pointers[512]);
+                }
+             """, b"17\n17\n23\n17\n1\n29\n29\n31\n31\n"),
+            ("p72-early-exit", """
+                struct Pair { first: i32, second: i32 }
+                fn mark(x: i32) -> i32 { println_i32(x); x }
+                fn from_field() -> i32 {
+                    let pair = Pair { second: mark(1), first: { return 2; mark(99) } };
+                    pair.first
+                }
+                fn from_list() -> i32 {
+                    let a = [mark(3), { return 4; mark(99) }, mark(99)];
+                    a[0]
+                }
+                fn from_repeat() -> i32 {
+                    let a: [i32; 513] = [{ println_i32(5); return 6; mark(99) }; 513];
+                    a[0]
+                }
+                fn from_base() -> i32 {
+                    ({ println_i32(7); return 8; [0, 1] })[{ println_i32(99); 0usize }]
+                }
+                fn from_index() -> i32 {
+                    [mark(9), 0][{ println_i32(10); return 11; 0usize }]
+                }
+                fn main() {
+                    println_i32(from_field()); println_i32(from_list());
+                    println_i32(from_repeat()); println_i32(from_base()); println_i32(from_index());
+                }
+             """, b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n"),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(contents, encoding="utf-8")
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            text = output.read_text(encoding="utf-8")
+            if name == "p72-repeat-large":
+                # 可用循环或少量展开，但不能为几百个元素各发一份寻址指令。
+                for storage in ("[513 x %__rx_struct_0]", "[513 x ptr]"):
+                    array_geps = re.findall(rf"getelementptr {re.escape(storage)},[^\n]+", text)
+                    if not 0 < len(array_geps) <= 16 or not any(
+                            re.search(r", i32 0, i32 %\w+$", gep) for gep in array_geps):
+                        raise RuntimeError(f"{name}: expected bounded, indexed loop IR for {storage}")
+            if name == "p72-early-exit" and re.search(r"\bcall\b[^\n]*\bi32 99\b", text):
+                raise RuntimeError(f"{name}: unreachable initializer or index was emitted")
+            modules.append((name, output, expected, b""))
+
+        for name, contents, expected in (
+            ("p73-copy-values", (p07 / "copy_values.rx").read_text(encoding="utf-8"),
+             (p07 / "copy_values.out").read_bytes()),
+            ("p73-snapshot-order", """
+                #[derive(Clone, Copy)]
+                struct Pair { first: i32, second: i32 }
+                struct Source { value: Pair }
+                fn from_index() {
+                    let mut rows = [[1, 2], [3, 4]];
+                    rows[{ println_i32(20); rows[0][0] = 99; 1usize }] = {
+                        println_i32(10);
+                        rows[0]
+                    };
+                    println_i32(rows[0][0]);
+                    println_i32(rows[1][0]); println_i32(rows[1][1]);
+                }
+                fn from_field() {
+                    let mut source = Source { value: Pair { first: 5, second: 6 } };
+                    let mut target = Pair { first: 7, second: 8 };
+                    *{ println_i32(40); source.value.second = 88; &mut target } = {
+                        println_i32(30);
+                        source.value
+                    };
+                    println_i32(source.value.second);
+                    println_i32(target.first); println_i32(target.second);
+                }
+                fn from_dereference() {
+                    let mut rows = [[11, 12], [13, 14]];
+                    rows[{ rows[0][0] = 77; 1usize }] = {
+                        let borrowed = &rows[0];
+                        *borrowed
+                    };
+                    println_i32(rows[0][0]);
+                    println_i32(rows[1][0]); println_i32(rows[1][1]);
+                }
+                fn main() { from_index(); from_field(); from_dereference(); }
+             """, b"10\n20\n99\n1\n2\n30\n40\n88\n5\n6\n77\n11\n12\n"),
+            ("p73-reference-fields-and-move", """
+                #[derive(Clone, Copy)]
+                struct View<'a> { reference: &'a i32, mark: bool }
+                struct Ticket { code: i32 }
+                struct Envelope { payload: Ticket }
+                fn main() {
+                    let first = 41;
+                    let second = 42;
+                    let mut view = View { reference: &first, mark: true };
+                    let copied = view;
+                    view.reference = &second;
+                    view.mark = false;
+                    println_i32(*copied.reference);
+                    println_i32(copied.mark as i32);
+                    println_i32(*view.reference);
+                    println_i32(view.mark as i32);
+                    let envelope = Envelope { payload: Ticket { code: 43 } };
+                    let mut ticket = envelope.payload;
+                    let next = Ticket { code: ticket.code + 1 };
+                    ticket = next;
+                    println_i32(ticket.code);
+                }
+             """, b"41\n1\n42\n0\n44\n"),
+            ("p73-results", """
+                #[derive(Clone, Copy)]
+                struct Pair { first: i32, second: i32 }
+                fn mark(n: i32) -> i32 { println_i32(n); n }
+                fn choose(flag: bool) {
+                    let mut original = Pair { first: 1, second: 2 };
+                    let selected = if flag { println_i32(10); original }
+                                   else { Pair { first: mark(20), second: 4 } };
+                    original.first = 90;
+                    let mut i = 0;
+                    let result = loop {
+                        i += 1;
+                        if i == 1 { continue; }
+                        if flag { break [selected.first, selected.second]; }
+                        break [selected.second, selected.first];
+                    };
+                    println_i32(result[0]); println_i32(result[1]);
+                    println_i32(original.first);
+                }
+                fn early_branch(flag: bool) -> i32 {
+                    let value = if flag { [31, 32] } else { return 33; };
+                    value[1]
+                }
+                fn early_break(flag: bool) -> i32 {
+                    let value = loop {
+                        if flag { break { return 34; [99, 100] }; }
+                        break [35, 36];
+                    };
+                    value[1]
+                }
+                fn no_exit() -> i32 {
+                    let value = loop { return 37; break [99, 100]; };
+                    println_i32(99);
+                    value[0]
+                }
+                fn main() {
+                    choose(true); choose(false);
+                    println_i32(early_branch(true)); println_i32(early_branch(false));
+                    println_i32(early_break(true)); println_i32(early_break(false));
+                    println_i32(no_exit());
+                }
+             """, b"10\n1\n2\n90\n20\n4\n20\n90\n32\n33\n34\n36\n37\n"),
+            ("p73-assignment-early-exit", """
+                fn rhs_exit() -> i32 {
+                    let mut rows = [[1, 2], [3, 4]];
+                    rows[{ println_i32(99); 1usize }] = { return 51; [5, 6] };
+                    rows[1][0]
+                }
+                fn target_exit() -> i32 {
+                    let mut rows = [[1, 2], [3, 4]];
+                    rows[{ println_i32(53); return 54; 1usize }] = { println_i32(52); rows[0] };
+                    println_i32(99);
+                    rows[1][0]
+                }
+                fn main() { println_i32(rhs_exit()); println_i32(target_exit()); }
+             """, b"51\n52\n53\n54\n"),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(contents, encoding="utf-8")
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            if name in ("p73-results", "p73-assignment-early-exit") and re.search(
+                    r"\bcall\b[^\n]*\bi32 99\b", output.read_text(encoding="utf-8")):
+                raise RuntimeError(f"{name}: unreachable aggregate continuation was emitted")
+            modules.append((name, output, expected, b""))
+
+        for name, contents, expected in (
+            ("p74-aggregate-calls", (p07 / "aggregate_calls.rx").read_text(encoding="utf-8"),
+             (p07 / "aggregate_calls.out").read_bytes()),
+            ("p74-temporary-array", (p07 / "temporary_array.rx").read_text(encoding="utf-8"),
+             (p07 / "temporary_array.out").read_bytes()),
+            ("p74-deref-array-reference",
+             "fn make() -> [i32; 1] { [17] } fn read(p: &[i32; 1]) -> i32 { p[0] } "
+             "fn main() { let a = make(); let r = &a; let rr = &r; println_i32(read(*rr)); }",
+             b"17\n"),
+            ("p74-mixed-arguments", """
+                fn combine(mut first: [i32; 2], stamp: i32, second: [i32; 2],
+                           flag: bool, reference: &[i32; 2]) -> [i32; 2] {
+                    println_i32(stamp);
+                    if flag { first[1] = second[0] + reference[1]; }
+                    first
+                }
+                fn direct(reference: &[i32; 2]) -> &[i32; 2] { reference }
+                fn consume(mut value: [i32; 2]) { value[1] = 80; println_i32(value[1]); }
+                fn main() {
+                    let mut original = [1, 2];
+                    let other = [3, 4];
+                    let returned = combine(original, { println_i32(10); original[0] = 9; 20 },
+                                           original, true, direct(&other));
+                    println_i32(returned[0]); println_i32(returned[1]);
+                    consume(original);
+                    println_i32(original[0]); println_i32(original[1]);
+                }
+             """, b"10\n20\n1\n13\n80\n9\n2\n"),
+            ("p74-recursive-results", """
+                #[derive(Clone, Copy)]
+                struct Packet { rows: [[i32; 2]; 2], flag: bool }
+                fn main() {
+                    let a = produce(2, true);
+                    let b = produce(3, false);
+                    println_i32(a.rows[0][0]); println_i32(a.rows[0][1]);
+                    println_i32(a.rows[1][0]); println_i32(a.rows[1][1]);
+                    println_i32(a.flag as i32);
+                    println_i32(b.rows[0][0]); println_i32(b.rows[0][1]);
+                    println_i32(b.rows[1][0]); println_i32(b.rows[1][1]);
+                    println_i32(b.flag as i32);
+                }
+                fn produce(depth: i32, flag: bool) -> Packet {
+                    if depth == 0 { return Packet { rows: [[1, 2], [3, 4]], flag: false }; }
+                    let mut previous = produce(depth - 1, flag);
+                    previous.rows[0][0] += depth;
+                    loop {
+                        break if flag { previous.flag = true; previous }
+                              else { previous.rows[1][1] += depth; previous };
+                    }
+                }
+             """, b"4\n2\n3\n4\n1\n7\n2\n3\n10\n0\n"),
+            ("p74-temporary-slots", """
+                fn make(value: i32) -> [i32; 2] {
+                    println_i32(value);
+                    [value, value + 1]
+                }
+                fn main() {
+                    let first = &mut make(31)[0];
+                    let second = &mut make(41)[1];
+                    *first = 51;
+                    println_i32(*first); println_i32(*second);
+                }
+             """, b"31\n41\n51\n42\n"),
+            ("p74-argument-early-exit", """
+                fn never_called(a: [i32; 2], mark: i32, b: [i32; 2]) -> [i32; 2] {
+                    println_i32(99);
+                    [a[0] + mark, b[1]]
+                }
+                fn early() -> i32 {
+                    let value = never_called({ println_i32(61); [1, 2] },
+                                             { return 62; 0 },
+                                             { println_i32(98); [3, 4] });
+                    value[0]
+                }
+                fn main() { println_i32(early()); }
+             """, b"61\n62\n"),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(contents, encoding="utf-8")
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            modules.append((name, output, expected, b""))
+
         for name, command, expected in (
             ("model-smoke", [args.model_test], b""),
             ("model-values", [args.model_test, "--emit-model"], b""),
@@ -1298,14 +1654,23 @@ def main():
             output = temp / f"{name}.ll"
             output.write_text(run(command).stdout, encoding="utf-8")
             modules.append((name, output, expected, b""))
+        # 由 LLVM 独立计算，与 C++ 的 P7.1 布局断言使用同一组期望值。
+        probe = Path(__file__).resolve().parent / "ir" / "p07" / "layout_probe.ll"
+        modules.append(("p71-layout-probe", probe,
+                        b"0\n4\n8\n12\n4\n"     # Inner: offsets, stride, alignment
+                        b"4\n28\n40\n44\n"    # Outer: offsets and size
+                        b"4\n8\n12\n16\n"     # Node: Vec fields, Box and size
+                        b"3\n8\n12\n16\n",    # Matrix: row stride, reference, word and size
+                        b""))
         for name, output, _, _ in modules:
             # P4.3：自有 baseline 不附加不溢出、精确性或别名承诺。
             # 检查生成文本，而不是依赖 LLVM verifier 事后接受错误承诺。
             text = output.read_text(encoding="utf-8")
-            if name == "discarded-if-value" and re.search(r"\b(?:alloca|store|load)\b", text):
-                raise RuntimeError("discarded if results must not allocate, store, or reload a result")
+            if name in ("discarded-if-value", "discarded-loop-and-logic") and re.search(
+                    r"\b(?:alloca|store|load)\b", text):
+                raise RuntimeError(f"{name}: discarded results must not need a storage slot")
             for forbidden in (" nsw ", " nuw ", " exact", "noalias",
-                              "inbounds", "nonnull"):
+                              "inbounds", "nonnull", "sret(", "byval("):
                 if forbidden in text:
                     raise RuntimeError(
                         f"{name}: baseline IR must not contain {forbidden.strip()}")
@@ -1333,20 +1698,20 @@ def main():
             "fn main() { Box::<i32>::new(1); }",
             "fn main() { Vec::<i32>::new(); }",
             "fn main() { let x = { (); }; }",
-            "fn main() { let x = { [1, 2] }; }",
-            "fn unused(value: &[i32; 1]) {} fn main() {}",
-            "fn unused() -> [i32; 1] { [1] } fn main() {}",
-            "fn main() {} fn unused() { println_i32(99); let x = [1, 2]; }",
             "struct Data {} impl Data { fn unused(&self) {} } fn main() {}",
             # 引用相等需要 P10 的结构化读取，不能比较地址后声称完成。
             "fn main() { let a = 1; let b = 1; let ra = &a; let rb = &b; "
              "println_i32((ra == rb) as i32); }",
             "fn main() { let a = 1; let b = 2; println_i32((&a != &b) as i32); }",
+            "fn main() { let a = [1i32]; println_i32((a == a) as i32); }",
+            # 不能把投影得到的 Vec 当作标量来比较或写进新的聚合值。
+            "struct Bag { items: Vec<i32> } fn unused(a: &Bag, b: &Bag) -> bool { "
+             "a.items == b.items } fn main() {}",
+            "struct Bag { items: Vec<i32> } fn unused(a: Bag) -> Bag { "
+             "Bag { items: a.items } } fn main() {}",
             # Box 转换路径仍需 P9；不能把被擦除为 ptr 的源类型直接混用。
             "fn narrow(p: &Box<i32>) -> &i32 { p } fn main() {}",
             "fn narrow(p: &Box<Box<i32>>) -> &i32 { p } fn main() {}",
-            # 普通赋值只放开标量与引用，聚合整体赋值仍留给 P7。
-            "fn main() { let mut a = [1, 2]; a = [3, 4]; }",
         )):
             unsupported = temp / f"unsupported-{index}.rx"
             unsupported.write_text(contents, encoding="utf-8")
@@ -1439,6 +1804,17 @@ def main():
             "fn main() { return; let x = missing; }",
             "fn main() { loop { break; println_i32(missing); } }",
             "fn main() {} fn unused() { loop { continue; println_i32(true); } }",
+            # P7.2：非法构造、错误下标和共享路径写入必须在语义阶段拒绝。
+            "struct Pair { a: i32, b: i32 } fn main() { let p = Pair { a: 1, a: 2 }; }",
+            "struct Token { n: i32 } fn main() { let a = [Token { n: 1 }; 2]; }",
+            "fn main() { let a = [1, 2]; println_i32(a[1u32]); }",
+            "struct Data { a: [i32; 1] } "
+            "fn main() { let mut d = Data { a: [0] }; let p = &d; p.a[0] = 1; }",
+            # P7.3：整体赋值仍要求目标可写、源类型一致。
+            "fn main() { let a = [1, 2]; a = [3, 4]; }",
+            "fn main() { let mut a = [1, 2]; a = [3]; }",
+            "struct A { n: i32 } struct B { n: i32 } "
+            "fn main() { let mut a = A { n: 1 }; a = B { n: 2 }; }",
         )):
             invalid_source = temp / f"semantic-error-{index}.rx"
             invalid_source.write_text(contents, encoding="utf-8")
@@ -1482,7 +1858,7 @@ def main():
                     if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
                         raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
                                            f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
-    print(f"P2-P6.8 IR tests passed: {len(modules)} modules verified" +
+    print(f"P2-P7.4 IR tests passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

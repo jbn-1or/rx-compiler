@@ -15,13 +15,25 @@ IRArtifact::~IRArtifact() = default;
 // 将模块指针移交给新对象，不改变模块地址，也不重新分配任何 ID。
 IRArtifact::IRArtifact(IRArtifact &&) noexcept = default;
 
-// 检查模块并输出 LLVM 文本；检查或写入失败时输出错误信息并返回 false。
+// 校验失败不交付文本；正常情况下只生成一份完整字符串。
+std::optional<std::string> IRArtifact::verified_text(std::ostream &diagnostics) const {
+    if (!ir::check_module(*module_, diagnostics))
+        return std::nullopt;
+    try {
+        return ir::module_text(*module_);
+    } catch (const std::ios_base::failure &error) {
+        diagnostics << "IR 文本生成失败：" << error.what() << '\n';
+        return std::nullopt;
+    }
+}
+
+// 使用非格式化写入，不受调用方设置的字段宽度或数字格式影响。
 bool IRArtifact::verify_and_print(std::ostream &output,
                                   std::ostream &diagnostics) const {
-    // 检查失败时立即返回，避免把不合法的模块写入输出流。
-    if (!ir::check_module(*module_, diagnostics))
+    const auto text = verified_text(diagnostics);
+    if (!text)
         return false;
-    ir::print_module(*module_, output);
+    output.write(text->data(), static_cast<std::streamsize>(text->size()));
     // 输出流失败时可能已经写入部分文本；文件的刷新和关闭由调用方检查。
     if (!output) {
         diagnostics << "IR 输出流写入失败\n";

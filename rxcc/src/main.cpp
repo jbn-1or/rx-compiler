@@ -213,8 +213,8 @@ int main(int argc, char **argv) {
                 return 1;
 
             // 先检查并完成文本生成，再打开输出，避免 lowering 失败破坏旧文件。
-            std::ostringstream text;
-            if (!artifact->verify_and_print(text, std::cerr))
+            const auto text = artifact->verified_text(std::cerr);
+            if (!text)
                 return 1;
             std::ofstream output(output_path, std::ios::binary | std::ios::trunc);
             if (!output) {
@@ -222,7 +222,7 @@ int main(int argc, char **argv) {
                           << "'\n";
                 return 2;
             }
-            output << text.str();
+            output.write(text->data(), static_cast<std::streamsize>(text->size()));
             output.flush();
             output.close();
             if (!output) {

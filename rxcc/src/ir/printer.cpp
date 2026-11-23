@@ -5,6 +5,7 @@
 #include <locale>
 #include <ostream>
 #include <sstream>
+#include <utility>
 
 namespace rx::ir {
 namespace {
@@ -48,8 +49,20 @@ void instruction(std::ostream &output, const Module &module,
         output << "%v_" << instruction.result->index << " = ";
     // alloca：打印存储类型和对齐。
     if (const auto *allocation = std::get_if<Alloca>(&instruction.operation)) {
-        output << "alloca " << type_name(allocation->storage_type)
+        output << "alloca "
+               << storage_type_text(allocation->storage_type, module)
                << ", align " << allocation->alignment << '\n';
+    // getelementptr：打印显式源存储类型、基址和全部 i32 下标。
+    } else if (const auto *gep =
+                   std::get_if<GetElementPtr>(&instruction.operation)) {
+        output << "getelementptr "
+               << storage_type_text(gep->source_type, module) << ", ";
+        operand(output, gep->base);
+        for (const auto &index : gep->indices) {
+            output << ", ";
+            operand(output, index);
+        }
+        output << '\n';
     // load：打印读取类型、地址和对齐。
     } else if (const auto *load = std::get_if<Load>(&instruction.operation)) {
         output << "load " << type_name(load->storage_type) << ", ";
@@ -95,7 +108,7 @@ void instruction(std::ostream &output, const Module &module,
     } else {
         const auto &call = std::get<Call>(instruction.operation);
         const auto &function = module.function(call.function);
-        output << "call " << type_name(function.signature.result) << " @"
+        output << "call " << type_name(function.abi.signature.result) << " @"
                << function.name << '(';
         for (std::size_t argument_index = 0;
              argument_index < call.arguments.size(); ++argument_index) {
@@ -111,11 +124,10 @@ void instruction(std::ostream &output, const Module &module,
 } // namespace
 
 // 依次输出目标配置、函数和基本块，顺序与添加时一致，不使用内存地址命名。
-void print_module(const Module &module, std::ostream &destination) {
-    // 先在独立缓冲区中生成完整文本，避免调用方的格式状态影响输出。
-    std::ostringstream buffer;
-    buffer.imbue(std::locale::classic());
-    std::ostream &output = buffer;
+std::string module_text(const Module &module) {
+    std::ostringstream output;
+    output.imbue(std::locale::classic());
+    output.exceptions(std::ios::badbit | std::ios::failbit);
     output << "target datalayout = \"" << module.data_layout << "\"\n"
         << "target triple = \"" << module.target_triple << "\"\n\n";
     // 先输出模块登记的命名结构体类型，再输出函数；字段顺序与声明顺序一致。
@@ -135,11 +147,12 @@ void print_module(const Module &module, std::ostream &destination) {
     }
     for (const auto &owned : module.functions()) {
         const auto &function = *owned;
+        const auto &signature = function.abi.signature;
         output << (function.is_declaration() ? "declare " : "define ");
         // 内部源函数加 internal，外部声明和机器入口不加。
         if (function.linkage == Linkage::Internal)
             output << "internal ";
-        output << type_name(function.signature.result) << " @" << function.name
+        output << type_name(signature.result) << " @" << function.name
             << '(';
         for (std::size_t parameter_index = 0;
              parameter_index < function.parameters.size(); ++parameter_index) {
@@ -148,8 +161,7 @@ void print_module(const Module &module, std::ostream &destination) {
                 output << ", ";
             // 函数声明只打印参数类型，函数定义还要打印参数名，供函数体引用。
             if (function.is_declaration())
-                output << type_name(
-                    function.signature.parameters[parameter_index]);
+                output << type_name(signature.parameters[parameter_index]);
             else
                 operand(output, function.parameters[parameter_index]);
         }
@@ -172,7 +184,7 @@ void print_module(const Module &module, std::ostream &destination) {
             const auto &terminator = *block.terminator;
             // ret 打印返回值；跳转打印目标标签，condbr 先打印 i1 条件。
             if (const auto *return_instruction =
-                    std::get_if<Return>(&terminator.instruction)) {
+                    std::get_if<Return>(&terminator)) {
                 output << "  ret ";
                 // 有返回值时打印操作数，裸返回打印 void。
                 if (return_instruction->value)
@@ -180,11 +192,10 @@ void print_module(const Module &module, std::ostream &destination) {
                 else
                     output << "void";
             } else if (const auto *branch =
-                           std::get_if<Branch>(&terminator.instruction)) {
+                           std::get_if<Branch>(&terminator)) {
                 output << "  br label %bb_" << branch->target.index;
             } else {
-                const auto &conditional =
-                    std::get<CondBranch>(terminator.instruction);
+                const auto &conditional = std::get<CondBranch>(terminator);
                 output << "  br ";
                 operand(output, conditional.condition);
                 output << ", label %bb_" << conditional.when_true.index
@@ -194,8 +205,7 @@ void print_module(const Module &module, std::ostream &destination) {
         }
         output << "}\n\n";
     }
-    const auto text = buffer.str();
-    destination.write(text.data(), static_cast<std::streamsize>(text.size()));
+    return std::move(output).str();
 }
 
 } // namespace rx::ir

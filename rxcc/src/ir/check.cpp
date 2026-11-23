@@ -17,19 +17,6 @@ bool report_error(std::ostream &diagnostics, const Function &function,
     return false;
 }
 
-// 检查值属于当前函数、类型匹配且未定义过，再将它标记为已定义。
-bool define_value(const Function &function, std::vector<bool> &defined,
-                  ValueId value_id, Type type) {
-    // 类型必须已知且不是 void，值必须属于本函数、下标有效、未定义过且类型一致。
-    if (type == Type::Void || !is_known_type(type) ||
-        value_id.function != function.id || value_id.index >= defined.size() ||
-        defined[value_id.index] ||
-        function.value_types[value_id.index] != type)
-        return false;
-    defined[value_id.index] = true;
-    return true;
-}
-
 // 记录一个 SSA 值在哪里定义：参数和入口分配在入口正文之前，
 // 普通指令结果记录所属块及块内顺序。
 struct DefinitionLocation {
@@ -41,15 +28,23 @@ struct DefinitionLocation {
 // 按 ValueId.index 保存定义位置；空值表示这个 ID 还没有对应定义。
 using DefinitionTable = std::vector<std::optional<DefinitionLocation>>;
 
+// 值必须属于本函数、类型匹配且未定义过，才能登记其定义位置。
+bool define_value(const Function &function, DefinitionTable &definitions,
+                  ValueId value_id, Type type, DefinitionLocation location) {
+    if (type == Type::Void || !is_known_type(type) ||
+        value_id.function != function.id || value_id.index >= definitions.size() ||
+        function.value_types[value_id.index] != type || definitions[value_id.index])
+        return false;
+    definitions[value_id.index] = location;
+    return true;
+}
+
 // 保存从入口可达的块，以及每个可达块被哪些块支配。
 // 不可达块不参与支配集合的固定点计算，跨块使用时也不会被当作可用路径。
 struct DominanceInfo {
     std::vector<bool> reachable; // reachable[b] 表示从入口能否走到块 b。
     std::vector<std::vector<bool>> dominators; // dominators[b][d] 表示 d 支配 b。
 };
-
-// 判断值类型表中的某一项是否仍未标记为已定义。
-bool is_undefined(bool defined) { return !defined; }
 
 // 跳转目标必须属于当前函数、下标有效，并且不能是入口块。
 // 入口块没有前驱，跳回入口会让函数重跑一遍参数存储，不能当作普通循环处理。
@@ -71,8 +66,7 @@ bool operand_available(const Function &function,
     const auto *value_id = operand.value_id();
     if (!value_id)
         return true;
-    if (value_id->index >= definitions.size() ||
-        !definitions[value_id->index])
+    if (!definitions[value_id->index])
         return false;
     const auto &definition = *definitions[value_id->index];
     // 参数和入口分配在进入任何块之前就已完成，所有块都能使用。
@@ -88,8 +82,7 @@ bool operand_available(const Function &function,
 }
 
 // 参数按声明顺序从 0 编号，它们在进入任何基本块之前就已经可用。
-bool check_parameters(const Function &function, std::vector<bool> &defined,
-                      DefinitionTable &definitions,
+bool check_parameters(const Function &function, DefinitionTable &definitions,
                       std::ostream &diagnostics) {
     for (std::size_t parameter_index = 0;
          parameter_index < function.parameters.size(); ++parameter_index) {
@@ -98,21 +91,20 @@ bool check_parameters(const Function &function, std::vector<bool> &defined,
         // 参数必须有值 ID，序号、类型和签名一致，并且是第一次定义。
         if (!value_id || value_id->index != parameter_index ||
             parameter.type !=
-                function.signature.parameters[parameter_index] ||
-            !define_value(function, defined, *value_id, parameter.type))
+                function.abi.signature.parameters[parameter_index] ||
+            !define_value(function, definitions, *value_id, parameter.type,
+                          {.before_entry = true}))
             return report_error(diagnostics, function,
                                 "函数参数身份或类型无效");
-        definitions[value_id->index] = DefinitionLocation{0, 0, true};
     }
     return true;
 }
 
 // 没有函数体时，必须是外部函数声明，值类型表中也只能保存参数类型。
 bool check_declaration(const Function &function,
-                       const std::vector<bool> &defined,
                        std::ostream &diagnostics) {
     if (function.linkage != Linkage::External ||
-        defined.size() != function.parameters.size() ||
+        function.value_types.size() != function.parameters.size() ||
         !function.entry_allocas.empty())
         return report_error(diagnostics, function,
                             "内部函数未完成定义或声明携带函数体数据");
@@ -120,8 +112,7 @@ bool check_declaration(const Function &function,
 }
 
 // 入口分配必须位于正文之前，存储类型和对齐合法，并且产生 ptr 结果。
-bool check_entry_allocas(const Function &function,
-                         std::vector<bool> &defined,
+bool check_entry_allocas(LayoutService &layouts, const Function &function,
                          DefinitionTable &definitions,
                          std::ostream &diagnostics) {
     for (const auto &instruction : function.entry_allocas) {
@@ -129,18 +120,25 @@ bool check_entry_allocas(const Function &function,
         if (!allocation ||
             !valid_storage(allocation->storage_type, allocation->alignment) ||
             instruction.type != Type::Ptr || !instruction.result ||
-            !define_value(function, defined, *instruction.result, Type::Ptr))
+            !define_value(function, definitions, *instruction.result, Type::Ptr,
+                          {.before_entry = true}))
             return report_error(diagnostics, function,
                                 "入口 alloca 类型、对齐或结果无效");
-        definitions[instruction.result->index] =
-            DefinitionLocation{0, 0, true};
+        // 聚合 alloca 还必须在模块类型表完成后能算出有限布局。
+        try {
+            (void)layouts.layout(allocation->storage_type);
+        } catch (const std::logic_error &) {
+            return report_error(diagnostics, function,
+                                "入口 alloca 聚合布局无效");
+        }
     }
     return true;
 }
 
 // 检查一条普通指令的操作数、结果类型和使用位置。
 // 结果是否重复定义由前面的定义收集统一检查，这里只核对操作数能否使用。
-bool check_instruction(const Module &module, const Function &function,
+bool check_instruction(const Module &module, LayoutService &layouts,
+                       const Function &function,
                        const Instruction &instruction,
                        const DefinitionTable &definitions,
                        const DominanceInfo &dominance,
@@ -155,7 +153,7 @@ bool check_instruction(const Module &module, const Function &function,
         if (!module.contains(call->function))
             return report_error(diagnostics, function,
                                 "调用目标无效或不属于当前模块");
-        const auto &signature = module.function(call->function).signature;
+        const auto &signature = module.function(call->function).abi.signature;
         // 实参数量、结果类型和“是否有结果值”必须与被调用签名一致。
         if (call->arguments.size() != signature.parameters.size() ||
             instruction.type != signature.result ||
@@ -228,6 +226,29 @@ bool check_instruction(const Module &module, const Function &function,
             !operand_ready(truncation->value))
             return report_error(diagnostics, function,
                                 "trunc 类型、操作数或结果无效");
+    } else if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation)) {
+        // GEP 结果必须是 ptr；源存储类型必须是结构/数组/Vec 且能计算布局。
+        if (gep->source_type.kind == StorageType::Kind::Unit ||
+            gep->source_type.kind == StorageType::Kind::Scalar)
+            return report_error(diagnostics, function,
+                                "getelementptr 源存储类型不是聚合");
+        if (!valid_gep_indices(module, gep->source_type, gep->indices))
+            return report_error(diagnostics, function,
+                                "getelementptr 下标数量或字段序号无效");
+        try {
+            (void)layouts.layout(gep->source_type);
+        } catch (const std::logic_error &) {
+            return report_error(diagnostics, function,
+                                "getelementptr 源存储类型布局无效");
+        }
+        if (instruction.type != Type::Ptr || !instruction.result ||
+            gep->base.type != Type::Ptr || !operand_ready(gep->base))
+            return report_error(diagnostics, function,
+                                "getelementptr 基址或结果类型无效");
+        for (const auto &index : gep->indices)
+            if (index.type != Type::I32 || !operand_ready(index))
+                return report_error(diagnostics, function,
+                                    "getelementptr 下标类型或定义位置无效");
     } else {
         return report_error(diagnostics, function,
                             "alloca 只能出现在入口分配区");
@@ -236,7 +257,7 @@ bool check_instruction(const Module &module, const Function &function,
 }
 
 // 检查一个基本块的 ID、终结指令、指令序列和终结指令的操作数。
-bool check_block(const Module &module, const Function &function,
+bool check_block(const Module &module, LayoutService &layouts, const Function &function,
                  const BasicBlock &block, std::size_t block_index,
                  const DefinitionTable &definitions,
                  const DominanceInfo &dominance,
@@ -247,7 +268,7 @@ bool check_block(const Module &module, const Function &function,
     // 指令按块内顺序检查；use_order 用来判断同块是否先定义后使用。
     for (std::size_t instruction_index = 0;
          instruction_index < block.instructions.size(); ++instruction_index)
-        if (!check_instruction(module, function,
+        if (!check_instruction(module, layouts, function,
                                block.instructions[instruction_index],
                                definitions, dominance, block_index,
                                instruction_index, diagnostics))
@@ -257,28 +278,26 @@ bool check_block(const Module &module, const Function &function,
     const auto &terminator = *block.terminator;
     bool valid_terminator = false;
     // ret 的值也要先定义，并与函数返回类型相同；没有值时函数必须返回 void。
-    if (const auto *return_instruction = std::get_if<Return>(&terminator.instruction)) {
+    if (const auto *return_instruction = std::get_if<Return>(&terminator)) {
         if (return_instruction->value) {
             valid_terminator =
                 operand_available(function, definitions, dominance,
                                   block_index, terminator_order,
                                   *return_instruction->value) &&
-                return_instruction->value->type == function.signature.result;
+                return_instruction->value->type == function.abi.signature.result;
         } else {
-            valid_terminator = function.signature.result == Type::Void;
+            valid_terminator = function.abi.signature.result == Type::Void;
         }
         if (!valid_terminator)
             return report_error(diagnostics, function,
                                 "ret 的操作数、定义位置或返回类型无效");
-    } else if (const auto *branch =
-                   std::get_if<Branch>(&terminator.instruction)) {
+    } else if (const auto *branch = std::get_if<Branch>(&terminator)) {
         valid_terminator = valid_jump_target(function, branch->target);
         if (!valid_terminator)
             return report_error(diagnostics, function,
                                 "br 的跳转目标无效或指向入口块");
     } else {
-        const auto &conditional =
-            std::get<CondBranch>(terminator.instruction);
+        const auto &conditional = std::get<CondBranch>(terminator);
         // 条件和两个目标都要检查；条件必须在当前块已经可用且类型为 i1。
         valid_terminator =
             conditional.condition.type == Type::I1 &&
@@ -297,7 +316,6 @@ bool check_block(const Module &module, const Function &function,
 // 收集普通指令结果的唯一定义位置。
 // 定义表先完整建立，后面就能检查任意块对任意值的跨块使用，不依赖块遍历顺序。
 bool collect_instruction_definitions(const Function &function,
-                                     std::vector<bool> &defined,
                                      DefinitionTable &definitions,
                                      std::ostream &diagnostics) {
     for (std::size_t block_index = 0;
@@ -309,12 +327,10 @@ bool collect_instruction_definitions(const Function &function,
             // 无结果指令不占用 ValueId，也不需要登记定义位置。
             if (!instruction.result)
                 continue;
-            if (!define_value(function, defined, *instruction.result,
-                              instruction.type))
+            if (!define_value(function, definitions, *instruction.result,
+                              instruction.type, {block_index, instruction_index}))
                 return report_error(diagnostics, function,
                                     "指令结果身份无效或重复定义");
-            definitions[instruction.result->index] =
-                DefinitionLocation{block_index, instruction_index, false};
         }
     }
     return true;
@@ -343,18 +359,16 @@ DominanceInfo analyze_dominance(const Function &function) {
         const auto &terminator = function.blocks[block_index].terminator;
         if (!terminator)
             continue;
-        if (const auto *branch = std::get_if<Branch>(&terminator->instruction)) {
+        if (const auto *branch = std::get_if<Branch>(&*terminator)) {
             add_edge(block_index, branch->target);
         } else if (const auto *conditional =
-                       std::get_if<CondBranch>(&terminator->instruction)) {
+                       std::get_if<CondBranch>(&*terminator)) {
             add_edge(block_index, conditional->when_true);
             add_edge(block_index, conditional->when_false);
         }
     }
 
     // 入口块是唯一的起点；不可达块不会进入后面的支配集合计算。
-    if (block_count == 0)
-        return info;
     std::vector<std::size_t> work{0};
     info.reachable[0] = true;
     while (!work.empty()) {
@@ -369,15 +383,9 @@ DominanceInfo analyze_dominance(const Function &function) {
     }
 
     // Dom(entry) = {entry}；其余可达块先初始化为全部可达块，再反复求交。
-    for (std::size_t block_index = 0; block_index < block_count;
-         ++block_index) {
-        if (!info.reachable[block_index])
-            continue;
-        for (std::size_t candidate = 0; candidate < block_count; ++candidate)
-            info.dominators[block_index][candidate] =
-                info.reachable[candidate];
-    }
-    info.dominators[0].assign(block_count, false);
+    for (std::size_t block_index = 1; block_index < block_count; ++block_index)
+        if (info.reachable[block_index])
+            info.dominators[block_index] = info.reachable;
     info.dominators[0][0] = true;
 
     bool changed = true;
@@ -404,8 +412,6 @@ DominanceInfo analyze_dominance(const Function &function) {
                         intersection[candidate] &&
                         info.dominators[predecessor][candidate];
             }
-            if (first_predecessor)
-                continue;
             // 每个块支配自己，即使所有前驱的交集里暂时没有它。
             intersection[block_index] = true;
             if (intersection != info.dominators[block_index]) {
@@ -417,29 +423,56 @@ DominanceInfo analyze_dominance(const Function &function) {
     return info;
 }
 
+// 检查 ABI 的签名与存储信息是否匹配，并验证按值聚合存储能算出有限布局。
+bool check_abi(LayoutService &layouts, const Function &function,
+               std::ostream &diagnostics) {
+    const auto &abi = function.abi;
+    if (!valid_function_abi(abi))
+        return report_error(diagnostics, function, "函数 ABI 形状无效");
+    for (const auto &storage : abi.parameter_storage) {
+        if (storage.kind == StorageType::Kind::Unit)
+            continue;
+        if (storage.kind == StorageType::Kind::Scalar)
+            return report_error(diagnostics, function,
+                                "按值聚合形参不能使用标量存储");
+        try {
+            (void)layouts.layout(storage);
+        } catch (const std::logic_error &) {
+            return report_error(diagnostics, function,
+                                "按值聚合形参布局无效");
+        }
+    }
+    if (abi.result_storage) {
+        try {
+            (void)layouts.layout(*abi.result_storage);
+        } catch (const std::logic_error &) {
+            return report_error(diagnostics, function,
+                                "聚合返回存储布局无效");
+        }
+    }
+    return true;
+}
+
 // 检查一个函数的声明或定义；发现错误时输出函数名和原因，并返回 false。
-bool check_function(const Module &module, const Function &function,
+bool check_function(const Module &module, LayoutService &layouts, const Function &function,
                     std::ostream &diagnostics) {
-    // 返回类型必须已知，参数表数量必须和签名一致。
-    if (!is_known_type(function.signature.result) ||
-        function.parameters.size() != function.signature.parameters.size())
+    if (!check_abi(layouts, function, diagnostics))
+        return false;
+    if (function.parameters.size() != function.abi.signature.parameters.size())
         return report_error(diagnostics, function,
                             "函数签名或参数数量无效");
 
-    // defined 防止同一个值被定义两次；definitions 记录每个值在哪里定义。
-    std::vector<bool> defined(function.value_types.size(), false);
     DefinitionTable definitions(function.value_types.size());
-    if (!check_parameters(function, defined, definitions, diagnostics))
+    if (!check_parameters(function, definitions, diagnostics))
         return false;
     if (function.is_declaration())
-        return check_declaration(function, defined, diagnostics);
-    if (!check_entry_allocas(function, defined, definitions, diagnostics))
+        return check_declaration(function, diagnostics);
+    if (!check_entry_allocas(layouts, function, definitions, diagnostics))
         return false;
-    if (!collect_instruction_definitions(function, defined, definitions,
-                                         diagnostics))
+    if (!collect_instruction_definitions(function, definitions, diagnostics))
         return false;
     // 每个记录了类型的值都必须实际出现在参数表或某条指令的结果中。
-    if (std::any_of(defined.begin(), defined.end(), is_undefined))
+    if (std::find(definitions.begin(), definitions.end(), std::nullopt) != definitions.end())
         return report_error(diagnostics, function,
                             "值登记表包含未定义的 SSA 值");
 
@@ -447,7 +480,7 @@ bool check_function(const Module &module, const Function &function,
     const auto dominance = analyze_dominance(function);
     for (std::size_t block_index = 0;
          block_index < function.blocks.size(); ++block_index)
-        if (!check_block(module, function, function.blocks[block_index],
+        if (!check_block(module, layouts, function, function.blocks[block_index],
                          block_index, definitions, dominance, diagnostics))
             return false;
     return true;
@@ -456,8 +489,8 @@ bool check_function(const Module &module, const Function &function,
 // 检查模块类型表中的命名结构体：字段已经定义，
 // 并且按同一布局服务能算出有限且不溢出的目标布局。
 // 名称与登记顺序由 Module::add_named_type 保证，这里不重复校验。
-bool check_named_types(const Module &module, std::ostream &diagnostics) {
-    LayoutService layouts(module);
+bool check_named_types(const Module &module, LayoutService &layouts,
+                       std::ostream &diagnostics) {
     for (std::size_t index = 0; index < module.named_types().size(); ++index) {
         try {
             (void)layouts.layout(StorageType::struct_of(index));
@@ -480,7 +513,8 @@ bool check_module(const Module &module, std::ostream &diagnostics) {
         diagnostics << "IR 内部错误：目标配置必须为固定 RV32IM/ILP32 布局\n";
         return false;
     }
-    if (!check_named_types(module, diagnostics))
+    LayoutService layouts(module);
+    if (!check_named_types(module, layouts, diagnostics))
         return false;
     // 函数 ID 要匹配所属模块和函数表下标，函数名也不能在模块中重复。
     for (std::size_t function_index = 0;
@@ -494,7 +528,7 @@ bool check_module(const Module &module, std::ostream &diagnostics) {
             diagnostics << "IR 内部错误：函数身份、符号或链接属性无效/重复\n";
             return false;
         }
-        if (!check_function(module, function, diagnostics))
+        if (!check_function(module, layouts, function, diagnostics))
             return false;
     }
     return true;

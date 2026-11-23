@@ -18,6 +18,10 @@ GenerationContext::emit_place(const Expression &expression,
         return PlaceResult{Place{
             locals.at(local_id), &semantics.locals[local_id.index].type}};
     }
+    if (const auto *field = dynamic_cast<const FieldExpression *>(&expression))
+        return emit_field_place(*field, locals);
+    if (const auto *index = dynamic_cast<const IndexExpression *>(&expression))
+        return emit_index_place(*index, locals);
     if (const auto *unary =
             dynamic_cast<const UnaryExpression *>(&expression)) {
         // sema 只会把显式解引用标记为 place，不再重复检查操作符。
@@ -27,14 +31,92 @@ GenerationContext::emit_place(const Expression &expression,
             return std::nullopt;
         if (path_ended(*reference))
             return PlaceResult{NoContinuation{}};
-        // 语义阶段已保证该值是可解引用的引用；这里只把指针当作目标地址，
-        // 不读取目标内容，借用 &*p 因而仍是同一个位置。
-        const auto &type = semantics.expressions.at(&expression).type;
-        return PlaceResult{Place{std::get<ir::Operand>(*reference), &type}};
+        const auto &type = semantics.expressions.at(unary->operand.get()).type;
+        if (!is_reference(type)) {
+            diagnostics << "IR 生成尚未支持 Box 解引用（P9）\n";
+            return std::nullopt;
+        }
+        return Place{std::get<ir::Operand>(*reference), type.inner.get()};
     }
-    // 字段、下标等 place 投影留到 P7/P8 随聚合布局实现。
     diagnostics << "IR 生成尚未支持此 place 表达式\n";
     return std::nullopt;
+}
+
+// 引用基址先求值为指针，再沿剩余引用层读取；聚合 place 不得先复制。
+std::optional<PlaceResult>
+GenerationContext::emit_base_place(const Expression &expression,
+                                   LocalPlaces &locals) {
+    const auto &base = semantics.expressions.at(&expression);
+    if (!is_reference(base.type) && base.place.is_place)
+        return emit_place(expression, locals);
+
+    auto value = emit_value(expression, locals);
+    if (!value)
+        return std::nullopt;
+    if (path_ended(*value))
+        return PlaceResult{NoContinuation{}};
+    if (const auto *aggregate = std::get_if<AggregateValue>(&*value))
+        return PlaceResult{Place{aggregate->address, aggregate->type}};
+    if (is_reference(base.type)) {
+        Place target{std::get<ir::Operand>(*value), base.type.inner.get()};
+        while (is_reference(*target.type)) {
+            target = Place{load_value(target.address, ir::Type::Ptr),
+                           target.type->inner.get()};
+        }
+        return target;
+    }
+    diagnostics << "IR 生成尚未支持此投影基址（P9）\n";
+    return std::nullopt;
+}
+
+// 在底层结构体位置上按声明序号投影字段。
+std::optional<PlaceResult>
+GenerationContext::emit_field_place(const FieldExpression &expression,
+                                    LocalPlaces &locals) {
+    auto base = emit_base_place(*expression.base, locals);
+    if (!base || path_ended(*base))
+        return base;
+    const auto &current = std::get<Place>(*base);
+    if (current.type->kind != SemanticType::Kind::Struct) {
+        diagnostics << "IR 生成尚未支持 Box 字段访问（P9）\n";
+        return std::nullopt;
+    }
+    const StructSymbol &structure = *current.type->struct_symbol;
+    const auto &field_type = structure.field_types.at(expression.field);
+    const auto storage = ir::storage_type_of(*current.type);
+    const auto address = builder.get_element_ptr(
+        storage, current.address,
+        {ir::Operand::constant(ir::Type::I32, 0),
+         ir::Operand::constant(
+             ir::Type::I32,
+             static_cast<uint32_t>(
+                 field_declaration_index(structure, expression.field)))});
+    return PlaceResult{Place{address, &field_type}};
+}
+
+// 先求基表达式再求一次下标；数组元素地址由显式数组存储类型的 GEP 得到。
+std::optional<PlaceResult>
+GenerationContext::emit_index_place(const IndexExpression &expression,
+                                    LocalPlaces &locals) {
+    auto base = emit_base_place(*expression.base, locals);
+    if (!base || path_ended(*base))
+        return base;
+    const auto &current = std::get<Place>(*base);
+    if (current.type->kind != SemanticType::Kind::Array) {
+        diagnostics << "IR 生成尚未支持此容器索引（P9）\n";
+        return std::nullopt;
+    }
+    auto index = emit_value(*expression.index, locals);
+    if (!index)
+        return std::nullopt;
+    if (path_ended(*index))
+        return PlaceResult{NoContinuation{}};
+    const auto storage = ir::storage_type_of(*current.type);
+    const auto address = builder.get_element_ptr(
+        storage, current.address,
+        {ir::Operand::constant(ir::Type::I32, 0),
+         std::get<ir::Operand>(*index)});
+    return PlaceResult{Place{address, current.type->inner.get()}};
 }
 
 // 生成 & 或 &mut：已有 place 直接返回其地址；
@@ -43,9 +125,9 @@ std::optional<EmitResult>
 GenerationContext::emit_borrow(const UnaryExpression &expression,
                                LocalPlaces &locals) {
     const auto &result_type = semantics.expressions.at(&expression).type;
-    // 当前只支持引用到标量或引用链；聚合引用随 P7 的布局一起实现。
-    if (!is_supported_value(result_type)) {
-        diagnostics << "IR 生成尚未支持聚合引用（P7）\n";
+    // 引用目标可以是标量或可按布局保存的聚合；Box 引用仍随 P9。
+    if (!is_storable_value(result_type)) {
+        diagnostics << "IR 生成尚未支持此引用类型（P9）\n";
         return std::nullopt;
     }
     const auto &operand = *expression.operand;
@@ -65,26 +147,10 @@ GenerationContext::emit_borrow(const UnaryExpression &expression,
         return std::nullopt;
     if (path_ended(*value))
         return EmitResult{NoContinuation{}};
+    // 聚合值已经位于独立临时存储，借用直接返回该存储地址。
+    if (const auto *aggregate = std::get_if<AggregateValue>(&*value))
+        return EmitResult{aggregate->address};
     return EmitResult{materialize_value(std::get<ir::Operand>(*value))};
-}
-
-// 生成一次内置解引用：先得到引用保存的地址，再读取该位置的值。
-// 目标本身仍是引用时，读取出的就是下一层指针，不会继续自动解引用。
-std::optional<EmitResult>
-GenerationContext::emit_dereference(const UnaryExpression &expression,
-                                    LocalPlaces &locals) {
-    auto place = emit_place(expression, locals);
-    if (!place)
-        return std::nullopt;
-    if (path_ended(*place))
-        return EmitResult{NoContinuation{}};
-    const auto &target = std::get<Place>(*place);
-    // 解引用结果也是普通值：标量或引用链；聚合目标留到 P7。
-    if (!is_supported_value(*target.type)) {
-        diagnostics << "IR 生成尚未支持解引用聚合类型（P7）\n";
-        return std::nullopt;
-    }
-    return EmitResult{load_value(target.address, *target.type)};
 }
 
 // 按 sema 已选定的调整路径执行引用转换。

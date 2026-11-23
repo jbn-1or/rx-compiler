@@ -43,73 +43,56 @@ std::optional<BinaryOperator> compound_operator(AssignmentOperator operation) {
 std::optional<EmitResult>
 GenerationContext::emit_let(const LetStatement &statement,
                             LocalPlaces &locals) {
+    // 先按旧绑定求值；只有显式标注才有固定目标转换。
+    auto prepared = statement.type_annotation
+        ? emit_prepared_value(*statement.initializer, locals,
+                              {&statement, UseKind::Initializer, 0})
+        : emit_value(*statement.initializer, locals);
+    if (!prepared || path_ended(*prepared))
+        return prepared;
     const auto binding = semantics.let_bindings.at(&statement);
-    // 在新绑定进入映射前先生成初始化器。
-    auto initializer = emit_value(*statement.initializer, locals);
-    // 初始化器不支持时立即失败，不创建未初始化的存储位置。
-    if (!initializer)
-        return std::nullopt;
-    // 初始化器提前 return 时不分配存储，也不执行 store。
-    if (path_ended(*initializer))
-        return EmitResult{NoContinuation{}};
     const auto &type = semantics.locals[binding.index].type;
-    // 当前局部存储支持标量和标量引用；聚合绑定随 P7 实现。
-    if (!is_supported_value(type)) {
-        diagnostics << "IR 生成尚未支持聚合局部绑定（P7）\n";
+    // 局部存储支持标量、引用链和按布局搬运的聚合值。
+    if (!is_storable_value(type)) {
+        diagnostics << "IR 生成尚未支持此局部绑定类型\n";
         return std::nullopt;
     }
-    auto value = std::get<ir::Operand>(*initializer);
-    // 有类型标注时，初始化器是固定使用位置，按 sema 选定路径调整；
-    // 没有标注时，绑定类型就是初始化器自身的类型。
-    if (statement.type_annotation) {
-        auto coerced = emit_coercion_at(
-            UseSite{&statement, UseKind::Initializer, 0}, value);
-        if (!coerced)
-            return std::nullopt;
-        value = *coerced;
-    }
-    // bool 使用 i8 存储单元，整数使用 i32，引用保存 ptr；
-    // 写入统一经过 store_value。
-    auto address = allocate_slot(lower_value_type(type));
-    store_value(value, address);
+    // 标量写入自己的存储单元，聚合值按完整布局搬运到新 slot。
+    auto address = allocate_storage_slot(ir::storage_type_of(type));
+    store_prepared_value(address, *prepared, type);
     // 初始化已生成后才登记新绑定，支持 `let x = x` 读取旧 x。
     locals.emplace(binding, address);
     return EmitResult{UnitResult{}};
 }
 
-// 生成 return：先按操作数的源类型求值，再发 ret 并结束当前路径。
+// 函数尾部和显式 return 只在转换记录的位置上有别。
 std::optional<EmitResult>
 GenerationContext::emit_return(const ReturnExpression &expression,
-                               LocalPlaces &locals) {
-    if (!expression.value) {
+                                LocalPlaces &locals) {
+    return emit_return_value(expression.value.get(),
+                             {&expression, UseKind::ReturnValue, 0}, locals);
+}
+
+// unit 只执行副作用；聚合写入调用者提供的地址，其他值直接返回。
+std::optional<EmitResult>
+GenerationContext::emit_return_value(const Expression *value, const UseSite &site,
+                                     LocalPlaces &locals) {
+    if (!value) {
         builder.ret();
         return EmitResult{NoContinuation{}};
     }
-    const auto &value_record = semantics.expressions.at(expression.value.get());
-    // 返回 () 的路径只发 ret void，不产生数据操作数。
-    if (value_record.type.is_unit()) {
-        auto result = emit_discarded_expression(*expression.value, locals);
-        if (!result)
-            return std::nullopt;
-        // 操作数内部的 return 已经发过 ret，外层不能再补一条。
-        if (path_ended(*result))
-            return result;
-        builder.ret();
-        return EmitResult{NoContinuation{}};
-    }
-    auto result = emit_value(*expression.value, locals);
-    if (!result)
-        return std::nullopt;
-    // 操作数本身提前结束路径时，由它负责发 ret。
-    if (path_ended(*result))
+    auto result = current_return_type_->is_unit()
+        ? emit_discarded_expression(*value, locals)
+        : emit_prepared_value(*value, locals, site);
+    if (!result || path_ended(*result))
         return result;
-    // 返回值是固定使用位置，按 sema 记录的计划调整到声明返回类型。
-    auto coerced = emit_coercion_at(
-        UseSite{&expression, UseKind::ReturnValue, 0},
-        std::get<ir::Operand>(*result));
-    if (!coerced)
-        return std::nullopt;
-    builder.ret(*coerced);
+
+    if (function_result_pointer_)
+        store_prepared_value(*function_result_pointer_, *result, *current_return_type_);
+    if (const auto *operand = std::get_if<ir::Operand>(&*result))
+        builder.ret(*operand);
+    else
+        builder.ret();
     return EmitResult{NoContinuation{}};
 }
 
@@ -118,51 +101,13 @@ GenerationContext::emit_return(const ReturnExpression &expression,
 std::optional<EmitResult>
 GenerationContext::emit_assignment(const AssignmentExpression &expression,
                                    LocalPlaces &locals) {
-    // —— 普通赋值：右侧先求值并实施已选定的转换，然后计算目标地址。——
-    if (expression.operation == AssignmentOperator::Assign) {
-        auto right = emit_value(*expression.right, locals);
-        if (!right)
-            return std::nullopt;
-        // 右侧提前 return 时，不能计算目标地址，更不能写入。
-        if (path_ended(*right))
-            return EmitResult{NoContinuation{}};
-        // 赋值右侧是固定使用位置；按 sema 已记录的路径调整到左值类型。
-        auto prepared = emit_coercion_at(
-            UseSite{&expression, UseKind::AssignmentValue, 0},
-            std::get<ir::Operand>(*right));
-        if (!prepared)
-            return std::nullopt;
-        // 目标只计算一次；*target(...) 这类 place 的副作用也在这里发生。
-        auto target_result = emit_place(*expression.left, locals);
-        if (!target_result)
-            return std::nullopt;
-        if (path_ended(*target_result))
-            return EmitResult{NoContinuation{}};
-        const auto &target = std::get<Place>(*target_result);
-        // 聚合赋值的读写随 P7 的布局实现；当前只写入标量或引用。
-        if (!is_supported_value(*target.type)) {
-            diagnostics << "IR 生成尚未支持聚合赋值（P7）\n";
-            return std::nullopt;
-        }
-        store_value(*prepared, target.address);
-        return EmitResult{UnitResult{}};
-    }
-
-    // —— 复合赋值：先固定 RHS 的标量或共享引用，再求目标并读取旧值。——
+    // 普通赋值先完成目标类型转换；复合赋值只固定 RHS，不提前读取引用目标。
     const auto operation = compound_operator(expression.operation);
-    if (!operation) {
-        diagnostics << "IR 生成尚未支持此赋值运算\n";
-        return std::nullopt;
-    }
-    auto right = emit_value(*expression.right, locals);
-    if (!right)
-        return std::nullopt;
-    if (path_ended(*right))
-        return EmitResult{NoContinuation{}};
-    const auto right_value = std::get<ir::Operand>(*right);
-    // 共享引用右侧只固定指针；目标内容要等旧值读取之后才读取。
-    const auto &right_type =
-        semantics.expressions.at(expression.right.get()).type;
+    auto right = operation ? emit_value(*expression.right, locals)
+                           : emit_prepared_value(*expression.right, locals,
+                                                 {&expression, UseKind::AssignmentValue, 0});
+    if (!right || path_ended(*right))
+        return right;
 
     auto target_result = emit_place(*expression.left, locals);
     if (!target_result)
@@ -170,14 +115,20 @@ GenerationContext::emit_assignment(const AssignmentExpression &expression,
     if (path_ended(*target_result))
         return EmitResult{NoContinuation{}};
     const auto &target = std::get<Place>(*target_result);
+    if (!operation) {
+        if (!is_storable_value(*target.type)) {
+            diagnostics << "IR 生成尚未支持此赋值目标类型\n";
+            return std::nullopt;
+        }
+        store_prepared_value(target.address, *right, *target.type);
+        return EmitResult{UnitResult{}};
+    }
     // 旧值必须在目标地址求值之后读取，不能复用检查阶段的任何缓存。
     const auto old_value = load_value(target.address, *target.type);
     // 直接标量 RHS 在求值时就已固定；共享引用此时才读取其目标。
-    const auto right_scalar =
-        finish_scalar_operand(right_value, right_type);
-    const auto &left_type =
-        semantics.expressions.at(expression.left.get()).type;
-    auto result = emit_binary_operation(*operation, left_type, old_value,
+    const auto &right_type = semantics.expressions.at(expression.right.get()).type;
+    const auto right_scalar = finish_scalar_operand(std::get<ir::Operand>(*right), right_type);
+    auto result = emit_binary_operation(*operation, *target.type, old_value,
                                         right_scalar);
     if (!result)
         return std::nullopt;

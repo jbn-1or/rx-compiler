@@ -15,6 +15,11 @@
 namespace rx {
 
 struct FunctionSymbol;
+struct IfExpression;
+struct LoopExpression;
+struct WhileExpression;
+struct BreakExpression;
+struct ContinueExpression;
 
 namespace ir {
 class IRBuilder;
@@ -59,6 +64,15 @@ public:
     bool emit_function_body(const FunctionSymbol &function, ir::IRFunctionId id);
 
 private:
+    // IR 生成期的循环帧：用 sema 固定的 LoopId 查跳转目标，不重新选最近循环。
+    struct LoopFrame {
+        LoopId id; // 这个帧对应的语义循环身份。
+        ir::BlockId continue_target; // while 回到条件块，loop 回到循环体块。
+        std::optional<ir::BlockId> break_target; // 退出块；loop 在首次 break 时创建。
+        const SemanticType *result_type = nullptr; // 非空表示 loop 有数据结果。
+        std::optional<ir::Operand> result_slot; // 有数据结果时保存入口 result slot。
+    };
+
     // lowering.cpp：表达式和语句分派。
     // 生成一条 let 或表达式语句。
     std::optional<EmitResult> emit_statement(const Statement &statement,
@@ -66,9 +80,35 @@ private:
     // 计算需要数据值的表达式，包括整数、bool 和引用。
     std::optional<EmitResult> emit_value(const Expression &expression,
                                          LocalPlaces &locals);
-    // 只生成能正常完成并产生 unit 的表达式。
+    // 生成 unit/发散表达式，或生成不需要块结果的代码块。
     std::optional<EmitResult> emit_unit_expression(const Expression &expression,
-                                                    LocalPlaces &locals);
+                                                     LocalPlaces &locals);
+    // 按语义类型求值，保留副作用与控制流，但丢弃正常结果。
+    std::optional<EmitResult> emit_discarded_expression(const Expression &expression,
+                                                        LocalPlaces &locals);
+
+    // lowering/control_flow.cpp：if 的分块、跳转和正常边汇合。
+    // unit/never if 不分配结果 slot；整数值 if 用入口 result slot 汇合两支结果。
+    std::optional<EmitResult> emit_if_unit(const IfExpression &expression,
+                                            LocalPlaces &locals);
+    std::optional<EmitResult> emit_if_value(const IfExpression &expression,
+                                             LocalPlaces &locals);
+    // 生成 && / ||：先求左操作数，只有需要时再求右操作数。
+    std::optional<EmitResult> emit_logical(const BinaryExpression &expression,
+                                           LocalPlaces &locals);
+    // 生成 while：cond 每轮重新求值，body 正常结束回到 cond，false 边进入 exit。
+    std::optional<EmitResult> emit_while(const WhileExpression &expression,
+                                         LocalPlaces &locals);
+    // 生成 loop：body 正常结束跳回自身；有结果时 break 写入口 slot，exit 读回。
+    std::optional<EmitResult> emit_loop(const LoopExpression &expression,
+                                        LocalPlaces &locals);
+    // 生成 break/continue：查 sema 记录的 LoopId，再跳到当前循环帧的目标块。
+    std::optional<EmitResult> emit_break(const BreakExpression &expression,
+                                         LocalPlaces &locals);
+    std::optional<EmitResult> emit_continue(
+        const ContinueExpression &expression, LocalPlaces &locals);
+    // 按 LoopId 查找生成期的循环帧；找不到说明消 lower 与 sema 身份不一致。
+    LoopFrame *find_loop_frame(LoopId id);
 
     // lowering/value.cpp：基础值、存储表示和固定临时 slot。
     // 选择局部 slot 的存储类型，供 let 与函数形参共同使用。
@@ -147,6 +187,8 @@ private:
     std::ostream &diagnostics; // 收集 IR 生成期间错误信息的输出流。
     // 当前函数内按 AST 静态位置缓存的临时 slot；切换函数时清空，避免跨函数共用。
     std::unordered_map<const Expression *, ir::Operand> temporary_slots;
+    // 当前正在生成的循环帧，按嵌套顺序保存；break/continue 用 LoopId 定位目标。
+    std::vector<LoopFrame> loop_frames_;
 };
 
 } // namespace rx

@@ -1,4 +1,4 @@
-// P2–P5.4：真实源码的入口、标量运算、引用转换、赋值顺序与失败边界。
+// P2–P6.8：真实源码的入口、标量、引用、赋值与控制流的 IR 结构。
 #include "RxLexer.h"
 #include "RxParser.h"
 #include "ast_builder.hpp"
@@ -1449,6 +1449,644 @@ void check_assignment_unit_tails() {
     }
 }
 
+// 沿终结指令找块，不依赖 then/else/merge 的编号或打印顺序。
+void check_unit_if() {
+    for (const bool has_else : {false, true}) {
+        const auto crate = parse_crate(std::string(
+            "fn flag() -> bool { true } "
+            "fn main() { if flag() { println_i32(1); }") +
+            (has_else ? " else { println_i32(2); }" : "") +
+            " println_i32(3); }");
+        const auto sema = analyze(*crate);
+        const auto artifact = generate(sema);
+        std::ostringstream text, diagnostics;
+        check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+              "unit if 必须通过 IR 自检");
+
+        const auto names = rx::assign_function_names(sema);
+        const auto &module = artifact.module();
+        const auto &main = *module.find_function(names[sema.main_function->index]);
+        check(main.blocks.size() == (has_else ? 4u : 3u) &&
+                  main.entry_allocas.empty() && main.value_types == std::vector{Type::I1},
+              "unit if 不产生结果值或 slot，无 else 时也不需要空分支块");
+        const auto &entry = main.blocks.front();
+        check(entry.instructions.size() == 1, "条件只能求值一次");
+        const auto &instruction = entry.instructions.front();
+        const auto &call = std::get<Call>(instruction.operation);
+        const auto &branch = std::get<CondBranch>(entry.terminator->instruction);
+        check(call.function == module.find_function(names[0])->id && instruction.result &&
+                  branch.condition == Operand::local(Type::I1, *instruction.result),
+              "condbr 必须直接使用一次条件调用返回的 i1");
+
+        const auto print = module.find_function("println_i32")->id;
+        const auto prints = [print](const BasicBlock &block, unsigned marker) {
+            if (block.instructions.size() != 1)
+                return false;
+            const auto *call = std::get_if<Call>(&block.instructions.front().operation);
+            return call && call->function == print &&
+                   call->arguments == std::vector{Operand::constant(Type::I32, marker)};
+        };
+        const auto &then_block = main.block(branch.when_true);
+        const auto merge = std::get<Branch>(then_block.terminator->instruction).target;
+        check(prints(then_block, 1), "true 边必须进入 then 块");
+        if (has_else) {
+            const auto &else_block = main.block(branch.when_false);
+            check(prints(else_block, 2) &&
+                      std::get<Branch>(else_block.terminator->instruction).target == merge,
+                  "false 边必须进入 else 块，再跳到同一合流块");
+        } else {
+            check(branch.when_false == merge, "没有 else 时 false 边应直达合流块");
+        }
+        const auto &merge_block = main.block(merge);
+        check(prints(merge_block, 3) &&
+                  !std::get<Return>(merge_block.terminator->instruction).value,
+              "if 后的代码必须从合流块继续，最后正常 ret void");
+    }
+}
+
+// 两条正常边先写同一个入口 slot；合流时用新 load，而不是直接使用分支的 SSA 值。
+void check_integer_if_merge() {
+    const auto crate = parse_crate(R"(
+        fn flag() -> bool { get_i32() != 0 }
+        fn main() {
+            println_i32(get_i32() + if flag() {
+                println_i32(1);
+                10
+            } else {
+                println_i32(2);
+                20
+            });
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "整数 if 和合法的跨块操作数必须通过 IR 自检");
+
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto &main = *module.find_function(names[sema.main_function->index]);
+    check(main.blocks.size() == 4 && main.entry_allocas.size() == 1,
+          "整数 if 必须在入口分配一个结果 slot");
+    const auto &allocation = main.entry_allocas.front();
+    const auto &storage = std::get<Alloca>(allocation.operation);
+    check(allocation.result && storage.storage_type == Type::I32 && storage.alignment == 4,
+          "整数 if 的结果 slot 必须能存放 i32");
+    const auto slot = Operand::local(Type::Ptr, *allocation.result);
+
+    const auto &entry = main.blocks.front();
+    const auto input_index = unique_call_index(entry.instructions, module.find_function("get_i32")->id);
+    const auto flag_index = unique_call_index(entry.instructions, module.find_function(names[0])->id);
+    const auto &branch = std::get<CondBranch>(entry.terminator->instruction);
+    check(entry.instructions.size() == 2 && input_index < flag_index &&
+              branch.condition == Operand::local(Type::I1, *entry.instructions[flag_index].result),
+          "左操作数先求值，if 的条件只求值一次并直接用于 condbr");
+
+    const auto print = module.find_function("println_i32")->id;
+    const auto check_arm = [&](BlockId id, unsigned marker, unsigned value) {
+        const auto &arm = main.block(id);
+        check(arm.instructions.size() == 2, "分支应先打印，再写入整数尾值");
+        const auto &call = std::get<Call>(arm.instructions.front().operation);
+        const auto &store = std::get<Store>(arm.instructions.back().operation);
+        check(call.function == print &&
+                  call.arguments == std::vector{Operand::constant(Type::I32, marker)} &&
+                  store.storage_type == Type::I32 && store.address == slot &&
+                  store.value == Operand::constant(Type::I32, value),
+              "各分支必须将自己的尾值写到同一个入口 slot");
+        return std::get<Branch>(arm.terminator->instruction).target;
+    };
+    const auto merge_id = check_arm(branch.when_true, 1, 10);
+    check(check_arm(branch.when_false, 2, 20) == merge_id,
+          "两条正常结果边必须都写完再跳到同一个合流块");
+
+    const auto &merge = main.block(merge_id);
+    check(merge.instructions.size() == 3, "合流块先读取结果，再完成外层加法和打印");
+    const auto &load = std::get<Load>(merge.instructions[0].operation);
+    const auto &add = std::get<BinaryOperation>(merge.instructions[1].operation);
+    const auto &call = std::get<Call>(merge.instructions[2].operation);
+    check(load.storage_type == Type::I32 && load.address == slot &&
+              add.operation == BinaryOp::Add &&
+              add.left == Operand::local(Type::I32, *entry.instructions[input_index].result) &&
+              add.right == Operand::local(Type::I32, *merge.instructions[0].result) &&
+              call.function == print &&
+              call.arguments == std::vector{Operand::local(Type::I32, *merge.instructions[1].result)},
+          "加法必须使用入口的 SSA 值和合流块新读出的整数");
+}
+
+// 提前返回只结束当前路径：检查写槽、合流及后续代码只出现在正常路径中。
+void check_if_early_return() {
+    const auto crate = parse_crate(R"(
+        fn single(flag: bool) -> i32 {
+            if flag { println_i32(1); return 7; println_i32(99); 10 }
+            else { 8 }
+        }
+        fn both(flag: bool) -> i32 {
+            if flag { println_i32(2); return 11; }
+            else { println_i32(3); return 12; };
+            println_i32(99);
+            13
+        }
+        fn both_typed(flag: bool) -> i32 {
+            if flag { println_i32(2); return 11; 1 }
+            else { println_i32(3); return 12; 2 }
+        }
+        fn condition() -> i32 {
+            if { println_i32(4); return 9; true } { 1 } else { 2 }
+        }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "含提前返回的 if 必须成功生成并通过 IR 自检");
+
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto print = module.find_function("println_i32")->id;
+    const auto check_return = [print](const BasicBlock &block, unsigned marker, unsigned value) {
+        check(block.instructions.size() == 1,
+              "提前返回的块只保留返回前的打印，不得写结果或生成后续指令");
+        const auto &call = std::get<Call>(block.instructions.front().operation);
+        check(call.function == print &&
+                  call.arguments == std::vector{Operand::constant(Type::I32, marker)} &&
+                  std::get<Return>(block.terminator->instruction).value ==
+                      Operand::constant(Type::I32, value),
+              "这条边必须保留原来的副作用，并以指定值直接返回");
+    };
+
+    const auto &single = *module.find_function(names[0]);
+    check(single.blocks.size() == 4 && single.entry_allocas.size() == 2,
+          "单支正常完成的整数 if 需要一个合流块和一个结果 slot");
+    const auto &branch = std::get<CondBranch>(single.blocks.front().terminator->instruction);
+    check_return(single.block(branch.when_true), 1, 7);
+    const auto &normal = single.block(branch.when_false);
+    check(normal.instructions.size() == 1, "只有正常分支写结果槽");
+    const auto &store = std::get<Store>(normal.instructions.front().operation);
+    const auto &result_slot = single.entry_allocas.back();
+    const auto &merge = single.block(std::get<Branch>(normal.terminator->instruction).target);
+    check(merge.instructions.size() == 1, "合流块只读出正常分支的结果");
+    const auto &load = std::get<Load>(merge.instructions.front().operation);
+    check(store.storage_type == Type::I32 && store.value == Operand::constant(Type::I32, 8) &&
+              store.address == Operand::local(Type::Ptr, *result_slot.result) &&
+              load.storage_type == Type::I32 && load.address == store.address &&
+              std::get<Return>(merge.terminator->instruction).value ==
+                  Operand::local(Type::I32, *merge.instructions.front().result),
+          "合流块必须读回已写入的 slot，并返回这次读取的结果");
+
+    // 即使分支的不可达尾值让静态类型是 i32，也要按实际的返回路径判断能否合流。
+    for (std::size_t index : {1u, 2u}) {
+        const auto &both = *module.find_function(names[index]);
+        check(both.blocks.size() == 3, "两支都返回时不能生成没有正常前驱的合流块");
+        if (index == 1)
+            check(both.entry_allocas.size() == 1, "never if 不需要额外的结果槽");
+        const auto &choice = std::get<CondBranch>(both.blocks.front().terminator->instruction);
+        check_return(both.block(choice.when_true), 2, 11);
+        check_return(both.block(choice.when_false), 3, 12);
+    }
+
+    const auto &condition = *module.find_function(names[3]);
+    check(condition.blocks.size() == 1 && condition.entry_allocas.empty(),
+          "条件提前返回时，不能建立外层 if 的分支或结果槽");
+    check_return(condition.blocks.front(), 4, 9);
+}
+
+// 按条件跳转的目标检查短路、右侧求值和提前返回，不依赖基本块编号。
+void check_short_circuit() {
+    const auto crate = parse_crate(R"(
+        fn left() -> bool { get_i32() != 0 }
+        fn right() -> bool { get_i32() != 0 }
+        fn and_value() -> bool { left() && right() }
+        fn or_value() -> bool { left() || right() }
+        fn and_left_exit() -> bool { ({ println_i32(1); return true; false }) && right() }
+        fn or_left_exit() -> bool { ({ println_i32(1); return true; false }) || right() }
+        fn and_right_exit() -> bool { left() && { println_i32(2); return false; true } }
+        fn or_right_exit() -> bool { left() || { println_i32(2); return false; true } }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "含短路和提前返回的模块必须通过 IR 自检");
+
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto left_function = module.find_function(names[0])->id;
+    const auto right_function = module.find_function(names[1])->id;
+    const auto print = module.find_function("println_i32")->id;
+    const auto prints = [print](const Instruction &instruction, unsigned marker) {
+        const auto &call = std::get<Call>(instruction.operation);
+        return call.function == print &&
+               call.arguments == std::vector{Operand::constant(Type::I32, marker)};
+    };
+    const auto check_paths = [&](const Function &function, bool is_and, bool right_exits) {
+        check(function.blocks.size() == 4 && function.entry_allocas.size() == 1,
+              "短路表达式需要入口结果槽和两个分支及合流块");
+        const auto &allocation = function.entry_allocas.front();
+        const auto &storage = std::get<Alloca>(allocation.operation);
+        check(storage.storage_type == Type::I8 && storage.alignment == 1,
+              "短路结果必须使用 bool 的 i8 存储形式");
+        const auto slot = Operand::local(Type::Ptr, *allocation.result);
+        const auto &entry = function.blocks.front();
+        check(entry.instructions.size() == 1 &&
+                  std::get<Call>(entry.instructions.front().operation).function == left_function,
+              "条件块只调用一次左侧，不能提前求值右侧");
+        const auto &choice = std::get<CondBranch>(entry.terminator->instruction);
+        check(choice.condition == Operand::local(Type::I1, *entry.instructions.front().result),
+              "条件跳转必须使用左侧返回的 i1");
+
+        const auto &short_path = function.block(is_and ? choice.when_false : choice.when_true);
+        const auto &right_path = function.block(is_and ? choice.when_true : choice.when_false);
+        check(short_path.instructions.size() == 1, "短路分支只写入已决定的结果");
+        const auto &short_store = std::get<Store>(short_path.instructions.front().operation);
+        check(short_store.address == slot &&
+                  short_store.value == Operand::constant(Type::I8, is_and ? 0 : 1),
+              "&& 的 false 边或 || 的 true 边应写入各自的短路结果");
+        const auto merge_id = std::get<Branch>(short_path.terminator->instruction).target;
+        if (right_exits) {
+            check(right_path.instructions.size() == 1 && prints(right_path.instructions.front(), 2) &&
+                      std::get<Return>(right_path.terminator->instruction).value ==
+                          Operand::constant(Type::I1, 0),
+                  "右侧提前返回时保留副作用，但不能写槽或跳到合流块");
+        } else {
+            check(right_path.instructions.size() == 3 &&
+                      std::get<Call>(right_path.instructions[0].operation).function == right_function,
+                  "右侧分支应调用一次右侧，再将结果扩展并写槽");
+            const auto &extend = std::get<ZExt>(right_path.instructions[1].operation);
+            const auto &store = std::get<Store>(right_path.instructions[2].operation);
+            check(extend.value == Operand::local(Type::I1, *right_path.instructions[0].result) &&
+                      store.address == slot &&
+                      store.value == Operand::local(Type::I8, *right_path.instructions[1].result) &&
+                      std::get<Branch>(right_path.terminator->instruction).target == merge_id,
+                  "右侧正常完成时必须用实际结果初始化同一个槽再合流");
+        }
+        const auto &merge = function.block(merge_id);
+        check(merge.instructions.size() == 2, "合流块应该读槽并转换回 i1");
+        const auto &load = std::get<Load>(merge.instructions[0].operation);
+        const auto &trunc = std::get<Trunc>(merge.instructions[1].operation);
+        check(load.address == slot &&
+                  trunc.value == Operand::local(Type::I8, *merge.instructions[0].result) &&
+                  std::get<Return>(merge.terminator->instruction).value ==
+                      Operand::local(Type::I1, *merge.instructions[1].result),
+              "合流块应把已写入的值作为短路表达式的 bool 结果");
+    };
+
+    for (std::size_t index : {0u, 1u}) {
+        check_paths(*module.find_function(names[2 + index]), index == 0, false);
+        check_paths(*module.find_function(names[6 + index]), index == 0, true);
+        const auto &left_exit = *module.find_function(names[4 + index]);
+        check(left_exit.blocks.size() == 1 && left_exit.entry_allocas.empty(),
+              "左侧提前返回时不应创建右侧块、结果槽或合流块");
+        const auto &entry = left_exit.blocks.front();
+        check(entry.instructions.size() == 1 && prints(entry.instructions.front(), 1) &&
+                  std::get<Return>(entry.terminator->instruction).value ==
+                      Operand::constant(Type::I1, 1),
+              "左侧提前返回时只保留原有副作用和返回值");
+    }
+}
+
+// 检查 while 的回边、入口分配和提前返回，沿跳转找块而不依赖块编号。
+void check_while() {
+    const auto crate = parse_crate(R"(
+        fn condition(x: i32) -> bool { x < 2 }
+        fn count() {
+            let mut x = 0;
+            while condition(x) { let next = x + 1; x = next; }
+            println_i32(x);
+        }
+        fn return_in_body(flag: bool) -> i32 {
+            while flag { return 7; }
+            8
+        }
+        fn return_in_condition() -> i32 {
+            while ({ println_i32(1); return 9; true }) { println_i32(99); }
+            10
+        }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "源码 while 及其回边必须通过 IR 自检");
+
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto print = module.find_function("println_i32")->id;
+    const auto &count = *module.find_function(names[1]);
+    check(count.blocks.size() == 4 && count.entry_allocas.size() == 2,
+          "while 只需条件、循环体和退出块，x 和 next 的槽都应位于入口");
+    const auto x = Operand::local(Type::Ptr, *count.entry_allocas[0].result);
+    const auto next = Operand::local(Type::Ptr, *count.entry_allocas[1].result);
+    const auto &entry = count.blocks.front();
+    check(entry.instructions.size() == 1, "进入循环前只初始化 x，不能提前初始化 next");
+    const auto &initial = std::get<Store>(entry.instructions.front().operation);
+    check(initial.address == x && initial.value == Operand::constant(Type::I32, 0),
+          "入口必须在第一次判断前初始化 x");
+
+    const auto condition_id = std::get<Branch>(entry.terminator->instruction).target;
+    const auto &condition = count.block(condition_id);
+    check(condition.instructions.size() == 2, "条件块应重新读取 x 并调用条件函数");
+    const auto &read = std::get<Load>(condition.instructions[0].operation);
+    const auto &call = std::get<Call>(condition.instructions[1].operation);
+    const auto &choice = std::get<CondBranch>(condition.terminator->instruction);
+    check(read.address == x && call.function == module.find_function(names[0])->id &&
+              call.arguments == std::vector{Operand::local(Type::I32, *condition.instructions[0].result)} &&
+              choice.condition == Operand::local(Type::I1, *condition.instructions[1].result),
+          "每轮必须用当前的 x 重新求条件，并用这次结果选择路径");
+
+    const auto &body = count.block(choice.when_true);
+    std::vector<Operand> written_addresses;
+    for (const auto &instruction : body.instructions) {
+        check(!std::holds_alternative<Alloca>(instruction.operation), "循环体不能动态分配槽");
+        if (const auto *store = std::get_if<Store>(&instruction.operation))
+            written_addresses.push_back(store->address);
+    }
+    check(written_addresses == std::vector{next, x} &&
+              std::get<Branch>(body.terminator->instruction).target == condition_id,
+          "每轮在体内初始化 next、写回 x，再跳回条件块");
+    const auto &exit = count.block(choice.when_false);
+    check(exit.instructions.size() == 2 &&
+              std::get<Load>(exit.instructions[0].operation).address == x &&
+              std::get<Call>(exit.instructions[1].operation).function == print &&
+              !std::get<Return>(exit.terminator->instruction).value,
+          "false 边必须继续执行循环后的代码，while 自身不产生返回值");
+
+    const auto &body_exit = *module.find_function(names[2]);
+    const auto body_test = std::get<Branch>(body_exit.blocks.front().terminator->instruction).target;
+    const auto &body_choice = std::get<CondBranch>(body_exit.block(body_test).terminator->instruction);
+    const auto &early = body_exit.block(body_choice.when_true);
+    const auto &after = body_exit.block(body_choice.when_false);
+    check(std::get<Return>(early.terminator->instruction).value == Operand::constant(Type::I32, 7) &&
+              std::get<Return>(after.terminator->instruction).value == Operand::constant(Type::I32, 8),
+          "循环体返回时不发回边，但条件为 false 时仍能正常退出");
+
+    const auto &condition_exit = *module.find_function(names[3]);
+    check(condition_exit.blocks.size() == 2, "条件提前返回时不能生成循环体或退出块");
+    const auto test = std::get<Branch>(condition_exit.blocks.front().terminator->instruction).target;
+    const auto &returning = condition_exit.block(test);
+    check(returning.instructions.size() == 1 &&
+              std::get<Call>(returning.instructions.front().operation).arguments ==
+                  std::vector{Operand::constant(Type::I32, 1)} &&
+              std::get<Return>(returning.terminator->instruction).value == Operand::constant(Type::I32, 9),
+          "条件提前返回时只保留返回前的副作用，不发条件分支");
+}
+
+// 分别核对语义身份和实际跳转：退出内层 loop 后，外层 while 的两个目标仍然有效。
+void check_loop_targets() {
+    const auto crate = parse_crate(R"(
+        fn main() {
+            let again = get_i32() != 0;
+            while again {
+                loop {
+                    if again { continue; }
+                    break;
+                }
+                if again { continue; }
+                break;
+            }
+            println_i32(7);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    check(sema.loops.size() == 2 && sema.while_expressions.size() == 1 &&
+              sema.loop_expressions.size() == 1,
+          "内外层循环必须各有一个语义身份");
+    const auto while_id = sema.while_expressions.begin()->second;
+    const auto loop_id = sema.loop_expressions.begin()->second;
+    check(while_id != loop_id && sema.loops.at(while_id.index).kind == rx::LoopFact::Kind::While &&
+              sema.loops.at(loop_id.index).kind == rx::LoopFact::Kind::Loop,
+          "内外层的 LoopId 不能混用");
+    const auto has_both_targets = [while_id, loop_id](const auto &targets) {
+        std::set<rx::LoopId> ids;
+        for (const auto &entry : targets)
+            ids.insert(entry.second);
+        return targets.size() == 2 && ids == std::set{while_id, loop_id};
+    };
+    check(has_both_targets(sema.break_targets) && has_both_targets(sema.continue_targets),
+          "内外层各自的 break 和 continue 必须记录到不同的循环");
+
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "嵌套循环的跳转必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto &main = *module.find_function(names[sema.main_function->index]);
+    check(main.entry_allocas.size() == 1, "unit 循环不能分配结果槽");
+
+    const auto jump_target = [](const BasicBlock &block) {
+        return std::get<Branch>(block.terminator->instruction).target;
+    };
+    const auto while_cond = jump_target(main.blocks.front());
+    const auto &while_branch = std::get<CondBranch>(main.block(while_cond).terminator->instruction);
+    const auto loop_body = jump_target(main.block(while_branch.when_true));
+    const auto &inner = std::get<CondBranch>(main.block(loop_body).terminator->instruction);
+    check(jump_target(main.block(inner.when_true)) == loop_body,
+          "loop 的 continue 必须跳回自己的体");
+
+    // 内层 break 落在外层体的后半段，而不是 while 的出口。
+    const auto loop_exit = jump_target(main.block(inner.when_false));
+    check(loop_exit != while_branch.when_false, "内层 break 不能退出外层 while");
+    const auto &outer = std::get<CondBranch>(main.block(loop_exit).terminator->instruction);
+    check(jump_target(main.block(outer.when_true)) == while_cond &&
+              jump_target(main.block(outer.when_false)) == while_branch.when_false,
+          "外层 continue 回到条件，外层 break 和条件 false 使用同一出口");
+}
+
+// 无出口的 loop 不制造合流块，也不生成循环之后的代码。
+void check_loop_without_exit() {
+    const auto crate = parse_crate(R"(
+        fn forever() -> i32 {
+            let x = loop {};
+            println_i32(99);
+            8
+        }
+        fn return_before_break() -> i32 {
+            loop { return 7; break; }
+            8
+        }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "无出口循环必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto &forever = *module.find_function(names[0]);
+    check(forever.blocks.size() == 2 && forever.entry_allocas.empty(),
+          "空 loop 只有入口和循环体，不给不可达的 let 分配槽");
+    const auto body = std::get<Branch>(forever.blocks.front().terminator->instruction).target;
+    check(body != forever.blocks.front().id && forever.block(body).instructions.empty() &&
+              std::get<Branch>(forever.block(body).terminator->instruction).target == body,
+          "无 break 的空 loop 必须跳回自身，不能生成后续打印或返回");
+    const auto &early = *module.find_function(names[1]);
+    check(early.blocks.size() == 2, "return 后未发射的 break 不能创建循环出口");
+    const auto target = std::get<Branch>(early.blocks.front().terminator->instruction).target;
+    check(std::get<Return>(early.block(target).terminator->instruction).value ==
+              Operand::constant(Type::I32, 7),
+          "循环体已经 return 时不能补回边或继续执行循环外的尾值");
+}
+
+// 沿实际退出边检查写槽和读回；操作数发散时不能发出 break 边。
+void check_loop_results() {
+    const auto crate = parse_crate(R"(
+        fn choose(flag: bool) -> i32 {
+            loop { if flag { break get_i32(); } break 8; }
+        }
+        fn no_result_edge() -> i32 {
+            loop { break { println_i32(1); return 9; 7 }; }
+        }
+        fn never_result() -> i32 {
+            loop { break { return 10; }; }
+        }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "带值 break 和发散的 break 必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto target = [](const BasicBlock &block) {
+        return std::get<Branch>(block.terminator->instruction).target;
+    };
+
+    const auto &choose = *module.find_function(names[0]);
+    check(choose.entry_allocas.size() == 2, "形参槽之外只分配一个整数结果槽");
+    const auto &allocation = choose.entry_allocas.back();
+    check(std::get<Alloca>(allocation.operation).storage_type == Type::I32,
+          "两个整数结果共用一个入口 i32 槽");
+    const auto slot = Operand::local(Type::Ptr, *allocation.result);
+    const auto &body = choose.block(target(choose.blocks.front()));
+    const auto &branch = std::get<CondBranch>(body.terminator->instruction);
+    const auto &first = choose.block(branch.when_true);
+    const auto &second = choose.block(branch.when_false);
+    check(first.instructions.size() == 2 && second.instructions.size() == 1 &&
+              std::get<Call>(first.instructions.front().operation).function ==
+                  module.find_function("get_i32")->id,
+          "只在实际选中的退出边执行 break 操作数，且只求值一次");
+    const auto &first_store = std::get<Store>(first.instructions.back().operation);
+    const auto &second_store = std::get<Store>(second.instructions.back().operation);
+    const auto exit_id = target(first);
+    check(first_store.address == slot && second_store.address == slot &&
+              first_store.value == Operand::local(Type::I32, *first.instructions.front().result) &&
+              second_store.value == Operand::constant(Type::I32, 8) && target(second) == exit_id,
+          "两条 break 边必须先写入各自的结果，再跳向同一个出口");
+    const auto &exit = choose.block(exit_id);
+    check(exit.instructions.size() == 1 &&
+              std::get<Load>(exit.instructions.front().operation).address == slot &&
+              std::get<Return>(exit.terminator->instruction).value ==
+                  Operand::local(Type::I32, *exit.instructions.front().result),
+          "循环正常结束后才能读出结果并交给外层函数返回");
+
+    const auto &no_result_edge = *module.find_function(names[1]);
+    const auto &early = no_result_edge.block(target(no_result_edge.blocks.front()));
+    check(no_result_edge.blocks.size() == 2 && early.instructions.size() == 1 &&
+              std::get<Call>(early.instructions.front().operation).function ==
+                  module.find_function("println_i32")->id &&
+              std::get<Return>(early.terminator->instruction).value == Operand::constant(Type::I32, 9),
+          "整数操作数先 return 时，只保留副作用和 ret，不写槽或创建出口");
+    const auto &never = *module.find_function(names[2]);
+    const auto &never_body = never.block(target(never.blocks.front()));
+    check(never.entry_allocas.empty() && never.blocks.size() == 2 && never_body.instructions.empty() &&
+              std::get<Return>(never_body.terminator->instruction).value == Operand::constant(Type::I32, 10),
+          "所有 break 操作数都是 never 时不能分配数据槽或伪造结果");
+}
+
+// 从实际跳转目标检查组合控制流，并区分递归调用的源 main 和机器入口。
+void check_control_flow_integration() {
+    const auto crate = parse_crate(R"(
+        fn sum_to(limit: i32) -> i32 {
+            let mut i = 0;
+            let mut sum = 0;
+            while i < limit {
+                i += 1;
+                if i == 2 { continue; println_i32(99); }
+                sum += i;
+            }
+            loop {
+                if sum > 0 { break sum; println_i32(99); }
+                return 0;
+                println_i32(99);
+            }
+        }
+        fn main() {
+            let depth = get_i32();
+            if depth > 0 { main(); }
+            println_i32(depth);
+        }
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "组合循环和递归调用必须通过 IR 自检");
+    const auto names = rx::assign_function_names(sema);
+    const auto &module = artifact.module();
+    const auto target = [](const BasicBlock &block) {
+        return std::get<Branch>(block.terminator->instruction).target;
+    };
+    const auto &sum = *module.find_function(names[0]);
+    const auto condition = target(sum.blocks.front());
+    const auto &while_branch = std::get<CondBranch>(sum.block(condition).terminator->instruction);
+    const auto &skip = std::get<CondBranch>(sum.block(while_branch.when_true).terminator->instruction);
+    const auto &continue_block = sum.block(skip.when_true);
+    const auto &update_block = sum.block(skip.when_false);
+    check(continue_block.instructions.empty() && target(continue_block) == condition &&
+              !update_block.instructions.empty() && target(update_block) == condition,
+          "continue 跳过累加和后续打印；两条回边都重新计算 while 条件");
+
+    const auto loop_body = target(sum.block(while_branch.when_false));
+    const auto &stop = std::get<CondBranch>(sum.block(loop_body).terminator->instruction);
+    const auto &break_block = sum.block(stop.when_true);
+    check(break_block.instructions.size() == 2, "break 只读 sum 并写结果，不生成后续打印");
+    const auto &store = std::get<Store>(break_block.instructions.back().operation);
+    const auto exit_id = target(break_block);
+    const auto &exit = sum.block(exit_id);
+    for (const auto &block : sum.blocks) {
+        const auto &terminator = block.terminator->instruction;
+        if (const auto *jump = std::get_if<Branch>(&terminator))
+            check(jump->target != exit_id || block.id == break_block.id,
+                  "只有写入结果的 break 块能跳到 loop 出口");
+        if (const auto *choice = std::get_if<CondBranch>(&terminator))
+            check(choice->when_true != exit_id && choice->when_false != exit_id,
+                  "条件分支不能绕过 break 的写槽直接进入 loop 出口");
+    }
+    check(exit.instructions.size() == 1 &&
+              std::get<Load>(exit.instructions.front().operation).address == store.address &&
+              std::get<Return>(exit.terminator->instruction).value ==
+                  Operand::local(Type::I32, *exit.instructions.front().result),
+          "loop 的正常出口读出 break 写入的结果，交给函数尾部返回");
+    const auto &return_block = sum.block(stop.when_false);
+    check(return_block.instructions.empty() &&
+              std::get<Return>(return_block.terminator->instruction).value ==
+                  Operand::constant(Type::I32, 0),
+          "提前 return 不写入结果槽、不跳向 loop 出口，也不生成后续打印");
+
+    const auto &source_main = *module.find_function(names[sema.main_function->index]);
+    const auto &recurse = std::get<CondBranch>(source_main.blocks.front().terminator->instruction);
+    const auto &recursive_block = source_main.block(recurse.when_true);
+    check(source_main.linkage == Linkage::Internal &&
+              source_main.signature == Signature{Type::Void, {}} &&
+              recursive_block.instructions.size() == 1 &&
+              std::get<Call>(recursive_block.instructions.front().operation).function == source_main.id &&
+              target(recursive_block) == recurse.when_false,
+          "递归调用指向内部源 main，返回后继续执行外层源 main");
+    const auto &entry = *module.find_function("main");
+    const auto &wrapper = entry.blocks.front();
+    check(entry.linkage == Linkage::External && entry.signature == Signature{Type::I32, {}} &&
+              wrapper.instructions.size() == 1 &&
+              std::get<Call>(wrapper.instructions.front().operation).function == source_main.id &&
+              std::get<Return>(wrapper.terminator->instruction).value == Operand::constant(Type::I32, 0),
+          "只有独立的机器入口负责调用源 main 并返回状态 0");
+}
+
 void run_tests() {
     check_function_names();
     check_println();
@@ -1476,23 +2114,26 @@ void run_tests() {
     check_assignment_coercion_order();
     check_assignment_early_return();
     check_assignment_unit_tails();
+    check_unit_if();
+    check_integer_if_merge();
+    check_if_early_return();
+    check_short_circuit();
+    check_while();
+    check_loop_targets();
+    check_loop_without_exit();
+    check_loop_results();
+    check_control_flow_integration();
     check_entry("fn main() {}");
     check_entry("fn main() -> () {}");
     check_entry("fn __rx_fn_1() {} fn main() {} fn helper() {}");
     check_entry("const LEN: usize = 2; struct Data { values: [i32; LEN] } impl Data { const VALUE: i32 = 7; } fn main() {}");
     for (const auto &source : {
-             "fn main() { let x = true && false; }",
-             "fn main() { let x = false && { return; true }; println_i32(7); }",
-             "fn main() { let x = true || { return; false }; println_i32(7); }",
-             "fn main() { let x = { return; true } && false; }",
-             "fn main() { let x = { return; false } || true; }",
              "fn main() { Box::<i32>::new(1); }",
              "fn main() { Vec::<i32>::new(); }",
              "fn main() { let x = { (); }; }",
              "fn main() { let x = { [1, 2] }; }",
              "fn main() { let mut x = [1]; x = [2]; }",
              "struct Data { value: i32 } fn main() { let mut x = Data { value: 1 }; x = Data { value: 2 }; }",
-             "fn main() { let x = loop {}; }",
              "fn unused(value: &[i32; 1]) {} fn main() {}",
              "fn unused() -> [i32; 1] { [1] } fn main() {}",
              "fn main() {} fn unused() { println_i32(99); let x = [1, 2]; }",

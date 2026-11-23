@@ -137,6 +137,8 @@ private:
     // 已有 Error 时静默失败；不兼容时报错；不改写表达式本身的类型。
     bool require_coerce(const ExpressionResult &from, const SemanticType &to,
                         Span at);
+    // 循环体和无分号语句可以发散；只有正常完成时才要求 unit 结果。
+    bool require_unit_or_divergence(const ExpressionResult &from, Span at);
     // 固定使用位置的转换检查；成功时把选定路径记录到该使用位置。
     bool require_coerce_at(const UseSite &site, const ExpressionResult &from,
                            const SemanticType &to, Span at);

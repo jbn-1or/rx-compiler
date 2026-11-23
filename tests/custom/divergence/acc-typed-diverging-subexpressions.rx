@@ -88,6 +88,13 @@ fn if_condition() -> i32 {
 fn while_condition() -> i32 {
     while { loop {}; false } {};
 }
+fn loop_body() -> i32 {
+    loop { loop {}; 42 };
+}
+fn semicolonless_block() -> i32 {
+    { return 1; 42 }
+    2
+}
 fn loop_break_operand() -> i32 {
     loop { break { loop {}; 42 }; };
 }

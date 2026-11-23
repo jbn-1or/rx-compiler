@@ -154,13 +154,27 @@ void print_module(const Module &module, std::ostream &destination) {
                     instruction(output, module, allocation);
             for (const auto &operation : block.instructions)
                 instruction(output, module, operation);
-            const auto &return_instruction = *block.terminator;
-            output << "  ret ";
-            // 有返回值时打印操作数，裸返回打印 void。
-            if (return_instruction.value)
-                operand(output, *return_instruction.value);
-            else
-                output << "void";
+            const auto &terminator = *block.terminator;
+            // ret 打印返回值；跳转打印目标标签，condbr 先打印 i1 条件。
+            if (const auto *return_instruction =
+                    std::get_if<Return>(&terminator.instruction)) {
+                output << "  ret ";
+                // 有返回值时打印操作数，裸返回打印 void。
+                if (return_instruction->value)
+                    operand(output, *return_instruction->value);
+                else
+                    output << "void";
+            } else if (const auto *branch =
+                           std::get_if<Branch>(&terminator.instruction)) {
+                output << "  br label %bb_" << branch->target.index;
+            } else {
+                const auto &conditional =
+                    std::get<CondBranch>(terminator.instruction);
+                output << "  br ";
+                operand(output, conditional.condition);
+                output << ", label %bb_" << conditional.when_true.index
+                       << ", label %bb_" << conditional.when_false.index;
+            }
             output << '\n';
         }
         output << "}\n\n";

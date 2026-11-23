@@ -51,6 +51,6 @@
     "source": "rej-unreachable-loop-tail.rx",
     "stage": "semantic",
     "compilation_success": false,
-    "description": "A loop body must have a unit-compatible tail even when that tail is unreachable."
+    "description": "A divergent loop body may have a non-unit tail, but an unreachable call in the tail must still satisfy its parameter types."
   }
 ]

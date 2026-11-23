@@ -182,11 +182,37 @@ struct Instruction {
 struct Return {
     std::optional<Operand> value; // 要返回的操作数，类型必须匹配函数返回类型；空值表示 ret void。
 };
-// 保存一段顺序执行的指令，最后必须有一条结束该块的 ret 指令。
+// 表示无条件跳转，当前块只沿这一条边进入目标块。
+struct Branch {
+    BlockId target; // 要进入的目标块，必须属于当前函数且不能是入口块。
+};
+// 表示条件跳转；条件必须是 i1，运行时会从两条边中选择一条。
+struct CondBranch {
+    Operand condition;  // 用于选择的 i1 条件，可以是常量或前面指令的结果。
+    BlockId when_true;  // 条件为 true 时进入的目标块。
+    BlockId when_false; // 条件为 false 时进入的目标块。
+};
+// 表示一条终结指令：ret、br 或 condbr。
+// value 保留 ret 的返回值，让只关心返回值的调用方可以直接读取；
+// instruction 记录终结指令的具体种类和跳转目标。
+struct Terminator {
+    std::optional<Operand> value; // ret 的返回值；br 和 condbr 为空。
+    std::variant<Return, Branch, CondBranch> instruction; // 终结指令的具体内容。
+
+    // 默认构造为空 ret void，便于手工补全只有一种结束方式的测试块。
+    Terminator() : instruction(Return{}) {}
+    // 从 ret 构造，同时同步 value，保证两个视图读到一致的数据。
+    Terminator(Return ret) : value(ret.value), instruction(ret) {}
+    // 从无条件跳转构造。
+    Terminator(Branch branch) : instruction(branch) {}
+    // 从条件跳转构造。
+    Terminator(CondBranch branch) : instruction(branch) {}
+};
+// 保存一段顺序执行的指令，最后必须有一条结束该块的终结指令。
 struct BasicBlock {
     BlockId id; // 这个块的 ID，用来查找块，并生成 bb_<下标> 形式的标签。
     std::vector<Instruction> instructions; // 按执行顺序排列的普通指令，不包含末尾的终结指令。
-    std::optional<Return> terminator; // 结束这个块的指令；构建时可以暂缺，但模块检查通过前必须补上。
+    std::optional<Terminator> terminator; // 结束这个块的指令；构建时可以暂缺，但模块检查通过前必须补上。
 };
 
 // 保存一个函数的名称、参数、返回类型和函数体；没有基本块时只有声明。

@@ -1,6 +1,7 @@
 // 分支与 loop 的固定目标通过 require_coerce 检查，无目标时独立定型后求 LUB。
 // 所有分支及不可达 break 仍参与检查；while 条件屏障限制跳转目标。
 #include "sema/body/checker.hpp"
+#include "sema/sema.hpp"
 #include <algorithm>
 #include <utility>
 
@@ -60,10 +61,13 @@ ExpressionResult BodyChecker::check_if(const IfExpression &expression,
                           (then_result.diverges && else_result.diverges);
     if (expected) {
         // 两支分别检查，不能用短路逻辑跳过后一支的诊断。
-        const bool then_ok =
-            require_coerce(then_result, *expected, expression.then->span);
-        const bool else_ok =
-            require_coerce(else_result, *expected, expression.else_->span);
+        // 固定目标也是结果边，转换路径要记录到各自的使用位置。
+        const bool then_ok = require_coerce_at(
+            UseSite{&expression, UseKind::IfBranch, 0}, then_result,
+            *expected, expression.then->span);
+        const bool else_ok = require_coerce_at(
+            UseSite{&expression, UseKind::IfBranch, 1}, else_result,
+            *expected, expression.else_->span);
         if (!condition_ok || !then_ok || !else_ok)
             return ExpressionResult::error();
         // 两支类型均为 ! 时，结果仍取 ! 而不是期望类型。
@@ -79,6 +83,12 @@ ExpressionResult BodyChecker::check_if(const IfExpression &expression,
         diagnostics_.error(expression.span, "if branches do not have a common type");
         return ExpressionResult::error();
     }
+    // LUB 目标确定后，为之前所有分支边补记同一个最终转换路径。
+    if (!require_coerce_at(UseSite{&expression, UseKind::IfBranch, 0},
+                           then_result, common, expression.then->span) ||
+        !require_coerce_at(UseSite{&expression, UseKind::IfBranch, 1},
+                           else_result, common, expression.else_->span))
+        return ExpressionResult::error();
     return ExpressionResult::value(common, diverges);
 }
 
@@ -87,67 +97,88 @@ ExpressionResult BodyChecker::check_if(const IfExpression &expression,
 ExpressionResult BodyChecker::check_while(const WhileExpression &expression) {
     if (!expression.condition || !expression.body)
         return ExpressionResult::error();
+    // while 在检查条件前就分配身份，映射供 break/continue 记录固定目标。
+    const LoopId loop_id{analyzer_.result_.loops.size()};
+    analyzer_.result_.loops.push_back({LoopFact::Kind::While});
+    analyzer_.result_.while_expressions.insert_or_assign(&expression, loop_id);
     // 条件里的跳转只能看到屏障帧：即使外层是 loop 也不能从条件跳出去。
-    loop_frames_.push_back({LoopFrame::Kind::WhileConditionBarrier, std::nullopt, {}});
+    loop_frames_.push_back(
+        {LoopFrame::Kind::WhileConditionBarrier, std::nullopt, std::nullopt, {}});
     const auto condition =
         check_bool_condition(*expression.condition, expression.condition->span);
     loop_frames_.pop_back();
 
-    const auto unit = SemanticType::unit();
     // 循环体单独压入 while 帧，break/continue 才允许绑到本循环。
-    loop_frames_.push_back({LoopFrame::Kind::While, std::nullopt, {}});
-    const auto body = check_expression(*expression.body, &unit);
+    loop_frames_.push_back(
+        {LoopFrame::Kind::While, loop_id, std::nullopt, {}});
+    // 先完整检查块，只有正常完成时才要求 unit，不对发散块的尾值强制转换。
+    const auto body = check_expression(*expression.body, nullptr);
     loop_frames_.pop_back();
-    // 循环体是块，非尾语句后必须能收敛到 ()。
-    const bool body_ok = require_coerce(body, unit, expression.body->span);
+    const bool body_ok = require_unit_or_divergence(body, expression.body->span);
     // 条件或循环体任一不合法，整体记为 Error。
     if (condition.type.is_error() || !body_ok)
         return ExpressionResult::error();
     // 即使条件恒为 true，while 的静态类型也固定为 ()。
-    return ExpressionResult::value(unit, condition.diverges);
+    return ExpressionResult::value(SemanticType::unit(), condition.diverges);
 }
 
-// 检查 loop 表达式。帧里记录外层期望类型（如有），循环体固定按 () 检查；
+// 检查 loop 表达式。帧里记录外层期望类型（如有），循环体必须是 unit 或发散；
 // 所有 break 的值先收集到帧里，循环结束后再按固定目标或公共类型定型。
 // 无 break 或全部 break 值类型为 ! 时，loop 类型为 !；发散状态单独汇总。
 ExpressionResult BodyChecker::check_loop(const LoopExpression &expression,
                                          const SemanticType *expected) {
     if (!expression.body)
         return ExpressionResult::error();
-    // 记下外层期望，供循环体内的 break 提前核对；帧同时收集 break 值。
+    // loop 同样先分配身份，再压入帧；帧记录外层期望并收集 break 值。
+    const LoopId loop_id{analyzer_.result_.loops.size()};
+    analyzer_.result_.loops.push_back({LoopFact::Kind::Loop});
+    analyzer_.result_.loop_expressions.insert_or_assign(&expression, loop_id);
     const auto target = expected ? std::optional(*expected) : std::nullopt;
-    loop_frames_.push_back({LoopFrame::Kind::Loop, target, {}});
-    const auto unit = SemanticType::unit();
-    const auto body = check_expression(*expression.body, &unit);
+    loop_frames_.push_back({LoopFrame::Kind::Loop, loop_id, target, {}});
+    const auto body = check_expression(*expression.body, nullptr);
     // 检查期间可能压入嵌套循环导致扩容，先整体取走帧再出栈。
     LoopFrame frame = std::move(loop_frames_.back());
     loop_frames_.pop_back();
-    // 循环体是块，非尾语句后必须能收敛到 ()。
-    if (!require_coerce(body, unit, expression.body->span))
+    // 循环体尾值不参与结果推导；只有 break 操作数可以决定结果类型。
+    if (!require_unit_or_divergence(body, expression.body->span))
         return ExpressionResult::error();
     // 任意 break 值出错，整个 loop 记为 Error。
     if (std::any_of(frame.break_values.begin(), frame.break_values.end(),
-                    [](const auto &value) { return value.type.is_error(); }))
+                    [](const auto &record) {
+                        return record.result.type.is_error();
+                    }))
         return ExpressionResult::error();
     // 没有 break 或全部 break 的操作数为 ! 时，loop 仍为 !。
     // all_of 对空区间返回 true，正好覆盖“无 break”的情况。
     if (std::all_of(frame.break_values.begin(), frame.break_values.end(),
-                    [](const auto &value) { return value.type.is_never(); }))
+                    [](const auto &record) {
+                        return record.result.type.is_never();
+                    }))
         return ExpressionResult::value(SemanticType::never());
     // break 操作数也可能有具体类型但发散；循环类型仍按 break 值定型。
     const bool diverges = std::all_of(
         frame.break_values.begin(), frame.break_values.end(),
-        [](const auto &value) { return value.diverges; });
-    // 有外层固定目标时，break 值已在 check_break 中逐一核对。
+        [](const auto &record) { return record.result.diverges; });
+    // 有外层固定目标时，break 值已在 check_break 中逐一核对并记录转换。
     if (frame.expected)
         return ExpressionResult::value(*frame.expected, diverges);
     // 没有外层期望：用所有 break 值的公共类型给 loop 定型。
-    const auto common = compute_least_upper_bound(frame.break_values);
+    std::vector<ExpressionResult> results;
+    results.reserve(frame.break_values.size());
+    for (const auto &record : frame.break_values)
+        results.push_back(record.result);
+    const auto common = compute_least_upper_bound(results);
     if (common.is_error()) {
         diagnostics_.error(
             expression.span, "loop break values do not have a common type");
         return ExpressionResult::error();
     }
+    // LUB 目标确定后，为所有 break 结果边补记同一个最终转换路径。
+    for (const auto &record : frame.break_values)
+        if (!require_coerce_at(
+                UseSite{record.expression, UseKind::BreakValue, 0},
+                record.result, common, record.expression->span))
+            return ExpressionResult::error();
     return ExpressionResult::value(common, diverges);
 }
 
@@ -166,11 +197,16 @@ ExpressionResult BodyChecker::check_break(const BreakExpression &expression) {
             check_expression(*expression.value, nullptr);
         return ExpressionResult::value(SemanticType::never());
     }
+    // 目标帧在子表达式检查期间可能因 vector 扩容失效，先复制固定身份。
+    const auto loop_id = loop_frames_[target.index].id;
     if (loop_frames_[target.index].kind == LoopFrame::Kind::While) {
         // while 循环不产生值，只接受裸 break；带值时操作数仅做错误恢复。
         if (expression.value) {
             diagnostics_.error(expression.span, "while loops only allow bare break");
             check_expression(*expression.value, nullptr);
+        } else if (loop_id) {
+            analyzer_.result_.break_targets.insert_or_assign(&expression,
+                                                              *loop_id);
         }
         return ExpressionResult::value(SemanticType::never());
     }
@@ -181,11 +217,15 @@ ExpressionResult BodyChecker::check_break(const BreakExpression &expression) {
                                          expected ? &*expected : nullptr)
                       : ExpressionResult::value(SemanticType::unit());
     const Span at = expression.value ? expression.value->span : expression.span;
-    // 有固定目标时当场核对 break 值的兼容性，失败记为 Error。
-    if (expected && !require_coerce(result, *expected, at))
+    // 有固定目标时当场核对 break 值的兼容性，并记录这个结果边的转换路径。
+    if (expected && !require_coerce_at(
+                        UseSite{&expression, UseKind::BreakValue, 0}, result,
+                        *expected, at))
         result = ExpressionResult::error();
-    // 记录本次 break 的值，等 loop 退出时统一定型。
-    loop_frames_[target.index].break_values.push_back(result);
+    // 记录本次 break 的值，等 loop 退出时统一定型或补记 LUB 转换。
+    loop_frames_[target.index].break_values.push_back({&expression, result});
+    if (loop_id)
+        analyzer_.result_.break_targets.insert_or_assign(&expression, *loop_id);
     return ExpressionResult::value(SemanticType::never());
 }
 
@@ -193,11 +233,16 @@ ExpressionResult BodyChecker::check_break(const BreakExpression &expression) {
 // 被 while 条件屏障挡住与在循环外一样都算非法目标。结果类型为 !。
 ExpressionResult BodyChecker::check_continue(const ContinueExpression &expression) {
     const auto target = find_jump_target();
-    if (target.status != JumpTargetStatus::Found)
+    if (target.status != JumpTargetStatus::Found) {
         diagnostics_.error(expression.span,
             target.status == JumpTargetStatus::BlockedByBarrier
                 ? "continue cannot target a loop from a while condition"
                 : "continue outside a loop");
+    } else if (loop_frames_[target.index].id) {
+        // 合法 continue 固定绑定到最近的循环，供 IR 生成直接使用。
+        analyzer_.result_.continue_targets.insert_or_assign(
+            &expression, *loop_frames_[target.index].id);
+    }
     // 即使目标非法也返回 !，避免错误恢复时再产生级联类型错误。
     return ExpressionResult::value(SemanticType::never());
 }

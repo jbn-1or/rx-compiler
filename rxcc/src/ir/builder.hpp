@@ -49,14 +49,21 @@ public:
     Operand trunc(Type target_type, Operand value);
     // 添加与当前函数返回类型匹配的 ret 指令，然后取消选中的基本块。
     void ret(std::optional<Operand> value = std::nullopt);
+    // 添加无条件跳转；目标必须在当前函数且不能是入口块，发出后关闭当前插入点。
+    void branch(BlockId target);
+    // 添加条件跳转；条件必须是 i1，两个目标都在当前函数且不能是入口块，
+    // 发出后关闭当前插入点。
+    void cond_branch(Operand condition, BlockId when_true, BlockId when_false);
 
 private:
     // 返回当前块所属的函数；没有选中块或块已经结束时抛出 logic_error。
     Function &open_function() const;
     // 添加普通指令；有数据结果时分配值 ID，无结果时返回空操作数。
     Operand append(Type type, Operation operation);
-    // 设置当前块的 ret 指令，并取消选中的基本块。
-    void terminate(Return terminator);
+    // 检查跳转目标是否属于当前函数、存在且不是入口块。
+    void require_target(const Function &function, BlockId target) const;
+    // 设置当前块的终结指令，并取消选中的基本块。
+    void terminate(Terminator terminator);
     // 检查操作数能否用于当前函数；不符合条件时抛出 logic_error。
     void require_operand(const Operand &operand) const;
     Module &module_; // 正在构建的模块引用；使用构建器期间，调用方不能释放这个模块。

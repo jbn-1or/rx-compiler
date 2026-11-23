@@ -102,6 +102,7 @@ struct SemanticResult {
     std::vector<std::unique_ptr<FunctionSymbol>> functions;
     std::vector<std::unique_ptr<ConstantSymbol>> constants;
     std::vector<std::unique_ptr<Symbol>> builtins;
+    std::vector<LoopFact> loops; // 按 LoopId.index 保存每个循环的种类。
 
     std::optional<FunctionId> main_function;
     std::unordered_map<const Struct *, StructId> struct_declarations;
@@ -112,6 +113,11 @@ struct SemanticResult {
     std::vector<Binding> locals;
     std::map<FunctionId, FunctionLocals> function_locals;
     std::unordered_map<const LetStatement *, LocalId> let_bindings;
+    // 循环表达式到语义身份，以及 break/continue 已经确定的跳转目标。
+    std::unordered_map<const LoopExpression *, LoopId> loop_expressions;
+    std::unordered_map<const WhileExpression *, LoopId> while_expressions;
+    std::unordered_map<const BreakExpression *, LoopId> break_targets;
+    std::unordered_map<const ContinueExpression *, LoopId> continue_targets;
     // 保存作为值检查的表达式；被调用的函数路径和类型路径不在此列。
     // 查询时必须检查记录是否存在，缺失时不能用默认值代替。
     std::unordered_map<const Expression *, ExpressionResult> expressions;

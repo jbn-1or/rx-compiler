@@ -171,8 +171,18 @@ Operand IRBuilder::trunc(Type target_type, Operand value) {
     return append(target_type, Trunc{value, target_type});
 }
 
-// 给当前块添加 ret 指令，然后取消选中的块，防止继续向它添加指令。
-void IRBuilder::terminate(Return terminator) {
+// 检查跳转目标是否属于当前函数、存在且不是入口块。
+// 入口块只能由函数调用进入；跳转进入入口会制造无法用普通 CFG 表达的前驱。
+void IRBuilder::require_target(const Function &function,
+                               BlockId target) const {
+    require(target.function == function.id &&
+                target.index < function.blocks.size(),
+            "IR 跳转目标不存在或不属于当前函数");
+    require(target.index != 0, "IR 跳转不能以入口块为目标");
+}
+
+// 给当前块添加终结指令，然后取消选中的块，防止继续向它添加指令。
+void IRBuilder::terminate(Terminator terminator) {
     open_function();
     current_block()->terminator = std::move(terminator);
     clear_insert_point();
@@ -186,7 +196,25 @@ void IRBuilder::ret(std::optional<Operand> value) {
         require_operand(*value);
     const bool valid = value ? value->type == result : result == Type::Void;
     require(valid, "IR ret 与函数结果类型不匹配");
-    terminate(Return{value});
+    terminate(Terminator{Return{value}});
+}
+
+// 添加无条件跳转；检查目标后关闭当前插入点。
+void IRBuilder::branch(BlockId target) {
+    auto &function = open_function();
+    require_target(function, target);
+    terminate(Terminator{Branch{target}});
+}
+
+// 添加条件跳转；条件和两个目标都先检查，失败时不修改当前块。
+void IRBuilder::cond_branch(Operand condition, BlockId when_true,
+                            BlockId when_false) {
+    auto &function = open_function();
+    require_operand(condition);
+    require(condition.type == Type::I1, "IR condbr 条件必须为 i1");
+    require_target(function, when_true);
+    require_target(function, when_false);
+    terminate(Terminator{CondBranch{condition, when_true, when_false}});
 }
 
 } // namespace rx::ir

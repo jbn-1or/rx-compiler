@@ -136,6 +136,14 @@ bool BodyChecker::require_coerce(const ExpressionResult &from,
     return require_coercion(nullptr, from, to, at);
 }
 
+// 只检查丢弃结果的 unit 上下文，不影响带固定目标的强制转换。
+bool BodyChecker::require_unit_or_divergence(const ExpressionResult &from,
+                                            Span at) {
+    if (from.type.is_error())
+        return false;
+    return from.diverges || require_coerce(from, SemanticType::unit(), at);
+}
+
 // 固定使用位置的转换检查；成功时保存已选定的调整路径，供生成端直接执行。
 bool BodyChecker::require_coerce_at(const UseSite &site,
                                     const ExpressionResult &from,

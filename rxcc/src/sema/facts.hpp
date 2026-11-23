@@ -38,6 +38,12 @@ struct ExpressionResult {
     }
 };
 
+// 一个循环的语义身份和种类；IR 生成通过 LoopId 查找循环对应的跳转目标。
+struct LoopFact {
+    enum class Kind { While, Loop };
+    Kind kind = Kind::Loop; // 这个身份来自 while 还是 loop。
+};
+
 // 局部绑定的固定类型、能否重新赋值，以及区分同名绑定的编号。
 struct Binding {
     SemanticType type;

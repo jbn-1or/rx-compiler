@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the implemented P2-P5.4 IR subset with external LLVM 22 tools."""
+"""Validate the implemented P2-P6.8 IR subset with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -909,6 +909,363 @@ def main():
                 raise RuntimeError(f"{name}: nondeterministic LLVM text")
             modules.append((name, output, expected, stdin_data))
 
+        p06 = Path(__file__).resolve().parent / "ir" / "p06"
+        unit_if = p06 / "unit_if.rx"
+        if_values = p06 / "if_values.rx"
+        if_return = p06 / "if_return.rx"
+        short_circuit = p06 / "short_circuit.rx"
+        while_condition = p06 / "while_condition.rx"
+        loop_control = p06 / "loop_control.rx"
+        break_value = p06 / "break_value.rx"
+        reference_lub = p06 / "reference_lub.rx"
+        source_main_recursion = p06 / "source_main_recursion.rx"
+        for name, source_text, expected, stdin_data in (
+            ("p61-unit-if", unit_if.read_text(encoding="utf-8"),
+             unit_if.with_suffix(".out").read_bytes(), b""),
+            # 三次走不同路径；标记记录条件求值次数、未选中的条件和两层合流顺序。
+            ("p61-nested-if", """
+                fn marked(marker: i32) -> bool {
+                    println_i32(marker);
+                    get_i32() != 0
+                }
+                fn choose() {
+                    if marked(10) {
+                        println_i32(11);
+                        if marked(12) { println_i32(13); } else { println_i32(14); }
+                        println_i32(15);
+                    } else if marked(20) {
+                        println_i32(21);
+                    } else {
+                        println_i32(22);
+                    }
+                    println_i32(30);
+                }
+                fn main() { choose(); choose(); choose(); }
+             """, b"10\n11\n12\n14\n15\n30\n10\n20\n21\n30\n10\n20\n22\n30\n",
+             b"1\n0\n0\n1\n0\n0\n"),
+            ("p62-if-values", if_values.read_text(encoding="utf-8"),
+             if_values.with_suffix(".out").read_bytes(), b""),
+            # 外层 get 的值跨外层合流；then 中读取的 base 跨内层合流。
+            ("p62-nested-values", """
+                fn choose(flag: bool, inner: bool) -> i32 {
+                    let base = get_i32();
+                    get_i32() - if flag {
+                        println_i32(1);
+                        base + if inner { println_i32(2); 10 } else { println_i32(3); 20 }
+                    } else {
+                        println_i32(4);
+                        base + 30
+                    }
+                }
+                fn main() {
+                    println_i32(choose(true, true));
+                    println_i32(choose(true, false));
+                    println_i32(choose(false, true));
+                }
+             """, b"1\n2\n-9\n1\n3\n-19\n4\n-29\n", b"3\n4\n5\n6\n7\n8\n"),
+            ("p62-unsigned-values",
+             "fn pick(flag: bool) -> u32 { if flag { 4294967295u32 } else { 1u32 } } "
+             "fn main() { println_i32((pick(true) > 2u32) as i32); "
+             "println_i32((pick(false) > 2u32) as i32); }",
+             b"1\n0\n", b""),
+            ("p63-if-return", if_return.read_text(encoding="utf-8"),
+             if_return.with_suffix(".out").read_bytes(), b""),
+            ("p63-one-normal-edge", """
+                fn no_else(flag: bool) -> i32 {
+                    if flag { println_i32(1); return 7; }
+                    println_i32(2);
+                    8
+                }
+                fn initializer(flag: bool) -> i32 {
+                    let n = if flag { println_i32(3); 8 }
+                            else { println_i32(4); return 7; };
+                    println_i32(5);
+                    n + 1
+                }
+                fn main() {
+                    println_i32(no_else(true)); println_i32(no_else(false));
+                    println_i32(initializer(true)); println_i32(initializer(false));
+                }
+             """, b"1\n7\n2\n8\n3\n5\n9\n4\n7\n", b""),
+            ("p63-return-operand", """
+                fn partial(flag: bool) -> i32 {
+                    return if flag { println_i32(1); return 7; }
+                           else { println_i32(2); 8 };
+                }
+                fn both(flag: bool) -> i32 {
+                    return if flag { println_i32(3); return 11; }
+                           else { println_i32(4); return 12; };
+                    println_i32(99);
+                    13
+                }
+                fn main() {
+                    println_i32(partial(true)); println_i32(partial(false));
+                    println_i32(both(true)); println_i32(both(false));
+                }
+             """, b"1\n7\n2\n8\n3\n11\n4\n12\n", b""),
+            ("p63-return-in-condition", """
+                fn always() -> i32 {
+                    if { println_i32(1); return 9; true } {
+                        println_i32(99); 10
+                    } else { println_i32(99); 11 }
+                }
+                fn maybe(flag: bool) -> i32 {
+                    if (if flag { println_i32(2); false }
+                        else { println_i32(3); return 7; }) {
+                        println_i32(99); 10
+                    } else { println_i32(4); 8 }
+                }
+                fn main() {
+                    println_i32(always());
+                    println_i32(maybe(true)); println_i32(maybe(false));
+                }
+             """, b"1\n9\n2\n4\n8\n3\n7\n", b""),
+            ("p64-short-circuit", short_circuit.read_text(encoding="utf-8"),
+             short_circuit.with_suffix(".out").read_bytes(), b""),
+            # 由输入决定真假，标记同时检查调用次数、顺序和嵌套合流。
+            ("p64-dynamic-order", """
+                fn mark(tag: i32) -> bool { println_i32(tag); get_i32() != 0 }
+                fn main() {
+                    println_i32((mark(10) && mark(11)) as i32);
+                    println_i32((mark(20) || mark(21)) as i32);
+                    println_i32((mark(30) && mark(31)) as i32);
+                    println_i32((mark(40) || mark(41)) as i32);
+                    println_i32(((mark(50) && mark(51)) || (mark(52) && mark(53))) as i32);
+                    println_i32((mark(60) && (mark(61) || mark(62))) as i32);
+                }
+             """, b"10\n0\n20\n1\n30\n31\n0\n40\n41\n0\n50\n51\n52\n53\n1\n60\n61\n1\n",
+             b"0\n1\n1\n0\n0\n0\n1\n0\n1\n1\n1\n1\n"),
+            ("p64-early-return", """
+                fn with_call(flag: bool) {
+                    println_i32((flag && { println_i32(10); return; true }) as i32);
+                    println_i32(11);
+                }
+                fn with_assignment(flag: bool, out: &mut bool) {
+                    *out = flag || { println_i32(20); return; false };
+                    println_i32(21);
+                }
+                fn with_nested(flag: bool) -> bool {
+                    (flag && { println_i32(30); return false; true }) ||
+                        { println_i32(31); true }
+                }
+                fn left_exit() {
+                    let a = ({ println_i32(40); return; true }) && { println_i32(99); false };
+                    println_i32(99);
+                }
+                fn main() {
+                    with_call(false); with_call(true);
+                    let mut first = false;
+                    with_assignment(true, &mut first);
+                    println_i32(first as i32);
+                    let mut second = false;
+                    with_assignment(false, &mut second);
+                    println_i32(second as i32);
+                    println_i32(with_nested(false) as i32);
+                    println_i32(with_nested(true) as i32);
+                    left_exit();
+                }
+             """, b"0\n11\n10\n21\n1\n20\n0\n31\n1\n30\n0\n40\n", b""),
+            ("p65-while-condition", while_condition.read_text(encoding="utf-8"),
+             while_condition.with_suffix(".out").read_bytes(), b""),
+            # 回边须回到短路条件的起点；false 路径不能执行右侧或循环体。
+            ("p65-while-short-circuit", """
+                fn check(x: i32) -> bool { println_i32(10 + x); x < 2 }
+                fn step(x: i32) -> bool { println_i32(20 + x); true }
+                fn count(start: i32) {
+                    let mut x = start;
+                    while check(x) && step(x) {
+                        let next = x + 1;
+                        if x == 0 { println_i32(30); } else { println_i32(31); }
+                        x = next;
+                    }
+                    println_i32(100 + x);
+                }
+                fn main() { count(0); count(2); }
+             """, b"10\n20\n30\n11\n21\n31\n12\n102\n12\n102\n", b""),
+            ("p65-while-early-return", """
+                fn from_body(early: bool) -> i32 {
+                    let mut i = 0;
+                    while i < 2 {
+                        println_i32(i);
+                        if early && i == 1 { return 7; }
+                        i += 1;
+                    }
+                    println_i32(8);
+                    9
+                }
+                fn from_condition() -> i32 {
+                    while ({ println_i32(3); return 10; true }) { println_i32(99); }
+                    11
+                }
+                fn main() {
+                    println_i32(from_body(true)); println_i32(from_body(false));
+                    println_i32(from_condition());
+                }
+             """, b"0\n1\n7\n0\n1\n8\n9\n3\n10\n", b""),
+            ("p6-diverging-unit-contexts", """
+                fn late() -> i32 { println_i32(99); 8 }
+                fn before_exit() -> i32 { println_i32(13); 1 }
+                fn as_statement() -> i32 {
+                    { return 5; late() }
+                    println_i32(99);
+                    6
+                }
+                fn from_while(flag: bool) -> i32 {
+                    while flag { return 7; late() }
+                    9
+                }
+                fn from_loop() -> i32 {
+                    let mut count = 0;
+                    loop {
+                        if count == 1 { break 11; }
+                        count += 1;
+                        continue;
+                        late()
+                    }
+                }
+                fn in_tail(flag: bool) -> i32 {
+                    while flag { before_exit() + { return 15; late() } }
+                    17
+                }
+                fn main() {
+                    println_i32(as_statement());
+                    println_i32(from_while(true)); println_i32(from_while(false));
+                    println_i32(from_loop());
+                    println_i32(in_tail(true)); println_i32(in_tail(false));
+                }
+             """, b"5\n7\n9\n11\n13\n15\n17\n", b""),
+            ("p66-loop-control", loop_control.read_text(encoding="utf-8"),
+             loop_control.with_suffix(".out").read_bytes(), b""),
+            ("p66-nested-targets", """
+                fn check(i: i32) -> bool { println_i32(10 + i); i < 3 }
+                fn main() {
+                    let mut i = 0;
+                    while ({
+                        loop { println_i32(20 + i); break; }
+                        check(i)
+                    }) {
+                        i += 1;
+                        let mut j = 0;
+                        loop {
+                            j += 1;
+                            if j == 1 { continue; }
+                            println_i32(30 + i);
+                            break;
+                        }
+                        if i == 1 { continue; }
+                        if i == 2 { break; }
+                        println_i32(99);
+                    }
+                    println_i32(i);
+                }
+             """, b"20\n10\n31\n21\n11\n32\n2\n", b""),
+            # LLVM 验证整个模块，但 main 不调用这个无出口的函数。
+            ("p66-no-loop-exit",
+             "fn forever() -> i32 { let x = loop {}; println_i32(99); 8 } fn main() {}",
+             b"", b""),
+            ("p67-break-value", break_value.read_text(encoding="utf-8"),
+             break_value.with_suffix(".out").read_bytes(), b""),
+            ("p67-reference-lub", reference_lub.read_text(encoding="utf-8"),
+             reference_lub.with_suffix(".out").read_bytes(), b""),
+            ("p67-nested-break-value", """
+                fn choose(flag: bool) -> i32 {
+                    let result = loop {
+                        break (loop {
+                            if flag { break { println_i32(1); return 9; }; }
+                            println_i32(2);
+                            break get_i32();
+                        }) + 1;
+                    };
+                    result + 10
+                }
+                fn main() {
+                    println_i32(choose(true)); println_i32(choose(false));
+                    println_i32(get_i32());
+                }
+             """, b"1\n9\n2\n18\n20\n", b"7\n20\n"),
+            ("p67-result-edge-adjustments", """
+                fn choose(flag: bool) {
+                    let a = 10;
+                    let b = 20;
+                    let p = &a;
+                    let from_if = if flag { &p } else { &b };
+                    let from_loop = loop {
+                        if flag { break &b; }
+                        break &p;
+                    };
+                    println_i32(*from_if); println_i32(*from_loop);
+                    let fixed: &i32 = loop { break &p; };
+                    println_i32(*fixed);
+                }
+                fn main() { choose(true); choose(false); }
+             """, b"10\n20\n10\n20\n10\n10\n", b""),
+            ("p67-unit-and-bool-break", """
+                fn main() {
+                    loop { break { println_i32(1); }; }
+                    while loop { println_i32(2); break false; } { println_i32(99); }
+                    let yes = loop { break true; };
+                    let max: u32 = loop { break 4294967295; };
+                    println_i32(yes as i32);
+                    println_i32((max > 1u32) as i32);
+                }
+             """, b"1\n2\n1\n1\n", b""),
+            ("p68-sum-to", """
+                fn sum_to(limit: i32) -> i32 {
+                    let mut i = 0;
+                    let mut sum = 0;
+                    while i < limit {
+                        i += 1;
+                        if i == 2 { continue; }
+                        sum += i;
+                    }
+                    loop {
+                        if sum > 0 { break sum; }
+                        return 0;
+                    }
+                }
+                fn main() { println_i32(sum_to(4)); println_i32(sum_to(0)); }
+             """, b"8\n0\n", b""),
+            ("p68-combined-side-effects", """
+                fn mark_positive(sum: &i32) -> bool { println_i32(100 + *sum); true }
+                fn sum_to(limit: i32) -> i32 {
+                    let mut i = 0;
+                    let mut sum = 0;
+                    while i < limit {
+                        i += 1;
+                        if i == 2 { continue; println_i32(99); }
+                        sum += i;
+                    }
+                    loop {
+                        if sum > 0 && mark_positive(&sum) { break sum; println_i32(99); }
+                        return 0;
+                        println_i32(99);
+                    }
+                }
+                fn main() { println_i32(sum_to(4)); println_i32(sum_to(0)); }
+             """, b"108\n8\n0\n", b""),
+            ("p68-recursive-call-order", """
+                fn mark(value: i32) -> i32 { println_i32(value); value }
+                fn score(n: i32, base: i32) -> i32 {
+                    let saved = base + n * 10;
+                    if n == 0 { return saved; }
+                    let inner = score(n - 1, base + 1);
+                    saved + inner
+                }
+                fn report(n: i32) {
+                    println_i32(score(mark(n), if get_i32() != 0 { mark(10) } else { mark(20) }));
+                }
+                fn main() { report(2); report(1); }
+             """, b"2\n10\n63\n1\n20\n51\n", b"1 0\n"),
+            ("p68-source-main-recursion", source_main_recursion.read_text(encoding="utf-8"),
+             source_main_recursion.with_suffix(".out").read_bytes(),
+             source_main_recursion.with_suffix(".in").read_bytes()),
+        ):
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(source_text, encoding="utf-8")
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            modules.append((name, output, expected, stdin_data))
+
         for name, command, expected in (
             ("model-smoke", [args.model_test], b""),
             ("model-values", [args.model_test, "--emit-model"], b""),
@@ -950,14 +1307,8 @@ def main():
         for index, contents in enumerate((
             "fn main() { Box::<i32>::new(1); }",
             "fn main() { Vec::<i32>::new(); }",
-            "fn main() { let x = true && false; }",
-            "fn main() { let x = false && { return; true }; println_i32(7); }",
-            "fn main() { let x = true || { return; false }; println_i32(7); }",
-            "fn main() { let x = { return; true } && false; }",
-            "fn main() { let x = { return; false } || true; }",
             "fn main() { let x = { (); }; }",
             "fn main() { let x = { [1, 2] }; }",
-            "fn main() { let x = loop {}; }",
             "fn unused(value: &[i32; 1]) {} fn main() {}",
             "fn unused() -> [i32; 1] { [1] } fn main() {}",
             "fn main() {} fn unused() { println_i32(99); let x = [1, 2]; }",
@@ -990,8 +1341,6 @@ def main():
         for index, contents in enumerate((
             "fn main(value: i32) {}",
             "fn main<'a>() {}",
-            "fn main() {} fn unused() { let x: i32 = true; }",
-            "fn main() { return; let x = missing; }",
             "fn main() { println_i32(true); }",
             "fn main() { println_i32(7u32); }",
             "fn println_i32() {} fn main() { println_i32(); }",
@@ -1028,8 +1377,43 @@ def main():
             "fn main() { let a = 1; let mut b = 2; let result = &&a < &&mut b; }",
             "fn main() { let a = 1; let b = 2; let result = a < &b; }",
             "fn main() { let a = 1; let b = 2; let result = &&a < &b; }",
-            "fn main() { let result = &false && true; }",
             "fn bad(a: &Box<i32>, b: &Box<i32>) -> bool { a < b } fn main() {}",
+            # P6.1：条件必须为 bool，且运行时不执行的分支仍须通过完整语义检查。
+            "fn main() { if 1 { println_i32(1); } }",
+            "fn main() { if true { println_i32(1); } else { println_i32(missing); } }",
+            # 同为 LLVM i32 不代表同一种源整数类型。
+            "fn main() { let value = if true { 1i32 } else { 1u32 }; }",
+            # P6.3：两支都返回或条件直接返回时，不可达源码仍须检查名称和类型。
+            "fn main() { if true { return; } else { return; }; println_i32(missing); }",
+            "fn main() { if { return; true } { println_i32(true); } }",
+            # P6.4：短路不改变 bool 操作数要求，也不能跳过对右侧的语义检查。
+            "fn main() { let result = &false && true; }",
+            "fn main() { let result = true || 1; }",
+            "fn main() { let result = false && missing; }",
+            # P6.5：条件必须为 bool，且零次循环的体仍需通过名称和类型检查。
+            "fn main() { while 1 {} }",
+            "fn main() { while false { 1 } }",
+            "fn main() { while false { println_i32(missing); } }",
+            # 只允许保证发散的非 unit 块；仍要检查不可达尾表达式本身。
+            "fn f(flag: bool) { { if flag { return; } 1 } println_i32(2); } fn main() {}",
+            "fn f(flag: bool) { loop { if flag { return; } 1 } } fn main() {}",
+            "fn main() { while true { return; missing } }",
+            "fn main() { { return; 1 + true } println_i32(2); }",
+            "fn main() { let n: i32 = { return; true }; }",
+            # P6.6：不能跳到循环外，也不能越过 while 条件屏障。
+            "fn main() { break; }",
+            "fn main() { continue; }",
+            "fn main() { while ({ break; true }) {} }",
+            "fn main() { loop { while ({ continue; true }) {} break; } }",
+            "fn main() { while true { break 1; } }",
+            # P6.7：不可达的 break 也要满足固定目标，不能隐式改变整数类型或恢复可变权限。
+            "fn main() { let number: u32 = loop { break 1; break 2i32; }; }",
+            "fn main() { let x = 1; let r: &mut i32 = loop { break &x; }; }",
+            # P6.8：未调用的函数和被 return/break/continue 跳过的源码也必须检查。
+            "fn main() {} fn unused() { let x: i32 = true; }",
+            "fn main() { return; let x = missing; }",
+            "fn main() { loop { break; println_i32(missing); } }",
+            "fn main() {} fn unused() { loop { continue; println_i32(true); } }",
         )):
             invalid_source = temp / f"semantic-error-{index}.rx"
             invalid_source.write_text(contents, encoding="utf-8")
@@ -1073,7 +1457,7 @@ def main():
                     if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
                         raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
                                            f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
-    print(f"P2-P5.4 IR tests passed: {len(modules)} modules verified" +
+    print(f"P2-P6.8 IR tests passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

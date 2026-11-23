@@ -21,17 +21,15 @@ GenerationContext::finish_scalar_operand(ir::Operand value,
 std::optional<EmitResult>
 GenerationContext::emit_binary(const BinaryExpression &expression,
                                LocalPlaces &locals) {
-    // 短路运算不能沿用两侧必求值的流程；必须在任一侧 return 前拒绝。
+    // 短路运算不能先求值两侧，必须在控制流中按左侧结果选择是否执行右侧。
     if (expression.operation == BinaryOperator::LogicalAnd ||
-        expression.operation == BinaryOperator::LogicalOr) {
-        diagnostics << "IR 生成尚未支持短路逻辑（P6）\n";
-        return std::nullopt;
-    }
+        expression.operation == BinaryOperator::LogicalOr)
+        return emit_logical(expression, locals);
     const auto &left_type =
         semantics.expressions.at(expression.left.get()).type;
     const auto &right_type =
         semantics.expressions.at(expression.right.get()).type;
-    // 先完成两侧求值，引用操作数在这里只得到指针。
+    // 非短路运算先完成两侧求值，引用操作数在这里只得到指针。
     auto left = emit_value(*expression.left, locals);
     if (!left)
         return std::nullopt;
@@ -179,7 +177,7 @@ std::optional<ir::Operand> GenerationContext::emit_binary_operation(
                             : ir::BinaryOp::LogicalShiftRight;
         return builder.binary(shift, left, count);
     }
-    // 短路逻辑已在求值入口拒绝，不属于标量运算发射接口。
+    // 短路逻辑由 emit_logical 生成控制流，不经过标量运算发射接口。
     case BinaryOperator::LogicalAnd:
     case BinaryOperator::LogicalOr:
         break;

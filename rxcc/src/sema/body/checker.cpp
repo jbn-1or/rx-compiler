@@ -83,11 +83,11 @@ BodyChecker::StatementResult BodyChecker::check_statement(const Statement &state
             dynamic_cast<const ExpressionStatement *>(&statement)) {
         assert(expression->expression);
         const auto value = check_expression(*expression->expression, nullptr);
-        // 非尾的无分号块类表达式只能产生 () 或 !。
+        // 无分号时，正常完成才要求 unit；发散表达式可以有具体的静态类型。
         const bool ok = expression->has_semicolon
                             ? !value.type.is_error()
-                            : require_coerce(value, SemanticType::unit(),
-                                             expression->expression->span);
+                            : require_unit_or_divergence(value,
+                                                        expression->expression->span);
         return {value.diverges, !ok};
     }
     diagnostics_.error(statement.span, "internal error: unrecognized statement node");

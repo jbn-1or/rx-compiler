@@ -679,6 +679,66 @@ void check_reference_coercion_queries() {
 }
 
 // 只检查语义记录：赋值、字段、方法实参和 Box 路径的执行分别留给后续 lowering。
+// 核对公共类型选定后，每条结果边都保留原类型并记录到最终目标的转换。
+void check_control_flow_coercion_queries() {
+    const auto crate = parse_crate(R"(
+        fn facts(flag: bool, a: &mut i32, b: &mut i32, c: &i32, p: &&i32) {
+            let from_loop = loop {
+                if flag { break a; }
+                break b;
+                break c;
+            };
+            let from_if = if flag { p } else { c };
+        }
+        fn fixed(flag: bool, a: &mut i32, b: &mut i32) {
+            let chosen: &mut i32 = if flag { a } else { b };
+            let number: u32 = loop { break 42; };
+        }
+        fn main() {}
+    )");
+    const auto result = analyze_fixture(*crate);
+    using T = rx::SemanticType;
+    using rx::UseKind;
+    const auto i32 = T::int_(T::IntKind::I32);
+    const auto u32 = T::int_(T::IntKind::U32);
+    const auto shared = T::reference(false, i32);
+    const auto writable = T::reference(true, i32);
+    const auto twice = T::reference(false, shared);
+    const auto &facts = checked_ast<rx::Function>(crate->items.at(0));
+    const auto &from_loop = checked_ast<rx::LetStatement>(facts.body->statements.at(0));
+    const auto &loop = checked_ast<rx::LoopExpression>(from_loop.initializer);
+    const auto &first_branch = checked_ast<rx::IfExpression>(&statement_expression(*loop.body, 0));
+    const auto &first = checked_ast<rx::BreakExpression>(&statement_expression(*first_branch.then, 0));
+    const auto &second = checked_ast<rx::BreakExpression>(&statement_expression(*loop.body, 1));
+    const auto &unreachable = checked_ast<rx::BreakExpression>(&statement_expression(*loop.body, 2));
+    check(result.expressions.at(&loop).type.same_type(shared),
+          "an unreachable break must still contribute to the loop result type");
+    for (const auto *edge : {&first, &second, &unreachable}) {
+        check(result.break_targets.at(edge) == result.loop_expressions.at(&loop),
+              "all result edges must refer to the same loop");
+        check_coercion_plan(result, {edge, UseKind::BreakValue, 0}, *edge->value,
+                            edge == &unreachable ? shared : writable, shared, {});
+    }
+
+    const auto &from_if = checked_ast<rx::LetStatement>(facts.body->statements.at(1));
+    const auto &choice = checked_ast<rx::IfExpression>(from_if.initializer);
+    check_coercion_plan(result, {&choice, UseKind::IfBranch, 0}, *choice.then,
+                        twice, shared, {rx::CoercionStepKind::Reference});
+    check_coercion_plan(result, {&choice, UseKind::IfBranch, 1}, *choice.else_, shared, shared, {});
+
+    const auto &fixed = checked_ast<rx::Function>(crate->items.at(1));
+    const auto &chosen = checked_ast<rx::LetStatement>(fixed.body->statements.at(0));
+    const auto &fixed_if = checked_ast<rx::IfExpression>(chosen.initializer);
+    check_coercion_plan(result, {&fixed_if, UseKind::IfBranch, 0}, *fixed_if.then,
+                        writable, writable, {}, true);
+    check_coercion_plan(result, {&fixed_if, UseKind::IfBranch, 1}, *fixed_if.else_,
+                        writable, writable, {}, true);
+    const auto &number = checked_ast<rx::LetStatement>(fixed.body->statements.at(1));
+    const auto &fixed_loop = checked_ast<rx::LoopExpression>(number.initializer);
+    const auto &fixed_break = checked_ast<rx::BreakExpression>(&statement_expression(*fixed_loop.body, 0));
+    check_coercion_plan(result, {&fixed_break, UseKind::BreakValue, 0}, *fixed_break.value, u32, u32, {});
+}
+
 void check_aggregate_coercion_queries() {
     const auto crate = parse_crate(R"(
         struct Holder { first: &i32, second: &&i32 }
@@ -1072,6 +1132,7 @@ int main() {
     check_expression_queries();
     check_scalar_reference_operator_queries();
     check_reference_coercion_queries();
+    check_control_flow_coercion_queries();
     check_aggregate_coercion_queries();
     check_semantic_result_ownership();
     check_failed_semantic_result();

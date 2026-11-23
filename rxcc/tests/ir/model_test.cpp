@@ -1,4 +1,4 @@
-// P2/P3/P5.1 独立验证：模型所有权、call/ret/存储/转换、结构检查和确定的文本输出。
+// 独立验证 IR 模型、构建约束、分支结构检查和确定的文本输出。
 #include "ir/artifact.hpp"
 #include "ir/builder.hpp"
 #include <iomanip>
@@ -164,6 +164,186 @@ void add_operations(Module &module) {
     const auto both = builder.binary(BinaryOp::And, bool_left, bool_right);
     builder.compare(Comparison::UnsignedLessThan, bool_left, bool_right);
     builder.ret(both);
+}
+
+// 用常量条件构造两个分支汇入同一个 ret 块，不依赖源码 lowering。
+Function &add_branches(Module &module) {
+    IRBuilder builder(module);
+    auto &function = module.function(module.add_function(
+        "branches", {Type::Void, {}}, Linkage::Internal));
+    const auto entry = function.add_block();
+    const auto then_block = function.add_block();
+    const auto else_block = function.add_block();
+    const auto merge = function.add_block();
+    builder.set_insert_point(entry);
+    builder.cond_branch(Operand::constant(Type::I1, 1), then_block, else_block);
+    builder.set_insert_point(then_block);
+    builder.branch(merge);
+    builder.set_insert_point(else_block);
+    builder.branch(merge);
+    builder.set_insert_point(merge);
+    builder.ret();
+    return function;
+}
+
+// 无效的分支不得改变插入点；有效的分支必须关闭插入点，且不能再终结同一块。
+void check_branch_builder() {
+    auto artifact = make_module();
+    auto &module = artifact.module();
+    auto &function = module.function(module.add_function(
+        "branch_builder", {Type::Void, {}}, Linkage::Internal));
+    const auto entry = function.add_block();
+    const auto then_block = function.add_block();
+    const auto merge = function.add_block();
+    const auto foreign = module.find_function("main")->blocks.front().id;
+    const auto condition = Operand::constant(Type::I1, 1);
+    IRBuilder builder(module);
+    builder.set_insert_point(entry);
+    for (const auto target : {foreign, BlockId{function.id, invalid_index}, entry}) {
+        rejects([&] { builder.branch(target); });
+        rejects([&] { builder.cond_branch(condition, target, merge); });
+        rejects([&] { builder.cond_branch(condition, then_block, target); });
+    }
+    rejects([&] { builder.cond_branch(Operand::constant(Type::I32, 1), then_block, merge); });
+    check(builder.insert_point() == entry && !function.block(entry).terminator &&
+              function.block(entry).instructions.empty() && function.value_types.empty(),
+          "无效跳转不能留下指令、结果值或终结指令，也不能移动插入点");
+
+    builder.cond_branch(condition, then_block, merge);
+    check(!builder.insert_point(), "condbr 后必须关闭插入点");
+    rejects([&] { builder.call(module.find_function("__rx_fn_0")->id); });
+    builder.set_insert_point(then_block);
+    builder.branch(merge);
+    check(!builder.insert_point(), "br 后必须关闭插入点");
+    builder.set_insert_point(then_block);
+    rejects([&] { builder.branch(merge); });
+    rejects([&] { builder.ret(); });
+    builder.set_insert_point(merge);
+    builder.ret();
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics), "失败的构建请求不能破坏合法的分支模块");
+}
+
+// 绕过 Builder 破坏单项约束，确认检查器独立拒绝损坏的模型。
+void check_branch_models() {
+    const auto reject = [](auto corrupt, const char *message) {
+        auto artifact = make_module();
+        auto &module = artifact.module();
+        auto &function = add_branches(module);
+        corrupt(module, function);
+        std::ostringstream text, diagnostics;
+        check(!artifact.verify_and_print(text, diagnostics) &&
+                  text.str().empty() && !diagnostics.str().empty(), message);
+    };
+
+    auto artifact = make_module();
+    add_branches(artifact.module());
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics), "合法的分支模型必须通过自检");
+    check(text.str().find("bb_0:\n  br i1 true, label %bb_1, label %bb_2\n"
+                          "bb_1:\n  br label %bb_3\n"
+                          "bb_2:\n  br label %bb_3\n"
+                          "bb_3:\n  ret void\n") != std::string::npos,
+          "条件跳转必须按真假顺序打印，两个分支都必须显式跳到合流块");
+
+    reject([](Module &, Function &f) { f.blocks.back().terminator.reset(); },
+           "合流块缺少终结指令必须被拒绝");
+    reject([](Module &m, Function &f) {
+        f.blocks.at(1).terminator = Branch{m.find_function("main")->blocks.front().id};
+    }, "跨函数的 br 必须被拒绝");
+    reject([](Module &, Function &f) { f.blocks.at(1).terminator = Branch{f.blocks.front().id}; },
+           "跳回入口块的 br 必须被拒绝");
+    reject([](Module &, Function &f) {
+        auto &branch = std::get<CondBranch>(f.blocks.front().terminator->instruction);
+        branch.when_false = BlockId{f.id, invalid_index};
+    }, "condbr 的 false 目标不存在时必须被拒绝");
+    reject([](Module &, Function &f) {
+        auto &branch = std::get<CondBranch>(f.blocks.front().terminator->instruction);
+        branch.when_true = f.blocks.front().id;
+    }, "condbr 的 true 边不能为入口块增加前驱");
+    reject([](Module &, Function &f) {
+        auto &branch = std::get<CondBranch>(f.blocks.front().terminator->instruction);
+        branch.condition = Operand::constant(Type::I32, 1);
+    }, "condbr 的条件必须为 i1");
+    reject([](Module &, Function &f) {
+        const auto value = f.new_value(Type::I1);
+        const auto zero = Operand::constant(Type::I32, 0);
+        f.blocks.at(1).instructions.push_back({
+            *value.value_id(), Type::I1, Compare{Comparison::Equal, zero, zero}});
+        std::get<CondBranch>(f.blocks.front().terminator->instruction).condition = value;
+    }, "即使条件为 i1，也不能在定义它的分支执行前使用");
+}
+
+// 构造带回边的 CFG：准备块的 load 支配循环体和出口，虽然后者更早打印。
+void add_dominance_loop(Module &module) {
+    IRBuilder builder(module);
+    auto &function = module.function(module.add_function(
+        "dominance_loop", {Type::I32, {Type::I32}}, Linkage::Internal));
+    const auto entry = function.add_block();
+    const auto header = function.add_block();
+    const auto body = function.add_block();
+    const auto exit = function.add_block();
+    const auto setup = function.add_block();
+    const auto unreachable = function.add_block();
+    const auto zero = Operand::constant(Type::I32, 0);
+    const auto input = function.argument(0);
+
+    builder.set_insert_point(entry);
+    const auto slot = builder.entry_alloca(Type::I32, 4);
+    builder.store(input, slot, 4);
+    builder.branch(setup);
+    builder.set_insert_point(setup);
+    const auto saved = builder.load(Type::I32, slot, 4);
+    builder.branch(header);
+    builder.set_insert_point(header);
+    const auto current = builder.load(Type::I32, slot, 4);
+    const auto go = builder.compare(Comparison::NotEqual, current, zero);
+    builder.cond_branch(go, body, exit);
+    builder.set_insert_point(body);
+    builder.store(builder.binary(BinaryOp::Subtract, saved, input), slot, 4);
+    builder.branch(header);
+    builder.set_insert_point(exit);
+    builder.ret(saved);
+    // 不可达的前驱不能抹掉 setup 对 header 及其后继的支配关系。
+    builder.set_insert_point(unreachable);
+    builder.branch(header);
+}
+
+// 用菱形图验证：值已登记且类型正确，不代表所有到达使用点的路径都会定义它。
+void check_dominance() {
+    auto artifact = make_module();
+    add_dominance_loop(artifact.module());
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
+          "跨块使用应按 CFG 支配关系检查，不应受块顺序、回边或不可达前驱影响");
+
+    const auto reject = [](auto add_use, const char *message) {
+        auto artifact = make_module();
+        auto &function = add_branches(artifact.module());
+        const auto value = function.new_value(Type::I32);
+        const auto one = Operand::constant(Type::I32, 1);
+        function.blocks.at(1).instructions.push_back({
+            *value.value_id(), Type::I32, BinaryOperation{BinaryOp::Add, one, one}});
+        add_use(function, value, one);
+        std::ostringstream text, diagnostics;
+        check(!artifact.verify_and_print(text, diagnostics) &&
+                  text.str().empty() && !diagnostics.str().empty(), message);
+    };
+    reject([](Function &function, Operand value, Operand) {
+        function.signature.result = Type::I32;
+        function.blocks.back().terminator = Return{value};
+    }, "merge 的 ret 不能读取只在 then 中定义的值");
+    reject([](Function &function, Operand value, Operand one) {
+        const auto result = function.new_value(Type::I32);
+        function.blocks.at(2).instructions.push_back({
+            *result.value_id(), Type::I32, BinaryOperation{BinaryOp::Add, value, one}});
+    }, "else 的算术不能读取 then 中定义的值");
+    reject([](Function &function, Operand value, Operand one) {
+        const auto result = function.new_value(Type::I32);
+        auto &instructions = function.blocks.at(1).instructions;
+        instructions.insert(instructions.begin(), Instruction{
+            *result.value_id(), Type::I32, BinaryOperation{BinaryOp::Add, value, one}});
+    }, "定义表完整后仍要拒绝同块内先使用、后定义");
 }
 
 // 手工构造 bool 真值驱动：把往返结果零扩展成 i32 后打印。
@@ -475,6 +655,9 @@ void run_tests() {
     check(!moved.verify_and_print(failing_output, diagnostics) && failing_output.bad(),
           "缓冲区写入失败应传播到目标流");
     check_invalid_models();
+    check_branch_builder();
+    check_branch_models();
+    check_dominance();
     auto storage = make_module();
     add_storage(storage.module());
     std::ostringstream storage_text;
@@ -594,6 +777,8 @@ int main(int argc, char **argv) {
             add_pointer_storage(artifact.module());
             add_bool_scalar(artifact.module());
             add_operations(artifact.module());
+            add_branches(artifact.module());
+            add_dominance_loop(artifact.module());
         }
         return artifact.verify_and_print(std::cout, std::cerr) ? 0 : 1;
     } catch (const std::exception &error) {

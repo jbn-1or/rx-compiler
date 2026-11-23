@@ -20,6 +20,7 @@ using StructId = SemanticId<struct StructIdentity>;
 using FunctionId = SemanticId<struct FunctionIdentity>;
 using ConstantId = SemanticId<struct ConstantIdentity>;
 using LocalId = SemanticId<struct LocalIdentity>;
+using LoopId = SemanticId<struct LoopIdentity>;
 
 enum class BuiltinIO { GetI32, PrintI32, PrintlnI32 };
 

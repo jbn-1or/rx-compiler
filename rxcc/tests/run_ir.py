@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Validate the P2-P10 IR and execution fixtures with external LLVM 22 tools."""
+"""Validate rxcc IR fixtures and optionally the official optimization corpus."""
 
 import argparse
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
+from strip_asm_debug import strip_debug
+from test import RV32_TARGET, TestError, discover, execute, excerpt
 
 
 def run(command, *, expected=0, timeout=60, stdin_data=None):
@@ -83,6 +90,170 @@ def check_p10_helpers(name, text, expected_per_operation, *, recursive=False):
                 raise RuntimeError(f"{name}: {operation} helpers do not form the expected recursive cycle")
 
 
+# 官方大程序使用正式 runner 的日志和文件 stdin；开发小样例仍使用内存输入。
+def run_artifact_tool(command, log=None, stdin=None, *, timeout=60):
+    if log is None:
+        run(command, stdin_data=stdin, timeout=timeout)
+        return
+    try:
+        code = execute(shlex.join(command), log, timeout, stdin)
+    except TestError as error:
+        log.with_suffix(".status").write_text(f"{error}\n", encoding="utf-8")
+        raise TestError(f"{log}: {error}") from error
+    log.with_suffix(".status").write_text(f"Exit code: {code}\n", encoding="utf-8")
+    if code != 0:
+        raise RuntimeError(f"{log}: unexpected exit {code}\n{excerpt(log.with_suffix('.stderr'))}")
+
+
+# 只检查栈槽放置与是否静态分配，不依赖块编号、临时变量名或槽数。
+def check_loop_storage(text):
+    saw_stack_slot = False
+    for body in re.findall(r"^define .*?\{\n(.*?)^\}", text, re.MULTILINE | re.DOTALL):
+        block = -1
+        for line in body.splitlines():
+            if re.match(r"^[\w.$-]+:", line):
+                block += 1
+            if re.match(r"^\s*%\S+\s*=\s*alloca\b", line):
+                saw_stack_slot = True
+                if block != 0 or not re.search(r"= alloca (?:i\d+|ptr), align \d+$", line):
+                    raise RuntimeError(f"loop_storage: expected a fixed entry stack slot, got {line.strip()}")
+    if not saw_stack_slot:
+        raise RuntimeError("loop_storage must exercise fixed stack slots")
+
+
+# 小样例和官方大程序都检查同一个自有 IR 基线及 LLVM 合法性。
+def verify_module(args, name, ir_path, bitcode, logs=None):
+    text = ir_path.read_text(encoding="utf-8")
+    if name in ("discarded-if-value", "discarded-loop-and-logic") and re.search(
+            r"\b(?:alloca|store|load)\b", text):
+        raise RuntimeError(f"{name}: discarded results must not need a storage slot")
+    for forbidden in (" nsw ", " nuw ", " exact", "noalias",
+                      "inbounds", "nonnull", "sret(", "byval("):
+        if forbidden in text:
+            raise RuntimeError(f"{name}: baseline IR must not contain {forbidden.strip()}")
+    run_artifact_tool([args.llvm_as, str(ir_path), "-o", str(bitcode)],
+                      logs / "llvm-as" if logs else None)
+    if not bitcode.is_file():
+        raise RuntimeError(f"{name}: llvm-as did not create {bitcode}")
+    run_artifact_tool([args.opt, "-passes=verify", "-disable-output", str(bitcode)],
+                      logs / "opt-verify" if logs else None)
+
+
+# REIMU 进程成功不代表被模拟程序成功；输出必须是独立产物。
+def check_rv32_output(name, stdout, profile, expected_stdout):
+    for artifact in (stdout, profile):
+        if not artifact.is_file():
+            raise RuntimeError(f"{name}: missing REIMU artifact {artifact}")
+    actual = stdout.read_bytes()
+    exits = [line for line in profile.read_bytes().splitlines() if line.startswith(b"Exit code:")]
+    if exits != [b"Exit code: 0"]:
+        raise RuntimeError(f"{name}: expected one REIMU exit code 0, got {exits!r}")
+    if actual != expected_stdout:
+        raise RuntimeError(f"{name}: stdout differs (expected {len(expected_stdout)} bytes "
+                           f"{expected_stdout[:200]!r}, got {len(actual)} bytes {actual[:200]!r})")
+
+
+# 用受控进程和独立产物检查 runner 不会把异常当作通过。
+def check_runner_failures(work):
+    work.mkdir()
+
+    def expect_failure(description, diagnostic, function, *args, **kwargs):
+        try:
+            function(*args, **kwargs)
+        except (TestError, RuntimeError) as error:
+            if diagnostic not in str(error):
+                raise RuntimeError(f"{description}: unexpected diagnostic: {error}") from error
+            return f"{description}: {error}\n"
+        raise RuntimeError(f"{description}: expected the runner to fail")
+
+    results = [
+        expect_failure("missing tool", "unexpected exit 127", run_artifact_tool,
+                       [str(work.resolve() / "missing-tool")], work / "missing-tool"),
+        expect_failure("timeout", "timed out", run_artifact_tool,
+                       [sys.executable, "-c", "import time; time.sleep(10)"], work / "timeout", timeout=0.2),
+        expect_failure("signal", "unexpected exit", run_artifact_tool,
+                       [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"],
+                       work / "signal"),
+    ]
+    stdout, profile, expected = work / "program.out", work / "program.profile", b"100000\n"
+    results.append(expect_failure("missing output", "missing REIMU artifact", check_rv32_output,
+                                  "probe", stdout, profile, b""))
+    stdout.write_bytes(expected)
+    results.append(expect_failure("missing profile", "missing REIMU artifact", check_rv32_output,
+                                  "probe", stdout, profile, expected))
+    profile.write_bytes(b"Exit code: 7\n")
+    results.append(expect_failure("simulated exit", "expected one REIMU exit code 0", check_rv32_output,
+                                  "probe", stdout, profile, expected))
+    profile.write_bytes(b"Exit code: 0\n")
+    stdout.write_bytes(expected[:-1])
+    results.append(expect_failure("truncated stdout", "stdout differs", check_rv32_output,
+                                  "probe", stdout, profile, expected))
+    (work / "results.txt").write_text("".join(results), encoding="utf-8")
+
+
+# 每个优化级别只生成和检查一次汇编，再用同一份文本执行所有 I/O。
+def run_rv32_module(args, name, ir_path, runtime_assembly, output_dir, pairs, *, keep_logs=False):
+    executions = 0
+    for optimization in ("O0", "O2"):
+        prefix = output_dir / f"{ir_path.stem}-{optimization}"
+        assembly = output_dir / f"{prefix.name}.s"
+        run_artifact_tool([args.clang, *RV32_TARGET, "-mllvm", "-riscv-no-aliases",
+                           f"-{optimization}", "-S", str(ir_path), "-o", str(assembly)],
+                          prefix.with_name(f"{prefix.name}-clang") if keep_logs else None)
+        assembly.write_text(strip_debug(assembly.read_text(encoding="utf-8")), encoding="utf-8")
+        obj = output_dir / f"{prefix.name}.o"
+        run_artifact_tool([args.clang, *RV32_TARGET, "-c", str(assembly), "-o", str(obj)],
+                          prefix.with_name(f"{prefix.name}-assemble") if keep_logs else None)
+        if not obj.is_file():
+            raise RuntimeError(f"{name} {optimization}: Clang did not create {obj}")
+        for index, (stdin, expected) in enumerate(pairs, 1):
+            run_prefix = prefix.with_name(f"{prefix.name}-io-{index}")
+            stdout = output_dir / f"{run_prefix.name}.out"
+            profile = output_dir / f"{run_prefix.name}.profile"
+            run_artifact_tool(["xmake", "run", "-P", "vendor/REIMU", "reimu",
+                               "--memory=256M", "--stack=1M", "-f", f"{assembly},{runtime_assembly}",
+                               "-o", str(stdout), "-p", str(profile)],
+                              run_prefix if keep_logs else None, stdin=stdin)
+            expected_stdout = expected.read_bytes() if isinstance(expected, Path) else expected
+            check_rv32_output(f"{name} {optimization} I/O {index}", stdout, profile, expected_stdout)
+            executions += 1
+    return executions
+
+
+# 从同一清单收集同一源码的全部原始 I/O，避免为每组输入重复编译。
+def manifest_programs(root, stage):
+    programs = {}
+    for case in discover(root):
+        if case.stage == stage:
+            programs.setdefault(case.source, []).extend(case.io)
+    if not programs:
+        raise RuntimeError(f"no {stage} cases found under {root}")
+    return programs
+
+
+# 保留源码、输入/预期映射和实际工具日志；三个测试集合共用这条验证链。
+def run_manifest_suite(args, programs, directory, runtime_assembly=None, *, resource_fixtures=False):
+    directory.mkdir(exist_ok=True)
+    executions = 0
+    for index, (source, pairs) in enumerate(programs.items(), 1):
+        work = directory / f"{index:04d}"
+        work.mkdir()
+        name = os.path.relpath(source, ROOT)
+        (work / "io.txt").write_text("".join(
+            f"{pair}: stdin={stdin if stdin is not None else '(empty)'}; expected={expected}\n"
+            for pair, (stdin, expected) in enumerate(pairs, 1)), encoding="utf-8")
+        if resource_fixtures:
+            run_artifact_tool([args.compiler, "--stage", "semantic", str(source)], work / "semantic")
+        ir_path = work / "program.ll"
+        run_artifact_tool([args.compiler, "--stage", "ir", str(source), "-o", str(ir_path)], work / "compile")
+        if resource_fixtures and source.name == "loop_storage.rx":
+            check_loop_storage(ir_path.read_text(encoding="utf-8"))
+        verify_module(args, name, ir_path, work / "program.bc", work)
+        if runtime_assembly is not None:
+            executions += run_rv32_module(args, name, ir_path, runtime_assembly, work, pairs, keep_logs=True)
+    return executions
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compiler", default="rxcc/build/rxcc")
@@ -93,7 +264,22 @@ def main():
     parser.add_argument("--clang", default="clang-22")
     parser.add_argument("--reimu", action="store_true",
                         help="also run modules with RV32 Clang and REIMU")
+    parser.add_argument("--official", action="store_true",
+                        help="also run the official optimization corpus through rxcc IR (requires --reimu)")
     args = parser.parse_args()
+    if args.official and not args.reimu:
+        parser.error("--official requires --reimu")
+
+    resources = manifest_programs(ROOT / "rxcc" / "tests" / "ir" / "p11", "codegen")
+    official = {}
+    boundaries = {}
+    if args.official:
+        official_root = ROOT / "tests" / "official"
+        official = manifest_programs(official_root / "optimization", "optimization")
+        for group in ("comprehensive-large-frame", "calls-recursion-and-abi", "comprehensive-owned-tree",
+                      "comprehensive-quicksort", "comprehensive-shortest-path", "comprehensive-stack-machine"):
+            for source, pairs in manifest_programs(official_root / "codegen" / group, "codegen").items():
+                boundaries.setdefault(source, []).extend(pairs)
     tools = [args.compiler, args.ir_test, args.model_test, args.llvm_as, args.opt]
     if args.reimu:
         tools.extend([args.clang, "xmake"])
@@ -1702,6 +1888,13 @@ def main():
             run([args.compiler, "--stage", "ir", str(p09 / f"{stem}.rx"), "-o", str(output)])
             modules.append((name, output, (p09 / f"{stem}.out").read_bytes(), b""))
 
+        source = temp / "runtime-smoke.rx"
+        output = temp / "runtime-smoke.ll"
+        source.write_text("fn main() { let boxed = Box::<i32>::new(get_i32()); "
+                          "print_i32(*boxed); println_i32(*boxed + 1); }", encoding="utf-8")
+        run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+        modules.append(("runtime-smoke", output, b"-42-41\n", b"-42\n"))
+
         p10 = p08.parent / "p10"
         helper_counts = {"recursive_tree": 2, "mutual_recursion": 4,
                          "helper_cache": 4, "recursive_declaration": 0}
@@ -1742,19 +1935,7 @@ def main():
                         b"3\n8\n12\n16\n",    # Matrix: row stride, reference, word and size
                         b""))
         for name, output, _, _ in modules:
-            # P4.3：自有 baseline 不附加不溢出、精确性或别名承诺。
-            # 检查生成文本，而不是依赖 LLVM verifier 事后接受错误承诺。
-            text = output.read_text(encoding="utf-8")
-            if name in ("discarded-if-value", "discarded-loop-and-logic") and re.search(
-                    r"\b(?:alloca|store|load)\b", text):
-                raise RuntimeError(f"{name}: discarded results must not need a storage slot")
-            for forbidden in (" nsw ", " nuw ", " exact", "noalias",
-                              "inbounds", "nonnull", "sret(", "byval("):
-                if forbidden in text:
-                    raise RuntimeError(
-                        f"{name}: baseline IR must not contain {forbidden.strip()}")
-            run([args.llvm_as, str(output), "-o", str(temp / f"{name}.bc")])
-            run([args.opt, "-passes=verify", "-disable-output", str(output)])
+            verify_module(args, name, output, temp / f"{name}.bc")
 
         source = temp / "empty-main.rx"
         output = temp / "output.ll"
@@ -1943,62 +2124,70 @@ def main():
             diagnostic = expected_diagnostics.get(contents)
             if diagnostic is not None and diagnostic not in semantic.stderr:
                 raise RuntimeError(f"{invalid_source.name}: expected {diagnostic!r}, got {semantic.stderr!r}")
-            output.write_bytes(b"preserve on semantic failure\n")
-            result = run([args.compiler, "--stage", "ir", str(invalid_source), "-o", str(output)], expected=1)
-            if not semantic.stderr.strip() or result.stderr != semantic.stderr:
-                raise RuntimeError("IR must perform complete semantic checks before lowering")
-            if output.read_bytes() != b"preserve on semantic failure\n":
-                raise RuntimeError("semantic failure changed the previous output")
+            fresh_output = invalid_source.with_suffix(".ll")
+            sentinel = b"preserve on semantic failure\n"
+            output.write_bytes(sentinel)
+            for target in (fresh_output, output):
+                result = run([args.compiler, "--stage", "ir", str(invalid_source), "-o", str(target)], expected=1)
+                if not semantic.stderr.strip() or result.stderr != semantic.stderr:
+                    raise RuntimeError("IR must perform complete semantic checks before lowering")
+            if fresh_output.exists() or output.read_bytes() != sentinel:
+                raise RuntimeError(f"{invalid_source.name}: semantic failure created or changed IR output")
         if Path("/dev/full").exists():
             run([args.compiler, "--stage", "ir", str(source), "-o", "/dev/full"], expected=2)
 
+        fixture_executions = 0
+        runtime_assembly = None
+        evidence = temp
         if args.reimu:
-            runtime = temp / "runtime.c"
-            runtime.write_text('extern int printf(const char *, ...);\n'
-                               'extern int scanf(const char *, ...);\n'
-                               'int get_i32(void) { int value; (void)scanf("%d", &value); return value; }\n'
-                               'void print_i32(int value) { (void)printf("%d", value); }\n'
-                               'void println_i32(int value) { (void)printf("%d\\n", value); }\n'
-                               'extern void *malloc(unsigned int);\n'
-                               'void *__rx_alloc(unsigned int size, unsigned int align) {\n'
-                               '    if (size && (align == 1 || align == 4)) {\n'
-                               '        void *p = malloc(size);\n'
-                               '        if (p && !((__UINTPTR_TYPE__)p & (align - 1))) return p;\n'
-                               '    }\n'
-                               '    (void)printf("invalid __rx_alloc request or result\\n");\n'
-                               '    return 0;\n'
-                               '}\n',
-                               encoding="utf-8")
-            runtime_assembly = temp / "runtime.s"
-            run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
-                 "-mllvm", "-riscv-no-aliases", "-O2", "-fno-builtin", "-S", str(runtime),
-                 "-o", str(runtime_assembly)])
-            run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
-                 "-c", str(runtime_assembly), "-o", str(temp / "runtime.o")])
+            log_root = ROOT / "target" / "tests"
+            log_root.mkdir(parents=True, exist_ok=True)
+            prefix = "official-ir-" if args.official else "p11-resources-"
+            evidence = Path(tempfile.mkdtemp(prefix=prefix, dir=log_root))
+            print(f"IR resource logs: {evidence.relative_to(ROOT)}", flush=True)
+            for tool, command in (("clang", [args.clang]), ("llvm-as", [args.llvm_as]), ("opt", [args.opt]),
+                                  ("reimu", ["xmake", "run", "-P", "vendor/REIMU", "reimu"])):
+                run_artifact_tool([*command, "--version"], evidence / f"{tool}-version")
+            runtime = ROOT / "rxcc" / "runtime" / "runtime.c"
+            runtime_assembly = evidence / "runtime.s"
+            run_artifact_tool([args.clang, *RV32_TARGET, "-mllvm", "-riscv-no-aliases", "-O2",
+                               "-ffreestanding", "-S", str(runtime), "-o", str(runtime_assembly)],
+                              evidence / "runtime-clang")
+            runtime_assembly.write_text(strip_debug(runtime_assembly.read_text(encoding="utf-8")),
+                                        encoding="utf-8")
+            runtime_obj = runtime_assembly.with_suffix(".o")
+            run_artifact_tool([args.clang, *RV32_TARGET, "-c", str(runtime_assembly), "-o", str(runtime_obj)],
+                              evidence / "runtime-assemble")
+            if not runtime_obj.is_file():
+                raise RuntimeError(f"Clang did not create {runtime_obj}")
             for name, ir_path, expected_stdout, stdin_data in modules:
-                for optimization in ("O0", "O2"):
-                    assembly = temp / f"{name}-{optimization}.s"
-                    stdout = temp / f"{name}-{optimization}.out"
-                    profile = temp / f"{name}-{optimization}.profile"
-                    run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
-                         "-mllvm", "-riscv-no-aliases", f"-{optimization}", "-S", str(ir_path), "-o", str(assembly)])
-                    run([args.clang, "--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32",
-                         "-c", str(assembly), "-o", str(temp / f"{name}-{optimization}.o")])
-                    run(["xmake", "run", "-P", "vendor/REIMU", "reimu", "--memory=256M", "--stack=1M",
-                         "-f", f"{assembly},{runtime_assembly}", "-o", str(stdout), "-p", str(profile)],
-                        stdin_data=stdin_data)
-                    exits = [line for line in profile.read_bytes().splitlines() if line.startswith(b"Exit code:")]
-                    if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
-                        raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
-                                           f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
+                fixture_executions += run_rv32_module(args, name, ir_path, runtime_assembly, temp,
+                                                      [(stdin_data, expected_stdout)])
+
+        check_runner_failures(evidence / "runner-failures")
+        resource_executions = run_manifest_suite(args, resources, evidence / "p11", runtime_assembly,
+                                                 resource_fixtures=True)
+        if args.official:
+            boundary_executions = run_manifest_suite(args, boundaries, evidence / "codegen-boundaries", runtime_assembly)
+            official_executions = run_manifest_suite(args, official, evidence, runtime_assembly)
     print(f"P2-P10 IR fixtures passed: {len(modules)} modules verified" +
-          (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
+          (f", {fixture_executions} RV32 O0/O2 executions" if args.reimu else ""))
+    print(f"P11 resource fixtures passed: {len(resources)} modules verified" +
+          (f", {resource_executions} RV32 O0/O2 executions" if args.reimu else "") +
+          "; runner failure probes passed")
+    if args.official:
+        print(f"Official codegen resource cases via rxcc IR passed: {len(boundaries)} programs, "
+              f"{sum(len(pairs) for pairs in boundaries.values())} I/O pairs, "
+              f"{boundary_executions} RV32 O0/O2 executions")
+        print(f"Official optimization via rxcc IR passed: {len(official)} programs, "
+              f"{sum(len(pairs) for pairs in official.values())} I/O pairs, "
+              f"{official_executions} RV32 O0/O2 executions")
     return 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, RuntimeError) as error:
+    except (OSError, RuntimeError, TestError) as error:
         print(error, file=os.sys.stderr)
         raise SystemExit(1)

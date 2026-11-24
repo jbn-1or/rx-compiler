@@ -47,4 +47,4 @@ jobs:
       - name: Validate self-owned IR and RV32 behavior
         run: |
           ctest --test-dir rxcc/build --output-on-failure
-          python3 rxcc/tests/run_ir.py --reimu
+          python3 rxcc/tests/run_ir.py --reimu --official

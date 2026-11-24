@@ -22,6 +22,7 @@ from strip_asm_debug import strip_debug
 RUNTIME_STAGES = ("ir", "codegen", "optimization")
 STAGES = ("semantic", *RUNTIME_STAGES)
 MANIFEST_STAGES = ("semantic", "codegen", "optimization")
+RV32_TARGET = ("--target=riscv32-unknown-elf", "-march=rv32im", "-mabi=ilp32")
 
 
 class TestError(Exception):
@@ -271,6 +272,24 @@ def excerpt(path):
         return stream.read(4000).decode(errors="replace").rstrip()
 
 
+# Log an IR tool invocation and reject missing artifacts even on exit zero.
+def run_ir_tool(arguments, prefix, timeout, artifact=None):
+    code = execute(shlex.join(arguments), prefix, timeout)
+    if code != 0:
+        raise TestError(f"{prefix.name} failed (exit {code})\n{excerpt(prefix.with_suffix('.stderr'))}")
+    if artifact is not None and not artifact.is_file():
+        raise TestError(f"{prefix.name} succeeded but did not create {artifact.name}")
+
+
+# Check the exact assembly text that REIMU will receive; the object is only evidence.
+def check_ir_assembly(assembly, prefix, timeout):
+    assembly.write_text(strip_debug(assembly.read_text(encoding="utf-8")), encoding="utf-8")
+    obj = assembly.with_suffix(".o")
+    clang = os.environ.get("CLANG", "clang-22")
+    run_ir_tool([clang, *RV32_TARGET, "-c", str(assembly), "-o", str(obj)],
+                prefix, timeout, obj)
+
+
 def read_cycles(profile):
     try:
         contents = profile.read_text(encoding="utf-8")
@@ -310,21 +329,19 @@ def run_case(case, commands, directory, compile_timeout, run_timeout, runtime=b"
     if case.stage not in RUNTIME_STAGES:
         return []
     if not output.is_file():
-        raise TestError("compiler succeeded but did not create {output}")
+        raise TestError(f"compiler succeeded but did not create {output.name}")
     if case.stage == "ir":
+        bitcode = directory / "program.bc"
+        run_ir_tool(["llvm-as-22", str(output), "-o", str(bitcode)],
+                    directory / "llvm-as", compile_timeout, bitcode)
+        run_ir_tool(["opt-22", "-passes=verify", "-disable-output", str(bitcode)],
+                    directory / "opt-verify", compile_timeout)
         assembly = directory / "program.s"
-        prefix = directory / "clang"
-        command = shlex.join([
-            os.environ.get("CLANG", "clang-22"), "-S", "-x", "ir", str(output),
-            "-o", str(assembly), "--target=riscv32-unknown-none-elf",
-            "-march=rv32im", "-mabi=ilp32", "-O0", "-mllvm", "-riscv-no-aliases",
-        ])
-        code = execute(command, prefix, compile_timeout)
-        if code:
-            raise TestError(f"Clang could not compile LLVM IR (exit {code})\n{excerpt(prefix.with_suffix('.stderr'))}")
-        if not assembly.is_file():
-            raise TestError("Clang succeeded but did not create assembly")
-        assembly.write_text(strip_debug(assembly.read_text()))
+        run_ir_tool([os.environ.get("CLANG", "clang-22"), *RV32_TARGET,
+                     "-S", "-x", "ir", str(output), "-o", str(assembly),
+                     "-O0", "-mllvm", "-riscv-no-aliases"],
+                    directory / "clang", compile_timeout, assembly)
+        check_ir_assembly(assembly, directory / "program-assemble", compile_timeout)
         output = assembly
     cycles = []
     for index, (stdin, expected_file) in enumerate(case.io, 1):
@@ -332,14 +349,24 @@ def run_case(case, commands, directory, compile_timeout, run_timeout, runtime=b"
         runtime_path.unlink(missing_ok=True)
         runtime_path.write_bytes(runtime)
         prefix = directory / f"run-{index}"
-        stdout = prefix.with_suffix(".stdout")
+        # execute() creates its stdout log itself; IR needs a separate program output file.
+        stdout = directory / f"program-{index}.out" if case.stage == "ir" else prefix.with_suffix(".stdout")
         profile = prefix.with_suffix(".profile")
         command = expand(commands["run"], case.source, output, stdout=stdout, profile=profile,
                          runtime=runtime_path)
         code = execute(command, prefix, run_timeout, stdin)
         if code != 0:
-            raise TestError(f"io pair {index}: program exited {code}\n{excerpt(prefix.with_suffix('.stderr'))}")
-        actual = prefix.with_suffix(".stdout").read_bytes()
+            raise TestError(f"io pair {index}: RUN exited {code}\n{excerpt(prefix.with_suffix('.stderr'))}")
+        if case.stage == "ir":
+            # The runner may exit zero even when the simulated program does not.
+            if not profile.is_file():
+                raise TestError(f"io pair {index}: RUN did not create a REIMU profile")
+            exits = [line for line in profile.read_bytes().splitlines() if line.startswith(b"Exit code:")]
+            if exits != [b"Exit code: 0"]:
+                raise TestError(f"io pair {index}: expected one REIMU 'Exit code: 0' line, got {exits!r}")
+            if not stdout.is_file():
+                raise TestError(f"io pair {index}: RUN did not create program output")
+        actual = stdout.read_bytes()
         expected = expected_file.read_bytes()
         if actual != expected:
             lines = difflib.unified_diff(
@@ -408,6 +435,9 @@ def main():
             print()
         if runtime.is_symlink() or not runtime.is_file() or runtime.stat().st_size > 8 * 1024 * 1024:
             raise TestError("BUILD must leave {runtime} as a regular assembly file of at most 8 MiB")
+        if any(case.stage == "ir" for case in cases):
+            check_ir_assembly(runtime, directory / "runtime-assemble", compile_timeout)
+        # Every case receives a byte-for-byte copy of this checked runtime text.
         runtime_bytes = runtime.read_bytes()
         failures = []
         executions = 0

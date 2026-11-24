@@ -4,6 +4,7 @@
 #include "ir/model.hpp"
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <stdexcept>
 #include <utility>
 
@@ -37,6 +38,12 @@ unsigned integer_width(Type type) {
         case Type::I32: return 32;
         default: return 0;
     }
+}
+
+// 零位宽代表非整数，不能充当扩展的源或截断的目标。
+bool is_narrower_integer(Type narrow, Type wide) {
+    const auto width = integer_width(narrow);
+    return width != 0 && width < integer_width(wide);
 }
 
 // 返回二元运算在 LLVM 文本中的指令名，例如 add、sdiv、urem 或 xor。
@@ -121,33 +128,37 @@ bool valid_comparison(Comparison comparison, Type operand_type) {
     return false;
 }
 
-// 检查存储类型和对齐是否合法：类型为 i32、i8 或 ptr，且对齐值是 2 的幂。
-// ptr 用于保存引用变量的目标地址，读取它只得到地址，不解引用目标。
-bool valid_storage(Type type, uint32_t alignment) {
-    return (type == Type::I32 || type == Type::I8 || type == Type::Ptr) &&
-           alignment != 0 && (alignment & (alignment - 1)) == 0;
+namespace {
+// i1 只用于计算，存储 bool 时使用 i8。
+bool valid_scalar_storage(Type type) {
+    return type == Type::I32 || type == Type::I8 || type == Type::Ptr;
 }
 
-// 自有存储类型用于 alloca、GEP 或 aggregate load/store：
-// 标量沿用与上面相同的受限集合；数组、命名结构体和 Vec 头只在这里检查对齐与结构完整性，
-// 具体字段和布局由 check_module 的布局服务核对。
-bool valid_storage(const StorageType &type, uint32_t alignment) {
-    if (alignment == 0 || (alignment & (alignment - 1)) != 0)
-        return false;
+// 递归检查数组元素；命名结构体的字段和实际布局由布局服务核对。
+bool valid_storage_shape(const StorageType &type) {
     switch (type.kind) {
         case StorageType::Kind::Unit:
             return false;
         case StorageType::Kind::Scalar:
-            return valid_storage(type.scalar_type, alignment);
+            return valid_scalar_storage(type.scalar_type);
         case StorageType::Kind::Array:
-            return type.element &&
-                   valid_storage(*type.element, alignment);
+            return type.element && valid_storage_shape(*type.element);
         case StorageType::Kind::Struct:
-            return true;
         case StorageType::Kind::Vec:
             return true;
     }
     return false;
+}
+} // namespace
+
+// 标量读写需要支持的存储类型和非零的 2 的幂对齐。
+bool valid_storage(Type type, uint32_t alignment) {
+    return std::has_single_bit(alignment) && valid_scalar_storage(type);
+}
+
+// 对齐属于整次分配，不必在检查数组元素时重复验证。
+bool valid_storage(const StorageType &type, uint32_t alignment) {
+    return std::has_single_bit(alignment) && valid_storage_shape(type);
 }
 
 // 用指定类型和 32 个二进制位创建常量操作数，不重新推导源语言整数类型。
@@ -185,14 +196,10 @@ Function::Function(IRFunctionId function_id, std::string name,
                    FunctionABI abi, Linkage linkage)
     : id(function_id), name(std::move(name)), linkage(linkage),
       abi(std::move(abi)) {
-    const auto &parameter_types = this->abi.signature.parameters;
-    value_types.reserve(parameter_types.size());
-    parameters.reserve(parameter_types.size());
-    for (const auto type : parameter_types)
-        parameters.push_back(new_value(type));
+    value_types = this->abi.signature.parameters;
 }
 
-// 为参数或指令结果分配值 ID，并把类型添加到当前函数的值类型表。
+// 为指令结果分配值 ID，并把类型添加到当前函数的值类型表。
 Operand Function::new_value(Type type) {
     // id 是当前函数的成员；新值的下标就是追加类型前的表长度。
     const ValueId value{id, value_types.size()};
@@ -339,45 +346,38 @@ bool Module::contains(IRFunctionId function_id) const {
 // 后续下标分别选择字段或数组元素；字段/Vec 字段必须是非负常量且在范围内。
 bool valid_gep_indices(const Module &module, const StorageType &source_type,
                        const std::vector<Operand> &indices) {
-    if (indices.size() < 2)
+    if (indices.size() < 2 || indices.front().type != Type::I32)
         return false;
-    for (const auto &index : indices)
-        if (index.type != Type::I32)
-            return false;
-    if (source_type.kind == StorageType::Kind::Unit ||
-        source_type.kind == StorageType::Kind::Scalar)
-        return false;
-    StorageType current = source_type;
+    const StorageType *current = &source_type;
     // 第一个下标只沿基址移动，不改变被投影的对象类型。
     for (std::size_t position = 1; position < indices.size(); ++position) {
         const auto &index = indices[position];
-        switch (current.kind) {
+        if (index.type != Type::I32)
+            return false;
+        switch (current->kind) {
             case StorageType::Kind::Struct: {
                 const auto *bits = index.constant_bits();
-                if (!bits || current.struct_index >= module.named_types().size())
+                if (!bits || current->struct_index >= module.named_types().size())
                     return false;
-                const auto &named = module.named_type(current.struct_index);
+                const auto &named = module.named_type(current->struct_index);
                 if (!named.defined || *bits >= named.fields.size())
                     return false;
-                current = named.fields[*bits];
+                current = &named.fields[*bits];
                 break;
             }
             case StorageType::Kind::Array:
-                if (!current.element)
+                if (!current->element)
                     return false;
-                current = *current.element;
+                current = current->element.get();
                 break;
             case StorageType::Kind::Vec: {
                 const auto *bits = index.constant_bits();
-                if (!bits || *bits >= 3)
-                    return false;
-                current = *bits == 0
-                              ? StorageType::scalar(Type::Ptr)
-                              : StorageType::scalar(Type::I32);
-                break;
+                // Vec 的三个字段都是标量，选中后不能再投影。
+                return bits && *bits < 3 && position + 1 == indices.size();
             }
             case StorageType::Kind::Unit:
             case StorageType::Kind::Scalar:
+            default:
                 return false;
         }
     }

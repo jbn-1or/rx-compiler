@@ -39,12 +39,8 @@ bool define_value(const Function &function, DefinitionTable &definitions,
     return true;
 }
 
-// 保存从入口可达的块，以及每个可达块被哪些块支配。
-// 不可达块不参与支配集合的固定点计算，跨块使用时也不会被当作可用路径。
-struct DominanceInfo {
-    std::vector<bool> reachable; // reachable[b] 表示从入口能否走到块 b。
-    std::vector<std::vector<bool>> dominators; // dominators[b][d] 表示 d 支配 b。
-};
+// dominators[b][d] 表示 d 支配可达块 b；不可达块的行、列均为 false。
+using DominatorTable = std::vector<std::vector<bool>>;
 
 // 跳转目标必须属于当前函数、下标有效，并且不能是入口块。
 // 入口块没有前驱，跳回入口会让函数重跑一遍参数存储，不能当作普通循环处理。
@@ -58,7 +54,7 @@ bool valid_jump_target(const Function &function, BlockId target) {
 // 或者其定义块支配当前块。use_order 是当前指令或终结指令在块内的位置。
 bool operand_available(const Function &function,
                        const DefinitionTable &definitions,
-                       const DominanceInfo &dominance,
+                       const DominatorTable &dominators,
                        std::size_t use_block, std::size_t use_order,
                        const Operand &operand) {
     if (!function.contains(operand))
@@ -66,8 +62,7 @@ bool operand_available(const Function &function,
     const auto *value_id = operand.value_id();
     if (!value_id)
         return true;
-    if (!definitions[value_id->index])
-        return false;
+    // 使用点校验前，已经确认定义表没有空项。
     const auto &definition = *definitions[value_id->index];
     // 参数和入口分配在进入任何块之前就已完成，所有块都能使用。
     if (definition.before_entry)
@@ -76,23 +71,17 @@ bool operand_available(const Function &function,
     if (definition.block == use_block)
         return definition.order < use_order;
     // 跨块使用时，定义块必须支配使用块，保证不会从另一条分支绕过定义。
-    return dominance.reachable[use_block] &&
-           dominance.reachable[definition.block] &&
-           dominance.dominators[use_block][definition.block];
+    return dominators[use_block][definition.block];
 }
 
 // 参数按声明顺序从 0 编号，它们在进入任何基本块之前就已经可用。
 bool check_parameters(const Function &function, DefinitionTable &definitions,
                       std::ostream &diagnostics) {
     for (std::size_t parameter_index = 0;
-         parameter_index < function.parameters.size(); ++parameter_index) {
-        const auto &parameter = function.parameters[parameter_index];
-        const auto *value_id = parameter.value_id();
-        // 参数必须有值 ID，序号、类型和签名一致，并且是第一次定义。
-        if (!value_id || value_id->index != parameter_index ||
-            parameter.type !=
-                function.abi.signature.parameters[parameter_index] ||
-            !define_value(function, definitions, *value_id, parameter.type,
+         parameter_index < function.abi.signature.parameters.size(); ++parameter_index) {
+        // 参数身份由签名序号决定；值类型表仍须匹配，而且不能重复定义。
+        if (!define_value(function, definitions, {function.id, parameter_index},
+                          function.abi.signature.parameters[parameter_index],
                           {.before_entry = true}))
             return report_error(diagnostics, function,
                                 "函数参数身份或类型无效");
@@ -104,7 +93,7 @@ bool check_parameters(const Function &function, DefinitionTable &definitions,
 bool check_declaration(const Function &function,
                        std::ostream &diagnostics) {
     if (function.linkage != Linkage::External ||
-        function.value_types.size() != function.parameters.size() ||
+        function.value_types.size() != function.abi.signature.parameters.size() ||
         !function.entry_allocas.empty())
         return report_error(diagnostics, function,
                             "内部函数未完成定义或声明携带函数体数据");
@@ -141,12 +130,12 @@ bool check_instruction(const Module &module, LayoutService &layouts,
                        const Function &function,
                        const Instruction &instruction,
                        const DefinitionTable &definitions,
-                       const DominanceInfo &dominance,
+                       const DominatorTable &dominators,
                        std::size_t use_block, std::size_t use_order,
                        std::ostream &diagnostics) {
     // 所有操作数都按同一个使用点查询定义位置，避免每条指令重复展开参数。
     const auto operand_ready = [&](const Operand &operand) {
-        return operand_available(function, definitions, dominance, use_block,
+        return operand_available(function, definitions, dominators, use_block,
                                  use_order, operand);
     };
     if (const auto *call = std::get_if<Call>(&instruction.operation)) {
@@ -177,10 +166,9 @@ bool check_instruction(const Module &module, LayoutService &layouts,
             return report_error(diagnostics, function,
                                 "load 类型、地址、对齐或结果无效");
     } else if (const auto *store = std::get_if<Store>(&instruction.operation)) {
-        // 写入类型和对齐合法，store 不产生结果，值和地址类型必须匹配。
-        if (!valid_storage(store->storage_type, store->alignment) ||
+        // 值本身决定写入类型；对齐合法、地址可用，且 store 不产生结果。
+        if (!valid_storage(store->value.type, store->alignment) ||
             instruction.type != Type::Void || instruction.result ||
-            store->value.type != store->storage_type ||
             !operand_ready(store->value) ||
             store->address.type != Type::Ptr ||
             !operand_ready(store->address))
@@ -208,33 +196,24 @@ bool check_instruction(const Module &module, LayoutService &layouts,
             return report_error(diagnostics, function,
                                 "比较谓词、操作数或结果类型无效");
     } else if (const auto *extension = std::get_if<ZExt>(&instruction.operation)) {
-        // zext 只允许较窄整数到较宽整数，输入属于当前块，结果类型等于目标类型。
-        if (integer_width(extension->value.type) == 0 ||
-            integer_width(extension->target_type) <=
-                integer_width(extension->value.type) ||
+        // zext 只允许较窄整数到较宽整数，结果类型等于目标类型。
+        if (!is_narrower_integer(extension->value.type, extension->target_type) ||
             instruction.type != extension->target_type || !instruction.result ||
             !operand_ready(extension->value))
             return report_error(diagnostics, function,
                                 "zext 类型、操作数或结果无效");
     } else if (const auto *truncation = std::get_if<Trunc>(&instruction.operation)) {
         // 源和目标都必须是整数；非整数的位宽 0 不能当作合法截断目标。
-        if (integer_width(truncation->value.type) == 0 ||
-            integer_width(truncation->target_type) == 0 ||
-            integer_width(truncation->target_type) >=
-                integer_width(truncation->value.type) ||
+        if (!is_narrower_integer(truncation->target_type, truncation->value.type) ||
             instruction.type != truncation->target_type || !instruction.result ||
             !operand_ready(truncation->value))
             return report_error(diagnostics, function,
                                 "trunc 类型、操作数或结果无效");
     } else if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation)) {
         // GEP 结果必须是 ptr；源存储类型必须是结构/数组/Vec 且能计算布局。
-        if (gep->source_type.kind == StorageType::Kind::Unit ||
-            gep->source_type.kind == StorageType::Kind::Scalar)
-            return report_error(diagnostics, function,
-                                "getelementptr 源存储类型不是聚合");
         if (!valid_gep_indices(module, gep->source_type, gep->indices))
             return report_error(diagnostics, function,
-                                "getelementptr 下标数量或字段序号无效");
+                                "getelementptr 下标与源存储类型不匹配");
         try {
             (void)layouts.layout(gep->source_type);
         } catch (const std::logic_error &) {
@@ -246,9 +225,9 @@ bool check_instruction(const Module &module, LayoutService &layouts,
             return report_error(diagnostics, function,
                                 "getelementptr 基址或结果类型无效");
         for (const auto &index : gep->indices)
-            if (index.type != Type::I32 || !operand_ready(index))
+            if (!operand_ready(index))
                 return report_error(diagnostics, function,
-                                    "getelementptr 下标类型或定义位置无效");
+                                    "getelementptr 下标操作数不可用");
     } else {
         return report_error(diagnostics, function,
                             "alloca 只能出现在入口分配区");
@@ -256,59 +235,39 @@ bool check_instruction(const Module &module, LayoutService &layouts,
     return true;
 }
 
-// 检查一个基本块的 ID、终结指令、指令序列和终结指令的操作数。
+// CFG 结构已经验证；这里只检查指令和终结指令的使用点。
 bool check_block(const Module &module, LayoutService &layouts, const Function &function,
                  const BasicBlock &block, std::size_t block_index,
                  const DefinitionTable &definitions,
-                 const DominanceInfo &dominance,
+                 const DominatorTable &dominators,
                  std::ostream &diagnostics) {
-    if (block.id != BlockId{function.id, block_index} || !block.terminator)
-        return report_error(diagnostics, function,
-                            "基本块身份无效或缺少终结指令");
     // 指令按块内顺序检查；use_order 用来判断同块是否先定义后使用。
     for (std::size_t instruction_index = 0;
          instruction_index < block.instructions.size(); ++instruction_index)
         if (!check_instruction(module, layouts, function,
                                block.instructions[instruction_index],
-                               definitions, dominance, block_index,
+                               definitions, dominators, block_index,
                                instruction_index, diagnostics))
             return false;
     // 终结指令在所有普通指令之后使用操作数。
-    const std::size_t terminator_order = block.instructions.size();
+    const auto operand_ready = [&](const Operand &operand) {
+        return operand_available(function, definitions, dominators, block_index,
+                                 block.instructions.size(), operand);
+    };
     const auto &terminator = *block.terminator;
-    bool valid_terminator = false;
     // ret 的值也要先定义，并与函数返回类型相同；没有值时函数必须返回 void。
     if (const auto *return_instruction = std::get_if<Return>(&terminator)) {
-        if (return_instruction->value) {
-            valid_terminator =
-                operand_available(function, definitions, dominance,
-                                  block_index, terminator_order,
-                                  *return_instruction->value) &&
-                return_instruction->value->type == function.abi.signature.result;
-        } else {
-            valid_terminator = function.abi.signature.result == Type::Void;
-        }
-        if (!valid_terminator)
+        const auto &value = return_instruction->value;
+        const auto result = function.abi.signature.result;
+        if (value ? (value->type != result || !operand_ready(*value))
+                  : result != Type::Void)
             return report_error(diagnostics, function,
                                 "ret 的操作数、定义位置或返回类型无效");
-    } else if (const auto *branch = std::get_if<Branch>(&terminator)) {
-        valid_terminator = valid_jump_target(function, branch->target);
-        if (!valid_terminator)
+    } else if (const auto *conditional = std::get_if<CondBranch>(&terminator)) {
+        if (conditional->condition.type != Type::I1 ||
+            !operand_ready(conditional->condition))
             return report_error(diagnostics, function,
-                                "br 的跳转目标无效或指向入口块");
-    } else {
-        const auto &conditional = std::get<CondBranch>(terminator);
-        // 条件和两个目标都要检查；条件必须在当前块已经可用且类型为 i1。
-        valid_terminator =
-            conditional.condition.type == Type::I1 &&
-            operand_available(function, definitions, dominance,
-                              block_index, terminator_order,
-                              conditional.condition) &&
-            valid_jump_target(function, conditional.when_true) &&
-            valid_jump_target(function, conditional.when_false);
-        if (!valid_terminator)
-            return report_error(diagnostics, function,
-                                "condbr 的条件或跳转目标无效");
+                                "condbr 的条件类型或定义位置无效");
     }
     return true;
 }
@@ -336,73 +295,84 @@ bool collect_instruction_definitions(const Function &function,
     return true;
 }
 
-// 从终结指令建立前驱/后继表，求从入口可达的块，再求每个可达块的支配集合。
-DominanceInfo analyze_dominance(const Function &function) {
-    const std::size_t block_count = function.blocks.size();
-    DominanceInfo info;
-    info.reachable.assign(block_count, false);
-    info.dominators.assign(block_count,
-                           std::vector<bool>(block_count, false));
-    std::vector<std::vector<std::size_t>> predecessors(block_count);
-    std::vector<std::vector<std::size_t>> successors(block_count);
+struct ControlFlowGraph {
+    // 每个块对应一行，入口块也保留空的前驱行。
+    explicit ControlFlowGraph(std::size_t count) : predecessors(count), successors(count) {}
+    std::vector<std::vector<std::size_t>> predecessors; // 每个块的直接前驱。
+    std::vector<std::vector<std::size_t>> successors;   // 每个块的直接后继。
+};
 
-    // 只记录形状有效的同函数目标；无效目标仍由 check_block 负责报告。
+// 包括不可达块在内，每个块的身份、终结指令和跳转目标都合法才能使用这张图。
+bool build_cfg(const Function &function, ControlFlowGraph &graph,
+               std::ostream &diagnostics) {
     const auto add_edge = [&](std::size_t from, BlockId target) {
-        if (target.function != function.id ||
-            target.index >= block_count)
-            return;
-        successors[from].push_back(target.index);
-        predecessors[target.index].push_back(from);
+        if (!valid_jump_target(function, target))
+            return false;
+        graph.successors[from].push_back(target.index);
+        graph.predecessors[target.index].push_back(from);
+        return true;
     };
-    for (std::size_t block_index = 0; block_index < block_count;
+    for (std::size_t block_index = 0; block_index < function.blocks.size();
          ++block_index) {
-        const auto &terminator = function.blocks[block_index].terminator;
-        if (!terminator)
-            continue;
-        if (const auto *branch = std::get_if<Branch>(&*terminator)) {
-            add_edge(block_index, branch->target);
+        const auto &block = function.blocks[block_index];
+        if (block.id != BlockId{function.id, block_index} || !block.terminator)
+            return report_error(diagnostics, function,
+                                "基本块身份无效或缺少终结指令");
+        if (const auto *branch = std::get_if<Branch>(&*block.terminator)) {
+            if (!add_edge(block_index, branch->target))
+                return report_error(diagnostics, function,
+                                    "br 的跳转目标无效或指向入口块");
         } else if (const auto *conditional =
-                       std::get_if<CondBranch>(&*terminator)) {
-            add_edge(block_index, conditional->when_true);
-            add_edge(block_index, conditional->when_false);
+                       std::get_if<CondBranch>(&*block.terminator)) {
+            if (!add_edge(block_index, conditional->when_true) ||
+                !add_edge(block_index, conditional->when_false))
+                return report_error(diagnostics, function,
+                                    "condbr 的跳转目标无效或指向入口块");
         }
     }
+    return true;
+}
 
+// 只在完整、有效的 CFG 上计算支配关系。
+DominatorTable analyze_dominance(const ControlFlowGraph &graph) {
+    const auto block_count = graph.successors.size();
+    std::vector<bool> reachable(block_count, false);
+    DominatorTable dominators(block_count, std::vector<bool>(block_count, false));
     // 入口块是唯一的起点；不可达块不会进入后面的支配集合计算。
     std::vector<std::size_t> work{0};
-    info.reachable[0] = true;
+    reachable[0] = true;
     while (!work.empty()) {
         const auto current = work.back();
         work.pop_back();
-        for (const auto next : successors[current]) {
-            if (info.reachable[next])
+        for (const auto next : graph.successors[current]) {
+            if (reachable[next])
                 continue;
-            info.reachable[next] = true;
+            reachable[next] = true;
             work.push_back(next);
         }
     }
 
     // Dom(entry) = {entry}；其余可达块先初始化为全部可达块，再反复求交。
     for (std::size_t block_index = 1; block_index < block_count; ++block_index)
-        if (info.reachable[block_index])
-            info.dominators[block_index] = info.reachable;
-    info.dominators[0][0] = true;
+        if (reachable[block_index])
+            dominators[block_index] = reachable;
+    dominators[0][0] = true;
 
     bool changed = true;
     while (changed) {
         changed = false;
         for (std::size_t block_index = 1; block_index < block_count;
              ++block_index) {
-            if (!info.reachable[block_index])
+            if (!reachable[block_index])
                 continue;
             std::vector<bool> intersection(block_count, false);
             bool first_predecessor = true;
             // 只与可达前驱求交；可达块至少有一个可达前驱。
-            for (const auto predecessor : predecessors[block_index]) {
-                if (!info.reachable[predecessor])
+            for (const auto predecessor : graph.predecessors[block_index]) {
+                if (!reachable[predecessor])
                     continue;
                 if (first_predecessor) {
-                    intersection = info.dominators[predecessor];
+                    intersection = dominators[predecessor];
                     first_predecessor = false;
                     continue;
                 }
@@ -410,17 +380,17 @@ DominanceInfo analyze_dominance(const Function &function) {
                      ++candidate)
                     intersection[candidate] =
                         intersection[candidate] &&
-                        info.dominators[predecessor][candidate];
+                        dominators[predecessor][candidate];
             }
             // 每个块支配自己，即使所有前驱的交集里暂时没有它。
             intersection[block_index] = true;
-            if (intersection != info.dominators[block_index]) {
-                info.dominators[block_index] = intersection;
+            if (intersection != dominators[block_index]) {
+                dominators[block_index] = intersection;
                 changed = true;
             }
         }
     }
-    return info;
+    return dominators;
 }
 
 // 检查 ABI 的签名与存储信息是否匹配，并验证按值聚合存储能算出有限布局。
@@ -458,10 +428,6 @@ bool check_function(const Module &module, LayoutService &layouts, const Function
                     std::ostream &diagnostics) {
     if (!check_abi(layouts, function, diagnostics))
         return false;
-    if (function.parameters.size() != function.abi.signature.parameters.size())
-        return report_error(diagnostics, function,
-                            "函数签名或参数数量无效");
-
     DefinitionTable definitions(function.value_types.size());
     if (!check_parameters(function, definitions, diagnostics))
         return false;
@@ -471,17 +437,20 @@ bool check_function(const Module &module, LayoutService &layouts, const Function
         return false;
     if (!collect_instruction_definitions(function, definitions, diagnostics))
         return false;
-    // 每个记录了类型的值都必须实际出现在参数表或某条指令的结果中。
+    // 每个记录了类型的值都必须对应签名参数或某条指令的结果。
     if (std::find(definitions.begin(), definitions.end(), std::nullopt) != definitions.end())
         return report_error(diagnostics, function,
                             "值登记表包含未定义的 SSA 值");
 
     // 支配关系只依赖控制流结构，建立一次后供所有块的跨块使用检查查询。
-    const auto dominance = analyze_dominance(function);
+    ControlFlowGraph graph(function.blocks.size());
+    if (!build_cfg(function, graph, diagnostics))
+        return false;
+    const auto dominators = analyze_dominance(graph);
     for (std::size_t block_index = 0;
          block_index < function.blocks.size(); ++block_index)
         if (!check_block(module, layouts, function, function.blocks[block_index],
-                         block_index, definitions, dominance, diagnostics))
+                         block_index, definitions, dominators, diagnostics))
             return false;
     return true;
 }

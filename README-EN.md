@@ -19,11 +19,11 @@ Initialize the testcases and [REIMU](https://github.com/wanoful/REIMU) submodule
 git submodule update --init --recursive
 ```
 
-This fork uses the C++20 `rxcc` compiler for semantic checking. The default `BUILD`
-only builds it; official semantic tests need CMake, a C++20 compiler, and Python 3:
+This fork uses the C++20 `rxcc` compiler for semantic checking and IR generation.
+The default `BUILD` builds it; official semantic tests need CMake, a C++20 compiler, and Python 3:
 
 ```sh
-make test FILTER=official:semantic
+make test STAGE=semantic FILTER=official:semantic
 ```
 
 Select **C / C++** and **Semantic** when submitting to the OJ. Generated parser
@@ -33,10 +33,13 @@ no network, Cargo, Java, or local `dev/antlr` installation. After editing
 `rxcc/gen/*.cpp` and `rxcc/gen/*.h` together with the grammar changes. The script
 accepts `ANTLR4_JAVA` and `ANTLR4_JAR` to locate the local generation tools.
 
-IR / codegen / optimization commands still use the template's Rust reference
-compiler. After installing the Rust, REIMU, and Clang tools described below, use
-`make test BUILD_REFERENCE=true` to build the Rust reference library and run
-these local tests.
+`IR` uses the project's `rxcc --stage ir`. For stages requiring IR, `BUILD` compiles
+`rxcc/runtime/runtime.c` with Clang as the shared runtime; semantic-only runs do not
+need that runtime. Codegen / optimization still use the Rust reference compiler;
+`make test BUILD_REFERENCE=true` explicitly builds its helper library. Reference
+assembly results do not establish correctness of the project's IR generation.
+See the [staged IR tests](rxcc/tests/ir/README.md) for external LLVM verification
+and RV32 O0/O2 execution of development fixtures.
 
 Python 3, [xmake](https://xmake.io/) and any C++23 compiler is needed to build REIMU. Build REIMU separately from the project root before running tests:
 
@@ -59,8 +62,8 @@ IR tests also require **Clang 22**.
 In this course you can use **any language** to implement your compiler. Contact the TA if your language is not mainstream so that we can provide support for it on the Online Judge. For this reason, the template we provide here is **language-agnostic**. You will find:
 
 - Testcases under `tests/`. Official testcases reside under `tests/official` and is a git submodule. You may add your own testcases under `tests/custom`.
-- A test runner. The `Makefile` runs testcases using the compiler configured in `config.mk`. By default it uses your system rustc with the `riscv32im-unknown-none-elf` target and executes generated assembly in REIMU. **Replace the compiler commands in `config.mk` with your own compiler commands** to set up testing for your compiler. See [Running tests](#running-tests) for details.
-    - Some auxiliary files (such as the reference compiler helper code in `crates/rx`) help the default rustc produce assembly suitable for REIMU. Its `src/entry.rs` is compiled separately for each testcase and supplies the bare-metal entry point and `Box`/`Vec` imports. The library implements integer I/O through REIMU's libc, plus allocation and panic handling for bare-metal RV32 targets in `src/runtime.rs`. The reference IR and codegen commands request LLVM IR or assembly together with a static library so rustc performs whole-program LTO and includes the runtime in the generated program. The extra `{output}.a` is a build artifact. Codegen strips debug metadata with `scripts/strip_asm_debug.py`; the IR runner lowers `.ll` with Clang and strips the same unsupported metadata. In both paths, `RUN` receives assembly as `{output}`. These helpers can be removed when you replace the Rust compiler commands.
+- A test runner. The `Makefile` uses `config.mk`: SEMANTIC/IR use the project's C++ rxcc, while CODEGEN/optimization use the Rust reference implementation. Generated RV32IM assembly executes in REIMU. See [Running tests](#running-tests) for details.
+- The helpers in `crates/rx` serve only the Rust reference assembly path: `src/entry.rs` supplies its bare-metal entry and Box/Vec imports, while `src/runtime.rs` supplies I/O, allocation, and panic handling. The reference command emits assembly and an extra `{output}.a` for LTO. The project's IR path does not depend on these Rust helpers; it links assembly compiled from `rxcc/runtime/runtime.c`. Both paths strip unsupported debug metadata, and `RUN` receives assembly as `{output}`.
 - REIMU under `vendor/REIMU`, pinned as a git submodule. The `RUN` command in `config.mk` invokes it; the test runner does not depend on a particular simulator.
 - G4 grammar for Rx under `grammar/`. You may use it to generate the lexer and parser for your compiler.
 

@@ -118,7 +118,7 @@ void IRBuilder::store(Type storage_type, Operand value, Operand address,
     require_operand(function, address);
     require(value.type == storage_type && address.type == Type::Ptr,
             "IR store 值或地址类型无效");
-    append(function, Type::Void, Store{storage_type, value, address, alignment});
+    append(function, Type::Void, Store{value, address, alignment});
 }
 
 // 添加二元运算；两侧类型必须相同，并且是该指令允许的 i1/i32。
@@ -149,8 +149,7 @@ Operand IRBuilder::zext(Type target_type, Operand value) {
     auto &function = open_function();
     require_operand(function, value);
     // 位宽必须严格变大，例如 i1→i8、i1→i32 或 i8→i32。
-    require(integer_width(value.type) != 0 &&
-                integer_width(target_type) > integer_width(value.type),
+    require(is_narrower_integer(value.type, target_type),
             "IR zext 只支持较窄整数到较宽整数");
     return append(function, target_type, ZExt{value, target_type});
 }
@@ -160,9 +159,7 @@ Operand IRBuilder::trunc(Type target_type, Operand value) {
     auto &function = open_function();
     require_operand(function, value);
     // 源和目标都必须是整数，且位宽严格变小；非整数的位宽 0 不能当作窄整数。
-    require(integer_width(value.type) != 0 &&
-                integer_width(target_type) != 0 &&
-                integer_width(target_type) < integer_width(value.type),
+    require(is_narrower_integer(target_type, value.type),
             "IR trunc 只支持较宽整数到较窄整数");
     return append(function, target_type, Trunc{value, target_type});
 }

@@ -1,7 +1,7 @@
 // 定义保存 IR 所需的模块、函数、基本块、操作数和指令，不依赖 LLVM 开发库。
 // 一个模块保存多个函数，每个函数保存自己的基本块，以及参数和指令结果的类型。
-// 当前支持整数、布尔和指针，以及调用、存储、二元运算、比较、
-// 整数扩展/截断和返回指令，不推导源程序类型。
+// 当前支持整数、布尔和指针，以及聚合存储与投影、调用、标量运算、
+// 整数扩展/截断、返回和分支指令，不推导源程序类型。
 #pragma once
 
 #include "ir/layout.hpp"
@@ -28,6 +28,8 @@ const char *type_name(Type type);
 bool is_known_type(Type type);
 // 返回整数类型的位宽；非整数类型返回 0，供扩展/截断检查位宽方向。
 unsigned integer_width(Type type);
+// 两者都必须是整数，且前者严格窄于后者；zext 和 trunc 按相反方向使用。
+bool is_narrower_integer(Type narrow, Type wide);
 
 // 表示尚未分配下标，不能用它访问函数、值或基本块表。
 inline constexpr std::size_t invalid_index =
@@ -71,7 +73,7 @@ struct Operand {
     const ValueId *value_id() const { return std::get_if<ValueId>(&value); }
     bool operator==(const Operand &) const = default;
 };
-// 判断操作数是否保存了当前支持且范围有效的常量（i1/i8/i32）。
+// 判断操作数是否保存了范围有效的整数常量（i1/i8/i32）或 ptr null。
 bool valid_constant(const Operand &operand);
 
 // Internal 表示函数只在当前模块可见，External 表示函数符号可以跨模块链接。
@@ -112,7 +114,8 @@ struct GetElementPtr {
     Operand base; // 基址操作数，IR 类型必须为 ptr。
     std::vector<Operand> indices; // 依次为指针下标和字段/数组下标，均为 i32。
 };
-// 检查 GEP 至少包含指针下标和一次字段/元素投影，且各层下标适合当前存储类型。
+// 检查 GEP 至少包含指针下标和一次投影，各下标为 i32，且字段选择有效。
+// 不检查操作数归属、定义位置或源类型布局。
 bool valid_gep_indices(const Module &module, const StorageType &source_type,
                        const std::vector<Operand> &indices);
 // 保存 load 指令从哪个地址读取哪种类型。
@@ -123,8 +126,7 @@ struct Load {
 };
 // 保存 store 指令把哪个值写到哪个地址。
 struct Store {
-    Type storage_type; // 写入的 IR 类型；支持 i32、i8 和 ptr。
-    Operand value; // 要写入的值。
+    Operand value; // 要写入的值，其类型同时决定存储类型：i32、i8 或 ptr。
     Operand address; // 目标地址操作数，类型必须是 ptr。
     uint32_t alignment; // 地址的对齐字节数，必须是非零的 2 的幂。
 };
@@ -238,18 +240,18 @@ struct Function {
     const std::string name; // 这个不可变的 LLVM 全局符号名同时用于函数表的名称索引。
     Linkage linkage; // 符号链接属性，决定是否仅在模块内部可见。
     FunctionABI abi; // 函数签名和按值聚合存储信息。
-    std::vector<Operand> parameters; // 按声明顺序保存的参数操作数，它们占用本函数最前面的值编号。
     std::vector<Type> value_types; // 记录每个参数和指令结果的类型，ValueId.index 是这张表的下标。
     std::vector<Instruction> entry_allocas; // 固定分配总是在入口正文之前输出，不改变正文的求值顺序。
     std::vector<BasicBlock> blocks; // 按创建顺序保存的基本块；定义的第一个块为入口块。
 
     // 判断函数是否只有声明、没有函数体；内部函数不能一直保持声明状态。
     bool is_declaration() const { return blocks.empty(); }
-    // 按参数序号返回对应的 IR 操作数，序号从 0 开始。
+    // 参数占用最前面的值编号，按签名和序号直接构造操作数，不另存参数表。
     Operand argument(std::size_t parameter_index) const {
-        return parameters.at(parameter_index);
+        return Operand::local(abi.signature.parameters.at(parameter_index),
+                              ValueId{id, parameter_index});
     }
-    // 为新值分配 ID 并保存类型；调用方还需要把它记录为参数或指令结果。
+    // 为新指令结果分配 ID 并保存类型；调用方还需要把它记录为指令结果。
     Operand new_value(Type type);
     // 添加一个空基本块并返回它的 ID，结束指令由调用方稍后添加。
     BlockId add_block();

@@ -7,7 +7,7 @@
     "metadata": {
       "testpoint": "P6-01",
       "requires": "P6.1",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -18,7 +18,7 @@
     "metadata": {
       "testpoint": "P6-01",
       "requires": "P6.1",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -35,7 +35,7 @@
     "metadata": {
       "testpoint": "P6-03",
       "requires": "P6.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -46,7 +46,7 @@
     "metadata": {
       "testpoint": "P6-03",
       "requires": "P6.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -63,7 +63,7 @@
     "metadata": {
       "testpoint": "P6-06",
       "requires": "P6.3",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -74,7 +74,7 @@
     "metadata": {
       "testpoint": "P6-06",
       "requires": "P6.3",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -91,7 +91,7 @@
     "metadata": {
       "testpoint": "P6-07",
       "requires": "P6.4",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -102,7 +102,7 @@
     "metadata": {
       "testpoint": "P6-07",
       "requires": "P6.4",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -119,7 +119,7 @@
     "metadata": {
       "testpoint": "P6-09",
       "requires": "P6.5",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -130,7 +130,7 @@
     "metadata": {
       "testpoint": "P6-09",
       "requires": "P6.5",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -147,7 +147,7 @@
     "metadata": {
       "testpoint": "P6-10",
       "requires": "P6.6",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -158,7 +158,7 @@
     "metadata": {
       "testpoint": "P6-10",
       "requires": "P6.6",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -175,7 +175,7 @@
     "metadata": {
       "testpoint": "P6-12",
       "requires": "P6.7A",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -186,7 +186,7 @@
     "metadata": {
       "testpoint": "P6-12",
       "requires": "P6.7A",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -203,7 +203,7 @@
     "metadata": {
       "testpoint": "P6-13",
       "requires": "P6.7B",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -214,7 +214,7 @@
     "metadata": {
       "testpoint": "P6-13",
       "requires": "P6.7B",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -231,7 +231,7 @@
     "metadata": {
       "testpoint": "P6-17",
       "requires": "P6.8",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -242,7 +242,7 @@
     "metadata": {
       "testpoint": "P6-17",
       "requires": "P6.8",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {

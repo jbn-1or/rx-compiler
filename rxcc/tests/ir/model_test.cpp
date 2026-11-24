@@ -58,6 +58,27 @@ void add_typed_calls(Module &module) {
     builder.ret(Operand::constant(Type::I32, 0xffffffffu));
 }
 
+// 参数操作数由签名和序号构造；指令结果仍从全部参数之后开始编号。
+void check_parameter_identity() {
+    auto artifact = make_module();
+    auto &module = artifact.module();
+    const auto id = module.add_function(
+        "mixed_parameters", {Type::Ptr, {Type::I1, Type::I32, Type::Ptr}}, Linkage::Internal);
+    auto &function = module.function(id);
+    check(function.argument(0) == Operand::local(Type::I1, {id, 0}) &&
+              function.argument(1) == Operand::local(Type::I32, {id, 1}) &&
+              function.argument(2) == Operand::local(Type::Ptr, {id, 2}),
+          "参数操作数必须保持签名类型和固定身份");
+    rejects([&] { function.argument(3); });
+    IRBuilder builder(module);
+    builder.set_insert_point(function.add_block());
+    const auto byte = builder.zext(Type::I8, function.argument(0));
+    check(byte == Operand::local(Type::I8, {id, 3}), "指令结果不得占用参数编号");
+    builder.ret(function.argument(2));
+    std::ostringstream output, diagnostics;
+    check(artifact.verify_and_print(output, diagnostics), "派生参数操作数必须通过完整检查");
+}
+
 void add_storage(Module &module) {
     IRBuilder builder(module);
     const auto id = module.add_function("storage", {Type::I32, {}}, Linkage::Internal);
@@ -254,6 +275,10 @@ void check_branch_models() {
     }, "跨函数的 br 必须被拒绝");
     reject([](Module &, Function &f) { f.blocks.at(1).terminator = Branch{f.blocks.front().id}; },
            "跳回入口块的 br 必须被拒绝");
+    reject([](Module &, Function &f) {
+        const auto dead = f.add_block();
+        f.block(dead).terminator = Branch{BlockId{f.id, invalid_index}};
+    }, "不可达块的非法边也必须在建图时被拒绝");
     reject([](Module &, Function &f) {
         auto &branch = std::get<CondBranch>(*f.blocks.front().terminator);
         branch.when_false = BlockId{f.id, invalid_index};
@@ -485,7 +510,9 @@ void check_aggregate_gep() {
     const auto index = function.argument(0);
     rejects([&] { builder.get_element_ptr(array, zero, {zero, index}); });
     const auto boolean = Operand::constant(Type::I1, 1);
+    rejects([&] { builder.get_element_ptr(array, base, {boolean, index}); });
     rejects([&] { builder.get_element_ptr(array, base, {zero, boolean}); });
+    rejects([&] { builder.get_element_ptr(StorageType::scalar(Type::I32), base, {zero, one}); });
     check(function.blocks.front().instructions.empty(), "非法 GEP 不得发指令");
 
     const auto item = builder.get_element_ptr(array, base, {zero, index});
@@ -512,6 +539,16 @@ void check_aggregate_gep() {
               invalid_text.str().empty() && !invalid_diagnostics.str().empty(),
           "检查器必须拒绝错误类型的 GEP 下标，不输出部分 IR");
     gep.indices.back() = index;
+    // 首下标和数组投影都允许动态 i32，但不能读取后面的 load 结果。
+    const auto later = Operand::local(Type::I32, *function.blocks.front().instructions.back().result);
+    for (auto &operand : gep.indices) {
+        const auto original = operand;
+        operand = later;
+        std::ostringstream output, errors;
+        check(!artifact.verify_and_print(output, errors) && output.str().empty() && !errors.str().empty(),
+              "检查器必须独立拒绝在使用点尚未定义的 GEP 下标");
+        operand = original;
+    }
     auto &field_gep = std::get<GetElementPtr>(function.blocks.front().instructions[1].operation);
     field_gep.indices.back() = out_of_range;
     std::ostringstream invalid_field_text, invalid_field_diagnostics;
@@ -574,6 +611,53 @@ void check_aggregate_abi_validation() {
     });
 }
 
+// 构造可独立输出的聚合调用：命名字段与数组投影、按值参数和隐藏返回地址一起交给 LLVM 验证。
+void add_aggregate_calls(Module &module) {
+    const auto record = module.add_named_type("aggregate_record");
+    module.define_named_type(record, {StorageType::scalar(Type::I8), StorageType::scalar(Type::I32)});
+    const auto element = StorageType::struct_of(record);
+    const auto array = StorageType::array_of(element, 2);
+    const FunctionABI abi{{Type::Void, {Type::Ptr, Type::Ptr}}, {{}, array}, array};
+    const auto callee = module.add_function_abi("aggregate_copy", abi, Linkage::Internal);
+    auto &copy = module.function(callee);
+    IRBuilder builder(module);
+    builder.set_insert_point(copy.add_block());
+    const auto zero = Operand::constant(Type::I32, 0);
+    for (uint32_t index = 0; index < 2; ++index) {
+        const auto position = Operand::constant(Type::I32, index);
+        const auto source = builder.get_element_ptr(array, copy.argument(1), {zero, position});
+        const auto destination = builder.get_element_ptr(array, copy.argument(0), {zero, position});
+        // 只搬运两个实际字段，不把尾填充当作源值内容读取。
+        for (uint32_t field = 0; field < 2; ++field) {
+            const auto member = Operand::constant(Type::I32, field);
+            const auto type = field == 0 ? Type::I8 : Type::I32;
+            const uint32_t alignment = field == 0 ? 1 : 4;
+            const auto from = builder.get_element_ptr(element, source, {zero, member});
+            const auto to = builder.get_element_ptr(element, destination, {zero, member});
+            builder.store(type, builder.load(type, from, alignment), to, alignment);
+        }
+    }
+    builder.ret();
+
+    const auto caller = module.add_function("aggregate_invoke", {Type::I32, {}}, Linkage::Internal);
+    builder.set_insert_point(module.function(caller).add_block());
+    const auto source = builder.entry_alloca(array, 4);
+    const auto destination = builder.entry_alloca(array, 4);
+    const auto one = Operand::constant(Type::I32, 1);
+    for (uint32_t index = 0; index < 2; ++index) {
+        const auto item = builder.get_element_ptr(array, source,
+            {zero, Operand::constant(Type::I32, index)});
+        builder.store(Type::I8, Operand::constant(Type::I8, index),
+                      builder.get_element_ptr(element, item, {zero, zero}), 1);
+        builder.store(Type::I32, Operand::constant(Type::I32, 41 + index),
+                      builder.get_element_ptr(element, item, {zero, one}), 4);
+    }
+    builder.call(callee, {destination, source});
+    const auto item = builder.get_element_ptr(array, destination, {zero, one});
+    const auto field = builder.get_element_ptr(element, item, {zero, one});
+    builder.ret(builder.load(Type::I32, field, 4));
+}
+
 void check_invalid_models() {
     reject_model([](Module &m) { m.find_function("main")->blocks[0].terminator.reset(); });
     reject_model([](Module &m) { m.find_function("main")->blocks[0].terminator = Return{}; });
@@ -612,6 +696,19 @@ void check_invalid_models() {
     reject_model([](Module &m) {
         m.find_function("external_io")->abi.signature.parameters[0] = Type::Void;
     });
+    // 删除派生参数表后，签名与值类型表的缺项、多项和类型失配仍必须拒绝。
+    reject_model([](Module &m) { m.find_function("identity")->value_types.clear(); });
+    reject_model([](Module &m) { m.find_function("identity")->value_types[0] = Type::I1; });
+    reject_model([](Module &m) {
+        auto &function = *m.find_function("identity");
+        function.abi.signature.parameters.push_back(Type::I32);
+        function.abi.parameter_storage.emplace_back();
+    });
+    reject_model([](Module &m) {
+        auto &function = *m.find_function("external_io");
+        function.abi.signature.parameters.clear();
+        function.abi.parameter_storage.clear();
+    });
     reject_model([](Module &m) { m.find_function("__rx_fn_0")->blocks.clear(); });
     reject_model([](Module &m) { std::get<Alloca>(m.find_function("storage")->entry_allocas[0].operation).alignment = 3; });
     reject_model([](Module &m) { m.find_function("storage")->entry_allocas[0].type = Type::I32; });
@@ -629,7 +726,7 @@ void check_invalid_models() {
     });
     reject_pointer_model([](Module &m) {
         std::get<Store>(m.find_function("pointer_roundtrip")->blocks[0].instructions[0].operation)
-            .value = Operand::constant(Type::I32, 42);
+            .value = Operand::constant(Type::I1, 1);
     });
     // 同模块另一函数的 ptr 也不能作为当前函数的值或地址使用。
     reject_pointer_model([](Module &m) {
@@ -818,6 +915,15 @@ void run_tests() {
     std::ostream failing_output(&unwritable);
     check(!moved.verify_and_print(failing_output, diagnostics) && failing_output.bad(),
           "缓冲区写入失败应传播到目标流");
+    std::ostream throwing_output(&unwritable);
+    const auto exceptions = std::ios::badbit | std::ios::failbit;
+    throwing_output.exceptions(exceptions);
+    std::ostringstream write_diagnostics;
+    check(!moved.verify_and_print(throwing_output, write_diagnostics) &&
+              throwing_output.bad() && throwing_output.exceptions() == exceptions &&
+              write_diagnostics.str().find("IR 输出流写入失败") != std::string::npos,
+          "启用异常的写入失败也必须返回 false，保留失败位和异常设置并输出诊断");
+    check_parameter_identity();
     check_invalid_models();
     check_branch_builder();
     check_branch_models();
@@ -826,6 +932,10 @@ void run_tests() {
     check_invalid_named_layouts();
     check_aggregate_gep();
     check_aggregate_abi_validation();
+    auto aggregates = make_module();
+    add_aggregate_calls(aggregates.module());
+    check(aggregates.verified_text(diagnostics).has_value(),
+          "独立聚合调用模型必须通过结构校验和序列化");
     auto storage = make_module();
     add_storage(storage.module());
     std::ostringstream storage_text;
@@ -844,6 +954,10 @@ void run_tests() {
     const auto values = memory_function.value_types.size();
     rejects([&] { memory.entry_alloca(Type::Void, 4); });
     rejects([&] { memory.entry_alloca(Type::I32, 3); });
+    const auto nested = StorageType::array_of(StorageType::array_of(Type::I32, 2), 3);
+    check(valid_storage(nested, 1), "嵌套数组仍可使用合法的非自然对齐");
+    rejects([&] { memory.entry_alloca(nested, 3); });
+    rejects([&] { memory.entry_alloca(StorageType::array_of(StorageType::array_of(Type::I1, 2), 3), 4); });
     rejects([&] { memory.load(Type::Void, address, 4); });
     rejects([&] { memory.load(Type::I32, Operand::constant(Type::I32, 0), 4); });
     rejects([&] { memory.store(Type::I32, address, address, 4); });
@@ -947,6 +1061,7 @@ int main(int argc, char **argv) {
             add_operations(artifact.module());
             add_branches(artifact.module());
             add_dominance_loop(artifact.module());
+            add_aggregate_calls(artifact.module());
         }
         return artifact.verify_and_print(std::cout, std::cerr) ? 0 : 1;
     } catch (const std::exception &error) {

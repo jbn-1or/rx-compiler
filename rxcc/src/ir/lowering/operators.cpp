@@ -2,6 +2,7 @@
 #include "ir/lowering.hpp"
 #include "ast/ast.hpp"
 #include "ir/builder.hpp"
+#include <stdexcept>
 
 namespace rx {
 
@@ -28,10 +29,17 @@ GenerationContext::emit_binary(const BinaryExpression &expression,
     if (expression.operation == BinaryOperator::LogicalAnd ||
         expression.operation == BinaryOperator::LogicalOr)
         return emit_logical(expression, locals, use);
-    // 相等比较先准备两侧借用，再按内容比较；不能用地址比较代替。
     if (expression.operation == BinaryOperator::Equal ||
-        expression.operation == BinaryOperator::NotEqual)
+        expression.operation == BinaryOperator::NotEqual) {
+        // 比较本身没有副作用；丢弃结果时仍需依次执行两侧表达式。
+        if (use == ResultUse::Discard) {
+            auto left = emit_discarded_expression(*expression.left, locals);
+            if (!left || path_ended(*left))
+                return left;
+            return emit_discarded_expression(*expression.right, locals);
+        }
         return emit_equality(expression, locals);
+    }
     const auto &left_type =
         semantics.expressions.at(expression.left.get()).type;
     const auto &right_type =
@@ -51,15 +59,12 @@ GenerationContext::emit_binary(const BinaryExpression &expression,
     const SemanticType *operand_type = &left_type;
     while (is_reference(*operand_type))
         operand_type = operand_type->inner.get();
-    auto result = emit_binary_operation(expression.operation, *operand_type,
-                                        left_scalar, right_scalar);
-    if (!result)
-        return std::nullopt;
-    return EmitResult{*result};
+    return emit_binary_operation(expression.operation, *operand_type,
+                                 left_scalar, right_scalar);
 }
 
 // 只接收已求好的标量操作数，按源类型选择具体指令。
-std::optional<ir::Operand> GenerationContext::emit_binary_operation(
+ir::Operand GenerationContext::emit_binary_operation(
     BinaryOperator operation, const SemanticType &operand_type,
     ir::Operand left, ir::Operand right) {
     // 只有 i32 和 isize 是有符号整数；bool 不是整数，不能沿用默认的 int_kind。
@@ -93,10 +98,6 @@ std::optional<ir::Operand> GenerationContext::emit_binary_operation(
         return builder.binary(ir::BinaryOp::Or, left, right);
     case BinaryOperator::BitwiseXor:
         return builder.binary(ir::BinaryOp::Xor, left, right);
-    case BinaryOperator::Equal:
-        return builder.compare(ir::Comparison::Equal, left, right);
-    case BinaryOperator::NotEqual:
-        return builder.compare(ir::Comparison::NotEqual, left, right);
     // bool 只能用无符号比较，避免把 i1 的 true 当成有符号的 -1。
     case BinaryOperator::LessThan:
         return builder.compare(
@@ -131,13 +132,14 @@ std::optional<ir::Operand> GenerationContext::emit_binary_operation(
                             : ir::BinaryOp::LogicalShiftRight;
         return builder.binary(shift, left, count);
     }
-    // 短路逻辑由 emit_logical 生成控制流，不经过标量运算发射接口。
+    // 这些运算已由 emit_binary 单独分派。
+    case BinaryOperator::Equal:
+    case BinaryOperator::NotEqual:
     case BinaryOperator::LogicalAnd:
     case BinaryOperator::LogicalOr:
         break;
     }
-    diagnostics << "IR 生成尚未支持此二元运算\n";
-    return std::nullopt;
+    throw std::logic_error("不是标量二元运算");
 }
 
 // 生成借用、取负和取反；显式解引用由表达式分派按 place 读取。
@@ -152,37 +154,20 @@ GenerationContext::emit_unary(const UnaryExpression &expression,
     const auto &operand_type =
         semantics.expressions.at(expression.operand.get()).type;
     auto operand = emit_value(*expression.operand, locals);
-    if (!operand)
-        return std::nullopt;
-    // 操作数提前结束路径时，外层运算也不能再生成。
-    if (path_ended(*operand))
-        return EmitResult{NoContinuation{}};
-    const auto &type = semantics.expressions.at(&expression).type;
+    if (!operand || path_ended(*operand))
+        return operand;
     const auto value = finish_scalar_operand(
         std::get<ir::Operand>(*operand), operand_type);
-    switch (expression.operation) {
     // 语义阶段已保证取负结果为整数；按 32 位回绕用 0 减操作数，不附加不溢出承诺。
-    case UnaryOperator::Negative:
+    if (expression.operation == UnaryOperator::Negative)
         return EmitResult{
             builder.binary(ir::BinaryOp::Subtract,
                            ir::Operand::constant(ir::Type::I32, 0), value)};
-    // bool 与 true 异或；整数与全 1 位模式异或，不套用布尔真值规则。
-    case UnaryOperator::Not:
-        if (type.kind == SemanticType::Kind::Bool)
-            return EmitResult{builder.binary(
-                ir::BinaryOp::Xor, value,
-                ir::Operand::constant(ir::Type::I1, 1))};
-        // 语义阶段已保证取反结果只能是 bool 或整数，排除 bool 后直接生成整数取反。
-        return EmitResult{builder.binary(
-            ir::BinaryOp::Xor, value,
-            ir::Operand::constant(ir::Type::I32, 0xffffffffu))};
-    case UnaryOperator::Dereference:
-    case UnaryOperator::Borrow:
-    case UnaryOperator::MutableBorrow:
-        break;
-    }
-    diagnostics << "IR 生成尚未支持此一元运算\n";
-    return std::nullopt;
+    // 剩下的是取反：bool 与 true 异或，整数与全 1 位模式异或。
+    const auto mask = semantics.expressions.at(&expression).type.kind == SemanticType::Kind::Bool
+                          ? ir::Operand::constant(ir::Type::I1, 1)
+                          : ir::Operand::constant(ir::Type::I32, 0xffffffffu);
+    return builder.binary(ir::BinaryOp::Xor, value, mask);
 }
 
 // 生成 as 转换：整数之间只换源类型，bool 到整数先零扩展成 i32。
@@ -190,11 +175,8 @@ std::optional<EmitResult>
 GenerationContext::emit_cast(const CastExpression &expression,
                              LocalPlaces &locals) {
     auto operand = emit_value(*expression.operand, locals);
-    if (!operand)
-        return std::nullopt;
-    // 操作数提前结束路径时，cast 也不能再生成。
-    if (path_ended(*operand))
-        return EmitResult{NoContinuation{}};
+    if (!operand || path_ended(*operand))
+        return operand;
     const auto value = std::get<ir::Operand>(*operand);
     // 语义阶段只允许整数到整数和 bool 到整数；整数 cast 保留 i32 位模式，
     // 因此不生成指令。目标源类型已记录在 cast 表达式的语义结果中，

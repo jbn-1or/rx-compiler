@@ -13,7 +13,7 @@ namespace rx {
 namespace {
 
 // 数组元素下标和字段序号在 LLVM 中统一使用 i32 常量。
-ir::Operand index_constant(std::size_t index) {
+ir::Operand index_constant(uint64_t index) {
     if (index > std::numeric_limits<uint32_t>::max())
         throw std::logic_error("聚合下标超出 i32 常量范围");
     return ir::Operand::constant(ir::Type::I32,
@@ -47,10 +47,8 @@ GenerationContext::emit_struct(const StructExpression &expression,
         auto prepared = emit_prepared_value(
             *field.value, locals,
             UseSite{&expression, UseKind::Field, source_index});
-        if (!prepared)
-            return std::nullopt;
-        if (path_ended(*prepared))
-            return EmitResult{NoContinuation{}};
+        if (!prepared || path_ended(*prepared))
+            return prepared;
         if (std::holds_alternative<UnitResult>(*prepared))
             continue;
         const auto field_place = builder.get_element_ptr(
@@ -59,7 +57,7 @@ GenerationContext::emit_struct(const StructExpression &expression,
              index_constant(field_declaration_index(structure, field.name))});
         store_prepared_value(field_place, *prepared, field_type);
     }
-    return EmitResult{AggregateValue{address, &type}};
+    return AggregateValue{address};
 }
 
 // 按源码顺序生成数组元素；重复形式只求值一次元素，再复制到各位置。
@@ -96,7 +94,7 @@ GenerationContext::emit_array(const ArrayExpression &expression,
         for (std::size_t index = 0; index < values.size(); ++index)
             store_element(index_constant(index), values[index]);
     }
-    return EmitResult{AggregateValue{address, &type}};
+    return AggregateValue{address};
 }
 
 // 求值一个固定使用位置，并按 sema 已选定的路径调整到目标类型。
@@ -105,21 +103,11 @@ GenerationContext::emit_prepared_value(const Expression &expression,
                                        LocalPlaces &locals,
                                        const UseSite &site) {
     auto value = emit_value(expression, locals);
-    if (!value || path_ended(*value))
+    if (!value)
         return value;
-    return adjust_value(*value, site);
-}
-
-// 对已经求好的结果执行引用调整；聚合值没有逐层指针可读，保持原存储。
-std::optional<EmitResult>
-GenerationContext::adjust_value(const EmitResult &value,
-                                const UseSite &site) {
-    if (const auto *operand = std::get_if<ir::Operand>(&value)) {
-        auto adjusted = emit_coercion_at(site, *operand);
-        if (!adjusted)
-            return std::nullopt;
-        return EmitResult{*adjusted};
-    }
+    // 只有标量需要引用调整；聚合值、unit 和已结束的路径原样传递。
+    if (const auto *operand = std::get_if<ir::Operand>(&*value))
+        return emit_coercion_at(site, *operand);
     return value;
 }
 
@@ -129,7 +117,7 @@ std::optional<EmitResult> GenerationContext::read_stored_value(
     if (type.is_unit())
         return UnitResult{};
     if (!is_storable_value(type)) {
-        diagnostics << "IR 生成尚未支持读取此类型的值（P9）\n";
+        diagnostics << "IR 生成尚未支持从存储中读取类型 " << type.toString() << '\n';
         return std::nullopt;
     }
     if (is_aggregate_value(type)) {
@@ -137,9 +125,9 @@ std::optional<EmitResult> GenerationContext::read_stored_value(
             const auto snapshot =
                 allocate_storage_slot(ir::storage_type_of(type));
             copy_value(snapshot, address, type);
-            return AggregateValue{snapshot, &type};
+            return AggregateValue{snapshot};
         }
-        return AggregateValue{address, &type};
+        return AggregateValue{address};
     }
     return load_value(address, type);
 }
@@ -170,63 +158,56 @@ void GenerationContext::copy_value(const ir::Operand &destination,
             return;
         case SemanticType::Kind::Int:
         case SemanticType::Kind::Bool:
-        case SemanticType::Kind::Reference: {
+        case SemanticType::Kind::Reference:
+        case SemanticType::Kind::Box: {
             store_value(load_value(source, type), destination);
             return;
         }
-        case SemanticType::Kind::Box:
-            // 聚合内按布局搬运 Box 指针，不读取堆中目标。
-            store_value(load_value(source, ir::Type::Ptr), destination);
+        case SemanticType::Kind::Struct:
+        case SemanticType::Kind::Array:
+            for_each_member_pair(destination, source, type,
+                [&](ir::Operand dest, ir::Operand src, const SemanticType &member) {
+                    copy_value(dest, src, member);
+                });
             return;
-        case SemanticType::Kind::Struct: {
-            const auto storage = ir::storage_type_of(type);
-            const StructSymbol &structure = *type.struct_symbol;
-            for (std::size_t index = 0; index < structure.fields.size();
-                 ++index) {
-                const auto &field = structure.fields[index];
-                const auto &field_type = structure.field_types.at(field.name);
-                const auto field_index = index_constant(index);
-                const auto source_field = builder.get_element_ptr(
-                    storage, source, {index_constant(0), field_index});
-                const auto destination_field = builder.get_element_ptr(
-                    storage, destination, {index_constant(0), field_index});
-                copy_value(destination_field, source_field, field_type);
-            }
-            return;
-        }
-        case SemanticType::Kind::Array: {
-            const auto &element_type = *type.inner;
-            const auto storage = ir::storage_type_of(type);
-            for_each_array_index(type.length, [&](ir::Operand index) {
-                const auto source_element = builder.get_element_ptr(
-                    storage, source, {index_constant(0), index});
-                const auto destination_element = builder.get_element_ptr(
-                    storage, destination, {index_constant(0), index});
-                copy_value(destination_element, source_element, element_type);
-            });
-            return;
-        }
         case SemanticType::Kind::Vec: {
-            // Vec 头固定为 { ptr, i32, i32 }；P9 再解释其堆内容。
-            const auto storage = ir::StorageType::vec();
-            for (std::size_t index = 0; index < 3; ++index) {
-                const auto field_index = index_constant(index);
-                const auto source_field = builder.get_element_ptr(
-                    storage, source, {index_constant(0), field_index});
-                const auto destination_field = builder.get_element_ptr(
-                    storage, destination, {index_constant(0), field_index});
+            // 移动 Vec 只搬运头，不复制缓冲区。
+            for (auto field : {VecField::Data, VecField::Length, VecField::Capacity}) {
+                const auto source_field = vec_field_address(source, field);
+                const auto destination_field = vec_field_address(destination, field);
                 const auto field_type =
-                    index == 0 ? ir::Type::Ptr : ir::Type::I32;
-                const auto value = builder.load(
-                    field_type, source_field, ir::scalar_layout(field_type).align);
-                builder.store(field_type, value, destination_field,
-                              ir::scalar_layout(field_type).align);
+                    field == VecField::Data ? ir::Type::Ptr : ir::Type::I32;
+                store_value(load_value(source_field, field_type), destination_field);
             }
             return;
         }
         case SemanticType::Kind::Never:
         case SemanticType::Kind::Error:
             throw std::logic_error("发散或错误类型没有聚合值");
+    }
+}
+
+// 只遍历结构体或数组的一层，不决定成员需要搬运、深克隆还是比较。
+void GenerationContext::for_each_member_pair(
+    const ir::Operand &first, const ir::Operand &second, const SemanticType &type,
+    const std::function<void(ir::Operand, ir::Operand, const SemanticType &)> &body) {
+    const auto storage = ir::storage_type_of(type);
+    const auto zero = index_constant(0);
+    const auto project = [&](ir::Operand index, const SemanticType &member) {
+        const auto first_member = builder.get_element_ptr(storage, first, {zero, index});
+        const auto second_member = builder.get_element_ptr(storage, second, {zero, index});
+        body(first_member, second_member, member);
+    };
+    if (type.kind == SemanticType::Kind::Array) {
+        for_each_array_index(type.length, [&](ir::Operand index) {
+            project(index, *type.inner);
+        });
+        return;
+    }
+    const auto &structure = *type.struct_symbol;
+    for (std::size_t index = 0; index < structure.fields.size(); ++index) {
+        const auto &field = structure.fields[index];
+        project(index_constant(index), structure.field_types.at(field.name));
     }
 }
 
@@ -239,31 +220,7 @@ void GenerationContext::for_each_array_index(
             body(index_constant(index));
         return;
     }
-    if (count > std::numeric_limits<uint32_t>::max())
-        throw std::logic_error("聚合循环长度超出 i32 范围");
-    const auto insertion = builder.insert_point();
-    auto &function = module.function(insertion->function);
-    const auto index_slot = allocate_slot(ir::Type::I32);
-    builder.store(ir::Type::I32, index_constant(0), index_slot, 4);
-
-    const auto condition_block = function.add_block();
-    const auto body_block = function.add_block();
-    const auto exit_block = function.add_block();
-    builder.branch(condition_block);
-
-    builder.set_insert_point(condition_block);
-    const auto index = load_value(index_slot, ir::Type::I32);
-    const auto less = builder.compare(
-        ir::Comparison::UnsignedLessThan, index, index_constant(count));
-    builder.cond_branch(less, body_block, exit_block);
-
-    builder.set_insert_point(body_block);
-    body(index);
-    const auto next = builder.binary(ir::BinaryOp::Add, index,
-                                     index_constant(1));
-    builder.store(ir::Type::I32, next, index_slot, 4);
-    builder.branch(condition_block);
-    builder.set_insert_point(exit_block);
+    for_each_runtime_index(index_constant(count), body);
 }
 
 } // namespace rx

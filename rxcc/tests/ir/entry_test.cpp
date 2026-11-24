@@ -46,7 +46,13 @@ rx::SemanticResult analyze(const rx::Crate &crate) {
     return std::move(*result);
 }
 
-
+// 多函数用例按声明顺序查找预期的 IR 函数；生产接口只给单个 ID 命名。
+std::vector<std::string> expected_function_names(const rx::SemanticResult &sema) {
+    std::vector<std::string> names;
+    for (const auto &function : sema.functions)
+        names.push_back(rx::source_function_name(function->id));
+    return names;
+}
 
 rx::IRArtifact generate(const rx::SemanticResult &sema) {
     std::ostringstream diagnostics;
@@ -166,6 +172,26 @@ void check_repeat_reference_conversion() {
         }
     }
     check(conversion_loads == 1, "数组重复只能转换一次元素，不能在循环里重新读取 r");
+}
+
+// 借用参数让函数只负责投影，不会因构造输入或按值传参而需要复制数组。
+void check_discarded_places() {
+    const auto crate = parse_crate(R"(
+        fn discard(row: &[i32; 4096]) { *row; row[0]; }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto &function = *artifact.module().find_function(rx::source_function_name(sema.functions.at(0)->id));
+    check(function.entry_allocas.size() == 1 &&
+              std::get<Alloca>(function.entry_allocas.front().operation).storage_type == Type::Ptr,
+          "丢弃大数组不应在引用参数槽之外分配快照");
+    for (const auto &block : function.blocks)
+        for (const auto &instruction : block.instructions) {
+            if (const auto *load = std::get_if<Load>(&instruction.operation))
+                check(load->storage_type == Type::Ptr, "丢弃元素不应读取 i32 内容");
+            check(!std::holds_alternative<Call>(instruction.operation), "丢弃数组不应调用复制函数");
+        }
 }
 
 // 单独复制只有引用字段的结构体。调用读取函数前，复制不能读取引用目标。
@@ -299,12 +325,42 @@ void check_aggregate_call_abi() {
     check(returns, "聚合返回用例应有正常返回边");
 }
 
-void check_rejected(const std::string &source) {
+// 只投影按值 self 和数组参数；除标量参数槽外，不应再分配或搬运聚合。
+void check_parameter_snapshot_reuse() {
+    const auto crate = parse_crate(R"(
+        struct Data { value: i32 }
+        impl Data {
+            fn sum(self, row: [i32; 2], extra: i32) -> i32 {
+                self.value + row[0] + extra
+            }
+        }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto &sum = *artifact.module().find_function(
+        rx::source_function_name(sema.functions.at(0)->id));
+    check(sum.entry_allocas.size() == 1 &&
+              std::get<Alloca>(sum.entry_allocas.front().operation).storage_type == Type::I32,
+          "被调方应只为标量参数分配 slot，不应再次分配 self 或数组快照");
+    bool projected_self = false, projected_row = false;
+    for (const auto &instruction : sum.blocks.front().instructions) {
+        if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation)) {
+            if (gep->base == sum.argument(0))
+                projected_self = true;
+            if (gep->base == sum.argument(1))
+                projected_row = true;
+        }
+    }
+    check(projected_self && projected_row, "字段和数组元素应直接从传入的两个快照地址投影");
+}
+
+void check_rejected(const std::string &source, std::string_view expected_diagnostic) {
     const auto crate = parse_crate(source);
     const auto sema = analyze(*crate);
     std::ostringstream diagnostics;
     const auto artifact = rx::generate_ir(sema, diagnostics);
-    if (artifact || diagnostics.str().find("尚未支持") == std::string::npos)
+    if (artifact || diagnostics.str().find(expected_diagnostic) == std::string::npos)
         throw std::runtime_error("本应拒绝的输入未被拒绝：" + source + "；诊断：" + diagnostics.str());
 }
 
@@ -334,14 +390,13 @@ void check_function_names() {
     )");
     const auto sema = analyze(*crate);
     std::ostringstream diagnostics;
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     check(names.size() == 4 && sema.main_function->index == 3 && names.at(3) == "__rx_fn_3",
           "名字根据稳定身份分配，不能假定 main 的编号或使用用户拼写");
     std::set<std::string> unique;
     for (const auto &name : names)
         check(unique.insert(name).second && name != "main" && name != "println_i32", "内部名字必须唯一");
-    check(rx::assign_function_names(sema) == names, "分配名称必须确定");
-    // P8.2 接入后，方法按普通函数生成，命名结果不再代表“尚未支持”。
+    check(rx::source_function_name(*sema.main_function) == names.at(3), "分配名称必须确定");
     check(rx::generate_ir(sema, diagnostics).has_value(),
           "方法命名与接收者 lowering 接入后应能生成模块");
 }
@@ -797,7 +852,7 @@ rx::IRArtifact make_scalar_operation_driver() {
     const auto sema = analyze(*crate);
     auto artifact = generate(sema);
     auto &module = artifact.module();
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto print = module.add_function(
         "println_i32", {Type::Void, {Type::I32}}, Linkage::External);
     // 保留原入口调用，仅在 ret 前追加驱动；整数直接打印相同的 32 位模式。
@@ -961,7 +1016,7 @@ void check_reference_places() {
         check(instructions.size() == 2, "引用返回不得额外读取目标内容");
         const auto &store = std::get<Store>(instructions[0].operation);
         const auto &load = std::get<Load>(instructions[1].operation);
-        check(store.storage_type == Type::Ptr && store.value == function.argument(0) &&
+        check(store.value.type == Type::Ptr && store.value == function.argument(0) &&
                   load.storage_type == Type::Ptr && load.address == store.address &&
                   return_value(function.blocks[0]) ==
                       Operand::local(Type::Ptr, *instructions[1].result),
@@ -1036,9 +1091,9 @@ void check_reference_temporaries() {
         check(index + 2 < instructions.size(), "临时调用后必须初始化并保存借用地址");
         const auto &initialize = std::get<Store>(instructions[index + 1].operation);
         const auto &borrow = std::get<Store>(instructions[index + 2].operation);
-        check(initialize.storage_type == Type::I32 && initialize.value ==
+        check(initialize.value.type == Type::I32 && initialize.value ==
                   Operand::local(Type::I32, *instructions[index].result) &&
-                  borrow.storage_type == Type::Ptr && borrow.value == initialize.address,
+                  borrow.value.type == Type::Ptr && borrow.value == initialize.address,
               "先调用一次，再把结果写入临时 slot，最后保存该 slot 的地址");
         temporary_addresses.push_back(initialize.address);
     }
@@ -1085,7 +1140,7 @@ void check_reference_coercions() {
     )");
     const auto sema = analyze(*crate);
     const auto artifact = generate(sema);
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const std::vector<std::size_t> steps{0, 1, 2, 2, 1, 1};
     for (std::size_t index = 0; index < steps.size(); ++index) {
         const auto &function = *artifact.module().find_function(names[index]);
@@ -1131,7 +1186,7 @@ void check_reference_coercions() {
               read_binding.address == Operand::local(Type::Ptr, *main.entry_allocas[2].result) &&
               adjust.storage_type == Type::Ptr &&
               adjust.address == Operand::local(Type::Ptr, *instructions[3].result) &&
-              save.storage_type == Type::Ptr &&
+              save.value.type == Type::Ptr &&
               save.value == Operand::local(Type::Ptr, *instructions[4].result),
           "let 保存的必须是调整后的引用，而不是外层引用的地址");
 }
@@ -1150,7 +1205,7 @@ void check_coercion_argument_order() {
     )");
     const auto sema = analyze(*crate);
     const auto artifact = generate(sema);
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto first = module.find_function(names[0])->id;
     const auto second = module.find_function(names[1])->id;
@@ -1207,7 +1262,7 @@ void check_reference_binary_order() {
         std::ostringstream text, diagnostics;
         check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
               "共享引用算术和位运算必须通过 IR 自检");
-        const auto names = rx::assign_function_names(sema);
+        const auto names = expected_function_names(sema);
         const auto &module = artifact.module();
         const auto &function = *module.find_function(names[2]);
         const auto &instructions = function.blocks[0].instructions;
@@ -1257,7 +1312,7 @@ void check_mixed_reference_operand_order() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "直接标量与引用的混合运算必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     for (std::size_t side = 0; side < 2; ++side) {
         const auto &function = *module.find_function(names[1 + side]);
@@ -1306,7 +1361,7 @@ void check_reference_unary_operations() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "一元共享引用运算必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     for (std::size_t kind = 0; kind < 2; ++kind) {
         const auto &function = *module.find_function(names[2 + kind]);
@@ -1354,7 +1409,7 @@ void check_reference_ordering_chains() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "多层引用排序及外层可变转共享调整必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     for (std::size_t kind = 0; kind < 2; ++kind) {
         const auto &function = *module.find_function(names[3 + kind]);
@@ -1415,7 +1470,7 @@ void check_reference_operation_early_return() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "引用运算中提前 return 必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     for (std::size_t kind = 0; kind < 4; ++kind) {
         const auto &function = *module.find_function(names[3 + kind]);
@@ -1436,7 +1491,7 @@ void check_reference_operation_early_return() {
                       "路径结束后不得为二元或一元引用运算读取最终标量内容");
             } else {
                 check(std::holds_alternative<Store>(instruction.operation) &&
-                          std::get<Store>(instruction.operation).storage_type == Type::Ptr,
+                          std::get<Store>(instruction.operation).value.type == Type::Ptr,
                       "提前 return 只能保留引用参数保存，不能生成外层运算");
             }
         }
@@ -1486,7 +1541,7 @@ void check_assignment_order() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "标量和共享引用 RHS 的赋值模块必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto target = module.find_function(names[0])->id;
     for (std::size_t kind = 0; kind < 3; ++kind) {
@@ -1504,7 +1559,7 @@ void check_assignment_order() {
                 load && load->storage_type == Type::I32)
                 loads.push_back(index);
             if (const auto *store = std::get_if<Store>(&instructions[index].operation);
-                store && store->storage_type == Type::I32)
+                store && store->value.type == Type::I32)
                 stores.push_back(index);
             if (std::holds_alternative<BinaryOperation>(instructions[index].operation))
                 operations.push_back(index);
@@ -1566,7 +1621,7 @@ void check_assignment_coercion_order() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "赋值引用转换模块必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto &instructions = module.find_function(names[2])->blocks[0].instructions;
     const auto source = unique_call_index(instructions, module.find_function(names[0])->id);
@@ -1577,7 +1632,7 @@ void check_assignment_coercion_order() {
     const auto &store = std::get<Store>(instructions[target + 1].operation);
     check(adjust.storage_type == Type::Ptr &&
               adjust.address == Operand::local(Type::Ptr, *instructions[source].result) &&
-              store.storage_type == Type::Ptr &&
+              store.value.type == Type::Ptr &&
               store.value == Operand::local(Type::Ptr, *instructions[source + 1].result) &&
               store.address == Operand::local(Type::Ptr, *instructions[target].result),
           "目标必须保存目标求值前已转换好的引用，而不是 RHS 的外层引用");
@@ -1603,7 +1658,7 @@ void check_assignment_early_return() {
         std::ostringstream text, diagnostics;
         check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
               "赋值中提前 return 的模块必须通过 IR 自检");
-        const auto names = rx::assign_function_names(sema);
+        const auto names = expected_function_names(sema);
         const auto &module = artifact.module();
         for (std::size_t stage = 0; stage < 2; ++stage) {
             const auto &function = *module.find_function(names[2 + stage]);
@@ -1624,7 +1679,7 @@ void check_assignment_early_return() {
                               "赋值路径结束后不得执行后续打印");
                     }
                 } else if (const auto *store = std::get_if<Store>(&instruction.operation)) {
-                    check(store->storage_type == Type::Ptr && store->value == function.argument(0),
+                    check(store->value.type == Type::Ptr && store->value == function.argument(0),
                           "提前 return 只能保留参数保存，不得执行本次赋值的写回");
                 } else {
                     const auto *load = std::get_if<Load>(&instruction.operation);
@@ -1657,7 +1712,7 @@ void check_assignment_unit_tails() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "赋值的 unit 函数尾、块尾和 return 必须全部成功生成并通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     for (std::size_t index = 0; index < names.size(); ++index) {
         const auto &function = *artifact.module().find_function(names[index]);
         check(function.abi.signature.result == Type::Void && function.blocks.size() == 1 &&
@@ -1666,7 +1721,7 @@ void check_assignment_unit_tails() {
         std::vector<const Store *> stores;
         for (const auto &instruction : function.blocks[0].instructions) {
             if (const auto *store = std::get_if<Store>(&instruction.operation);
-                store && store->storage_type == Type::I32)
+                store && store->value.type == Type::I32)
                 stores.push_back(store);
         }
         check(stores.size() == (index == 4 ? 3u : 1u),
@@ -1695,7 +1750,7 @@ void check_unit_if() {
         check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
               "unit if 必须通过 IR 自检");
 
-        const auto names = rx::assign_function_names(sema);
+        const auto names = expected_function_names(sema);
         const auto &module = artifact.module();
         const auto &main = *module.find_function(names[sema.main_function->index]);
         check(main.blocks.size() == (has_else ? 4u : 3u) &&
@@ -1756,7 +1811,7 @@ void check_integer_if_merge() {
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "整数 if 和合法的跨块操作数必须通过 IR 自检");
 
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto &main = *module.find_function(names[sema.main_function->index]);
     check(main.blocks.size() == 4 && main.entry_allocas.size() == 1,
@@ -1783,7 +1838,7 @@ void check_integer_if_merge() {
         const auto &store = std::get<Store>(arm.instructions.back().operation);
         check(call.function == print &&
                   call.arguments == std::vector{Operand::constant(Type::I32, marker)} &&
-                  store.storage_type == Type::I32 && store.address == slot &&
+                  store.value.type == Type::I32 && store.address == slot &&
                   store.value == Operand::constant(Type::I32, value),
               "各分支必须将自己的尾值写到同一个入口 slot");
         return std::get<Branch>(*arm.terminator).target;
@@ -1834,7 +1889,7 @@ void check_if_early_return() {
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "含提前返回的 if 必须成功生成并通过 IR 自检");
 
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto print = module.find_function("println_i32")->id;
     const auto check_return = [print](const BasicBlock &block, unsigned marker, unsigned value) {
@@ -1860,7 +1915,7 @@ void check_if_early_return() {
     const auto &merge = single.block(std::get<Branch>(*normal.terminator).target);
     check(merge.instructions.size() == 1, "合流块只读出正常分支的结果");
     const auto &load = std::get<Load>(merge.instructions.front().operation);
-    check(store.storage_type == Type::I32 && store.value == Operand::constant(Type::I32, 8) &&
+    check(store.value.type == Type::I32 && store.value == Operand::constant(Type::I32, 8) &&
               store.address == Operand::local(Type::Ptr, *result_slot.result) &&
               load.storage_type == Type::I32 && load.address == store.address &&
               return_value(merge) ==
@@ -1903,7 +1958,7 @@ void check_short_circuit() {
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "含短路和提前返回的模块必须通过 IR 自检");
 
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto left_function = module.find_function(names[0])->id;
     const auto right_function = module.find_function(names[1])->id;
@@ -2004,7 +2059,7 @@ void check_while() {
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "源码 while 及其回边必须通过 IR 自检");
 
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto print = module.find_function("println_i32")->id;
     const auto &count = *module.find_function(names[1]);
@@ -2104,7 +2159,7 @@ void check_loop_targets() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "嵌套循环的跳转必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto &main = *module.find_function(names[sema.main_function->index]);
     check(main.entry_allocas.size() == 1, "unit 循环不能分配结果槽");
@@ -2147,7 +2202,7 @@ void check_loop_without_exit() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "无出口循环必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto &forever = *module.find_function(names[0]);
     check(forever.blocks.size() == 2 && forever.entry_allocas.empty(),
@@ -2183,7 +2238,7 @@ void check_loop_results() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "带值 break 和发散的 break 必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto target = [](const BasicBlock &block) {
         return std::get<Branch>(*block.terminator).target;
@@ -2259,7 +2314,7 @@ void check_control_flow_integration() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics) && diagnostics.str().empty(),
           "组合循环和递归调用必须通过 IR 自检");
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &module = artifact.module();
     const auto target = [](const BasicBlock &block) {
         return std::get<Branch>(*block.terminator).target;
@@ -2343,7 +2398,7 @@ void check_method_call_abi() {
     const auto sema = analyze(*crate);
     const auto artifact = generate(sema);
     const auto &module = artifact.module();
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &data = *sema.structs.at(0);
     const auto method = [&](const char *name) -> const Function & {
         const auto &symbol = *static_cast<const rx::FunctionSymbol *>(data.associated_items.at(name));
@@ -2400,7 +2455,7 @@ void check_array_len_ir() {
     const auto sema = analyze(*crate);
     const auto artifact = generate(sema);
     const auto &module = artifact.module();
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto function = [&](const char *name) -> const Function & {
         for (const auto &source : sema.functions)
             if (source->name == name)
@@ -2474,7 +2529,7 @@ void check_box_allocator_ir() {
     const auto sema = analyze(*crate);
     const auto artifact = generate(sema);
     const auto &module = artifact.module();
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto function = [&](std::size_t index) -> const Function & {
         return *module.find_function(names.at(index));
     };
@@ -2545,7 +2600,7 @@ void check_vec_header_and_index_ir() {
     const auto sema = analyze(*crate);
     const auto artifact = generate(sema);
     const auto &module = artifact.module();
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto function = [&](std::size_t index) -> const Function & {
         return *module.find_function(names.at(index));
     };
@@ -2728,7 +2783,7 @@ void check_vec_capacity_boundary() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics), "分配测试的输入必须通过 IR 自检");
     const auto &module = artifact.module();
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto &byte = *module.find_function(names.at(0));
     const auto &word = *module.find_function(names.at(1));
     const auto *allocator = module.find_function("__rx_alloc");
@@ -2762,7 +2817,7 @@ void check_vec_remove_ir() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics), "Vec remove 必须通过 IR 自检");
     const auto &module = artifact.module();
-    const auto &take = *module.find_function(rx::assign_function_names(sema).at(0));
+    const auto &take = *module.find_function(rx::source_function_name(sema.functions.at(0)->id));
     const auto result_of = [](const Instruction &instruction) {
         return Operand::local(instruction.type, instruction.result.value());
     };
@@ -2802,7 +2857,7 @@ void check_vec_remove_ir() {
     const auto &exit = take.block(guard.when_false);
     check(return_value(exit) == removed, "后缀为空时应直接返回先前读出的值");
 
-    // 追踪循环边界所用的减法，避免只检查存在循环却漏掉最后一个元素的越界读。
+    // 追踪后缀数量与新长度的共同依赖，避免搬运越界或写回另一个长度值。
     const auto subtract = [&](const BasicBlock &block, const Operand &result) -> const BinaryOperation & {
         for (const auto &instruction : block.instructions) {
             if (instruction.result && result_of(instruction) == result) {
@@ -2814,9 +2869,10 @@ void check_vec_remove_ir() {
         throw std::runtime_error("删除长度缺少定义");
     };
     const auto &suffix = subtract(entry, compare.right);
-    const auto &remaining = subtract(entry, suffix.left);
-    check(suffix.right == one && remaining.left == length && remaining.right == index,
-          "搬运范围必须是 len - index - 1");
+    const auto next_length = suffix.left;
+    const auto &next = subtract(entry, next_length);
+    check(next.left == length && next.right == one && suffix.right == index,
+          "后缀数量必须由新长度 len - 1 减去 index 得到");
     bool starts_at_zero = false;
     std::size_t length_writes = 0;
     for (const auto &block : take.blocks) {
@@ -2829,8 +2885,7 @@ void check_vec_remove_ir() {
                 if (store->address == length_field) {
                     ++length_writes;
                     check(block.id == exit.id, "长度只能在搬运结束后更新");
-                    const auto &next = subtract(exit, store->value);
-                    check(next.left == length && next.right == one, "删除后必须存回 len - 1");
+                    check(store->value == next_length, "删除后必须复用后缀数量依赖的新长度");
                 }
             }
             if (const auto *projection = std::get_if<GetElementPtr>(&instruction.operation);
@@ -2855,7 +2910,7 @@ void check_clone_ir() {
     std::ostringstream text, diagnostics;
     check(artifact.verify_and_print(text, diagnostics), "Clone 必须通过 IR 自检");
     const auto &module = artifact.module();
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto result_of = [](const Instruction &instruction) {
         return Operand::local(instruction.type, instruction.result.value());
     };
@@ -2973,7 +3028,7 @@ void check_equality_ir() {
     const auto sema = analyze(*crate);
     const auto artifact = generate(sema);
     const auto &module = artifact.module();
-    const auto names = rx::assign_function_names(sema);
+    const auto names = expected_function_names(sema);
     const auto helper_of = [&](std::size_t index) -> const Function & {
         const auto &caller = *module.find_function(names.at(index));
         const Function *helper = nullptr;
@@ -3037,8 +3092,10 @@ void run_tests() {
     check_function_names();
     check_named_storage_layouts();
     check_repeat_reference_conversion();
+    check_discarded_places();
     check_shallow_reference_copy();
     check_aggregate_call_abi();
+    check_parameter_snapshot_reuse();
     check_method_call_abi();
     check_array_len_ir();
     check_box_allocator_ir();
@@ -3090,7 +3147,9 @@ void run_tests() {
     check_generates("fn main() { Box::<i32>::new(1); }");
     check_generates("fn narrow(p: &Box<i32>) -> &i32 { p } "
                     "fn deep(p: &Box<Box<i32>>) -> &i32 { p } fn main() {}");
-    check_rejected("fn main() { let x = { (); }; }");
+    check_rejected("fn main() { let x = { (); }; }", "局部绑定类型 ()");
+    check_rejected("fn unused(value: ()) {} fn main() {}", "unused 的参数类型 ()");
+    check_rejected("fn unused(value: &i32) -> &() { loop {} } fn main() {}", "unused 的返回类型 &()");
 
     std::ostringstream errors;
     std::optional<rx::IRArtifact> independent;

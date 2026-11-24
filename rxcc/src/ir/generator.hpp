@@ -6,18 +6,17 @@
 #pragma once
 
 #include "ir/artifact.hpp"
+#include "sema/identity.hpp"
 #include <iosfwd>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace rx {
 
 struct SemanticResult;
 
-// 为所有源函数（方法）生成 __rx_fn_<编号> 名称，按 FunctionId.index查询。
-// 这里只命名，不生成函数体，也不代表已经支持方法；语义结果必须完整有效。
-std::vector<std::string> assign_function_names(const SemanticResult &semantics);
+// 普通函数和方法都使用稳定的 FunctionId 命名，不依赖用户拼写。
+std::string source_function_name(FunctionId id);
 
 // 使用成功的语义检查结果生成模块，调用期间须保持原 Crate 存活，不重复检查语义事实。
 // 不支持的代码或构建错误会输出原因并返回空值，不返回生成到一半的模块。

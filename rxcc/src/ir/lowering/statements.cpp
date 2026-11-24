@@ -54,7 +54,7 @@ GenerationContext::emit_let(const LetStatement &statement,
     const auto &type = semantics.locals[binding.index].type;
     // 局部存储支持标量、引用链和按布局搬运的聚合值。
     if (!is_storable_value(type)) {
-        diagnostics << "IR 生成尚未支持此局部绑定类型\n";
+        diagnostics << "IR 生成尚未支持局部绑定类型 " << type.toString() << '\n';
         return std::nullopt;
     }
     // 标量写入自己的存储单元，聚合值按完整布局搬运到新 slot。
@@ -117,7 +117,7 @@ GenerationContext::emit_assignment(const AssignmentExpression &expression,
     const auto &target = std::get<Place>(*target_result);
     if (!operation) {
         if (!is_storable_value(*target.type)) {
-            diagnostics << "IR 生成尚未支持此赋值目标类型\n";
+            diagnostics << "IR 生成尚未支持赋值目标类型 " << target.type->toString() << '\n';
             return std::nullopt;
         }
         store_prepared_value(target.address, *right, *target.type);
@@ -128,11 +128,9 @@ GenerationContext::emit_assignment(const AssignmentExpression &expression,
     // 直接标量 RHS 在求值时就已固定；共享引用此时才读取其目标。
     const auto &right_type = semantics.expressions.at(expression.right.get()).type;
     const auto right_scalar = finish_scalar_operand(std::get<ir::Operand>(*right), right_type);
-    auto result = emit_binary_operation(*operation, *target.type, old_value,
-                                        right_scalar);
-    if (!result)
-        return std::nullopt;
-    store_value(*result, target.address);
+    const auto result = emit_binary_operation(*operation, *target.type, old_value,
+                                              right_scalar);
+    store_value(result, target.address);
     return EmitResult{UnitResult{}};
 }
 

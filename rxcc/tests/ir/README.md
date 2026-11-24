@@ -28,16 +28,21 @@
 - **E**：自己的 rxcc → I → Clang 22 RV32IM/ILP32 的 O0/O2 → 程序和运行时汇编经 Clang 集成汇编器检查 → REIMU，逐字节比 stdout，退出 0。
 - **C**：CLI、失败原子性、工具链和资源检查。
 
-“已有”仅指相邻测试文件中已有对应断言，运行结果以实际命令为准。
-其余测试点为 **待接入**。`.rx`、`.out`、可选 `.in` 是已落盘的源码行为种子，
+“已接入”仅指现有测试入口中已有对应断言，运行结果以实际命令为准，不代表本轮已执行。
+P03–P07 的“接入证据与缺口”矩阵逐点区分已接入、部分接入与待补变体；原目标表保留完整设计，
+不能把一个源码种子的接入状态推广成整行、整个阶段已完成。
+其余未列出实际断言的测试点仍为 **待接入**。`.rx`、`.out`、可选 `.in` 是已落盘的源码行为种子，
 不是全部测试点都已有自动断言。文档明确列出的 U/I/C 检查应随实现补入现有测试和
 `../run_ir.py`，不为尚不存在的 API 写空测试或返回成功的占位测试。
 
 每条种子在标准 `manifest.json` 中同时登记 semantic 项与 codegen 项（负例只有 semantic 项）；
 现有 runner 会由 codegen 项派生 ir 项。`metadata.requires` 记录最早联合验收步骤，
-`metadata.ir_status` 为设计状态。**runner 不会按 metadata 跳过测试**，尚未实现的源码
+`metadata.ir_status` 沿用现有状态：`baseline` 表示 P2 基线，`covered` 表示该源码种子已接入
+自有 IR 检查链，`planned` 表示尚未记录该种子的接入证据。semantic/codegen 成对条目
+保存同一份种子 metadata；semantic 条目的 `covered` 不表示语义通过就算 IR 执行通过，
+也不表示关联 testpoint 的全部 U/I/E/C 矩阵均已补齐。**runner 不会按 metadata 跳过测试**，尚未实现的源码
 IR 测试应失败，不能把当前“尚未支持”的拒绝当成最终预期。
-这些清单不加入默认 CTest，不改变正式 `config.mk` 的参考实现配置。
+正式 `config.mk` 的 IR 阶段使用自有 C++ 编译器，CODEGEN 阶段使用 Rust 参考实现。
 
 ## 运行
 
@@ -58,20 +63,22 @@ RX_TEST_SEMANTIC='./rxcc/build/rxcc --stage semantic {source}' \
   python3 scripts/test.py --tests-dir rxcc/tests/ir --stage semantic
 ```
 
-未来对应 lowering 和共享运行时完成后，可用同一 runner 做单阶段行为冒烟：
+从仓库根目录用同一 runner 做单阶段行为冒烟：
 
 ```sh
 FILTER=p03 \
 RX_TEST_IR='./rxcc/build/rxcc --stage ir {source} -o {output}' \
-RX_TEST_BUILD='clang-22 --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -O2 -S -mllvm -riscv-no-aliases runtime/runtime.c -o {runtime}' \
+RX_TEST_BUILD='clang-22 --target=riscv32-unknown-elf -march=rv32im -mabi=ilp32 -O2 -ffreestanding -S -mllvm -riscv-no-aliases rxcc/runtime/runtime.c -o {runtime}' \
 RX_TEST_RUN='xmake run -P vendor/REIMU reimu --memory=256M --stack=1M -f {output},{runtime} -o {stdout} -p {profile}' \
   python3 scripts/test.py --tests-dir rxcc/tests/ir --stage ir
 ```
 
-上例 `runtime/runtime.c` 是实现计划 P9/P11 的未来交付文件，目前尚不存在；运行时按规范 §16
-提供三个 I/O 和 `__rx_alloc`。当前标准 runner 的 IR 路径只有 Clang O0，不能单独满足 E 的
-完整要求；O2、外部 verifier、集成汇编器和退出码 profile 检查须按设计扩展 `../run_ir.py`。
-只有 `p02` 的空程序可现在用自己的 IR 路径直接行为冒烟，无需运行时。
+`rxcc/runtime/runtime.c` 按规范 §16 提供三个 I/O 和 `__rx_alloc`。
+正式 IR 清单用 `make test STAGE=ir`；开发夹具与官方大程序的 LLVM 验证和 RV32 O0/O2
+行为检查用 `python3 rxcc/tests/run_ir.py --reimu --official`。两套入口覆盖范围不同。
+不加 `--reimu` 时开发 runner 只做结构/外部 LLVM/CLI 等检查，不执行生成的 RV32 程序；上述
+`scripts/test.py --stage ir` 行为冒烟使用 Clang O0，也不单独等同于完整 E 的 O0/O2 验收。
+执行成绩应附实际命令、时间和覆盖范围，不从接入状态推导通过数量。
 
 ## 断言约定
 

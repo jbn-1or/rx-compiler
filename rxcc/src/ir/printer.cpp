@@ -158,7 +158,7 @@ std::string module_text(const Module &module) {
         output << type_name(signature.result) << " @" << function.name
             << '(';
         for (std::size_t parameter_index = 0;
-             parameter_index < function.parameters.size(); ++parameter_index) {
+             parameter_index < signature.parameters.size(); ++parameter_index) {
             // 只有第一个参数前不加分隔符。
             if (parameter_index)
                 output << ", ";
@@ -166,7 +166,7 @@ std::string module_text(const Module &module) {
             if (function.is_declaration())
                 output << type_name(signature.parameters[parameter_index]);
             else
-                operand(output, function.parameters[parameter_index]);
+                operand(output, function.argument(parameter_index));
         }
         output << ')';
         // 只有声明时到此结束，不打印块和结尾花括号。
@@ -175,7 +175,7 @@ std::string module_text(const Module &module) {
             continue;
         }
         output << " {\n";
-        // 每个块都打印标签，包括唯一的入口块；先打印普通指令，最后打印 ret。
+        // 每个块都打印标签，包括唯一的入口块；先打印普通指令，最后打印终结指令。
         for (const auto &block : function.blocks) {
             output << "bb_" << block.id.index << ":\n";
             // 入口分配只在第一个块开头输出，不属于任何普通指令位置。

@@ -33,7 +33,13 @@ bool IRArtifact::verify_and_print(std::ostream &output,
     const auto text = verified_text(diagnostics);
     if (!text)
         return false;
-    output.write(text->data(), static_cast<std::streamsize>(text->size()));
+    try {
+        output.write(text->data(), static_cast<std::streamsize>(text->size()));
+    } catch (const std::ios_base::failure &) {
+        // 调用方启用了流异常时也走相同的失败返回，不清除失败位或改变异常设置。
+        diagnostics << "IR 输出流写入失败\n";
+        return false;
+    }
     // 输出流失败时可能已经写入部分文本；文件的刷新和关闭由调用方检查。
     if (!output) {
         diagnostics << "IR 输出流写入失败\n";

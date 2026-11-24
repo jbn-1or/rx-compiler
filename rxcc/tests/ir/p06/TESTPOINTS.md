@@ -1,7 +1,7 @@
 # P6：分支、短路、循环与结果汇合
 
-对应 P6.1–P6.8；规范 §10 never/LUB、§11 控制流。全部待接入。
-每步保留 U/I 的合法及非法 CFG 模型；带引用和聚合结果明确后置。
+对应 P6.1–P6.8；规范 §10 never/LUB、§11 控制流。种子与 CFG/支配断言已接入，完整矩阵缺口见下文。
+保留 U/I 的合法及非法 CFG 模型；引用和聚合结果的联合覆盖不能由标量用例代替。
 
 | 编号/步骤 | 输入/构造 | 预期与关键断言 | 层次/依赖 |
 | --- | --- | --- | --- |
@@ -26,3 +26,31 @@
 | P6-19 / .8 | return 后缺失名称；未使用函数的普通类型错误 | sema 仍拒绝；已通过 sema 的被跳过打印不得出现在执行输出 | S/C；P1/P11 |
 
 验收时分别报告 P6.1–P6.7 小步和 P6.8 组合；单个样例通过不能代替支配检查。
+
+## 接入证据与缺口
+
+以下只表示现有断言的接入，不是本轮验收数字。`entry`、`model`、`runner` 分别指
+`../entry_test.cpp`、`../model_test.cpp`、`../../run_ir.py`；runner 加 `--reimu`
+才执行 O0/O2。目标表同时保留设计变体，不能因一个同编号种子已接入就视为整行完成。
+
+| 编号 | 当前接入证据 | 未补齐或不能据此推断的部分 |
+| --- | --- | --- |
+| P6-01 | 已接入：entry `check_unit_if` 检查条件一次、分支目标和无结果槽；runner `p61-unit-if`、嵌套输入变体 | 无额外矩阵缺口记录 |
+| P6-02 | 已接入：model `check_branch_builder`、`check_branch_models` 覆盖正常分支及非法终结/目标/条件；`--emit-model` 外部验证 | 非法模型只需 U 拒绝，不应交付为合法 IR 执行 |
+| P6-03 | 已接入：entry `check_integer_if_merge` 逐边检查写入同一 slot 再合流；runner `p62-if-values` 和嵌套结果 | 无额外矩阵缺口记录 |
+| P6-04 | 已接入：model `check_dominance` 覆盖回边、菱形、不可达前驱及同块前向/兄弟块泄漏反例 | 外部 emit 模型补充合法 SSA 检查，源码 E 另有嵌套分支 |
+| P6-05 | 已接入当前 slot 方案：entry `check_integer_if_merge`、`check_if_early_return` 检查每条正常边写结果 | 未实现 phi，不要求 phi 反例；普通 SSA verifier 也不证明内存初始化完整 |
+| P6-06 | 已接入：entry `check_if_early_return`；runner `p63-if-return`、单正常边/条件 return/return 操作数变体 | 无额外矩阵缺口记录 |
+| P6-07 | 已接入：entry `check_short_circuit` 沿目标检查 RHS；runner `p64-short-circuit`、动态嵌套顺序 | 无额外矩阵缺口记录 |
+| P6-08 | 已接入：runner `p64-early-return` 覆盖 call/赋值/外层逻辑；entry 检查左右侧提前离开不写假结果 | 无额外矩阵缺口记录 |
+| P6-09 | 已接入：entry `check_while` 检查条件、回边及入口 slot；runner `p65-while-condition`、短路条件/零轮/提前返回 | 无额外矩阵缺口记录 |
+| P6-10 | 已接入：runner `p66-loop-control`、`p67-unit-and-bool-break` 的 unit break；entry 检查无出口 loop | 不执行无出口函数来“证明”终止，main 只验证其模块能生成 |
+| P6-11 | 已接入：entry `check_loop_targets` 对照 LoopId 与实际跳转；runner `p66-nested-targets` | 已有代表性嵌套组合，不声称穷尽任意嵌套深度 |
+| P6-12 | 已接入：entry `check_loop_results` 检查各 break 写槽后跳同一出口；runner `p67-break-value`、嵌套 break 操作数 | 无额外矩阵缺口记录 |
+| P6-13 | 部分：runner `p67-reference-lub` 执行 &mut→& 的 if 种子；`p67-result-edge-adjustments` 覆盖实际需要 load 的引用结果转换 | &mut/& 的 if 分支交换顺序及 never 混合的完整矩阵待补 |
+| P6-14 | 部分：runner `p67-result-edge-adjustments` 覆盖两条引用 break 和单条显式固定目标；嵌套整数 break 另有回归 | 三条 break（前两条 &mut、末条 &）的有/无期望类型及内层引用 LUB 隔离矩阵未补齐 |
+| P6-15 | 已接入：entry 的 unit if、无出口 loop、never break 结果断言；runner `p67-unit-and-bool-break` | 不把 bool break 的数据槽与 Unit/never 混为一谈 |
+| P6-16 | 部分联合覆盖：runner `p73-results`、`p74-recursive-results` 覆盖数组/结构体 if、break、return | Box 解引用参与结果 LUB 的专门转换/快照矩阵待补，普通 Box coercion 不能代替 |
+| P6-17 | 已接入：entry `check_control_flow_integration` 区分源/机器 main；runner `p68-source-main-recursion` 读配套 stdin | 无额外矩阵缺口记录 |
+| P6-18 | 已接入：entry `check_control_flow_integration`；runner `p68-combined-side-effects`、`p68-recursive-call-order` | 不用组合输出替代 U 层非法 SSA/CFG 反例 |
+| P6-19 | 已接入 S/C：runner 对未调用函数、return/break/continue 后错误源码比较 semantic/IR 诊断并检查输出保护 | 负例拒绝不是 E；跳过合法打印的行为由正例另证 |

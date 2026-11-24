@@ -33,11 +33,6 @@ GenerationContext::emit_place(const Expression &expression,
             return PlaceResult{NoContinuation{}};
         const auto &type = semantics.expressions.at(unary->operand.get()).type;
         // 引用和 Box 的计算值都是指向目标的指针，一次 * 只投影一层。
-        if (type.kind != SemanticType::Kind::Reference &&
-            type.kind != SemanticType::Kind::Box) {
-            diagnostics << "IR 生成遇到不可解引用的操作数\n";
-            return std::nullopt;
-        }
         return Place{std::get<ir::Operand>(*reference), type.inner.get()};
     }
     diagnostics << "IR 生成尚未支持此 place 表达式\n";
@@ -52,27 +47,21 @@ GenerationContext::emit_base_place(const Expression &expression,
     const auto &base = semantics.expressions.at(&expression);
     const bool indirect = is_reference(base.type) ||
                           base.type.kind == SemanticType::Kind::Box;
-    if (!indirect && base.place.is_place)
-        return emit_place(expression, locals);
+    if (!indirect)
+        return emit_borrowed_place(expression, locals);
 
     auto value = emit_value(expression, locals);
     if (!value)
         return std::nullopt;
     if (path_ended(*value))
         return PlaceResult{NoContinuation{}};
-    if (const auto *aggregate = std::get_if<AggregateValue>(&*value))
-        return PlaceResult{Place{aggregate->address, aggregate->type}};
-    if (indirect) {
-        Place target{std::get<ir::Operand>(*value), base.type.inner.get()};
-        while (is_reference(*target.type) ||
-               target.type->kind == SemanticType::Kind::Box) {
-            target = Place{load_value(target.address, ir::Type::Ptr),
-                           target.type->inner.get()};
-        }
-        return target;
+    Place target{std::get<ir::Operand>(*value), base.type.inner.get()};
+    while (is_reference(*target.type) ||
+           target.type->kind == SemanticType::Kind::Box) {
+        target = Place{load_value(target.address, ir::Type::Ptr),
+                       target.type->inner.get()};
     }
-    diagnostics << "IR 生成遇到不可投影的基址\n";
-    return std::nullopt;
+    return target;
 }
 
 // 在底层结构体位置上按声明序号投影字段。
@@ -83,10 +72,6 @@ GenerationContext::emit_field_place(const FieldExpression &expression,
     if (!base || path_ended(*base))
         return base;
     const auto &current = std::get<Place>(*base);
-    if (current.type->kind != SemanticType::Kind::Struct) {
-        diagnostics << "IR 生成遇到非结构体字段基址\n";
-        return std::nullopt;
-    }
     const StructSymbol &structure = *current.type->struct_symbol;
     const auto &field_type = structure.field_types.at(expression.field);
     const auto storage = ir::storage_type_of(*current.type);
@@ -116,79 +101,63 @@ GenerationContext::emit_index_place(const IndexExpression &expression,
         return PlaceResult{NoContinuation{}};
     const auto index_operand = std::get<ir::Operand>(*index);
     const auto zero = ir::Operand::constant(ir::Type::I32, 0);
-    if (current.type->kind == SemanticType::Kind::Array) {
-        const auto storage = ir::storage_type_of(*current.type);
-        const auto address = builder.get_element_ptr(
-            storage, current.address, {zero, index_operand});
-        return PlaceResult{Place{address, current.type->inner.get()}};
-    }
     if (current.type->kind == SemanticType::Kind::Vec) {
         // Vec 头保存缓冲区指针；元素地址必须由该指针加下标得到，
         // 不能把头本身的地址当作元素缓冲区。
-        const auto header_storage = ir::StorageType::vec();
-        const auto data_address = builder.get_element_ptr(
-            header_storage, current.address, {zero, zero});
+        const auto data_address = vec_field_address(current.address, VecField::Data);
         const auto data = builder.load(ir::Type::Ptr, data_address, 4);
-        // 缓冲区长度由运行时头决定；零长度数组只用来计算元素步长。
-        const auto buffer_storage = ir::StorageType::array_of(
-            ir::storage_type_of(*current.type->inner), 0);
-        const auto address = builder.get_element_ptr(
-            buffer_storage, data, {zero, index_operand});
+        const auto address = vec_element_address(data, *current.type->inner, index_operand);
         return PlaceResult{Place{address, current.type->inner.get()}};
     }
-    diagnostics << "IR 生成遇到非数组或 Vec 的索引基址\n";
-    return std::nullopt;
+    // sema 已确认索引基址是 Vec 或数组。
+    const auto storage = ir::storage_type_of(*current.type);
+    const auto address = builder.get_element_ptr(
+        storage, current.address, {zero, index_operand});
+    return PlaceResult{Place{address, current.type->inner.get()}};
 }
 
-// 生成 & 或 &mut：已有 place 直接返回其地址；
-// 值表达式先求值一次，再写入固定临时 slot 并返回该地址。
+// 借用原位置以保留别名；聚合值已有独立存储，只有标量值需要临时槽。
+std::optional<PlaceResult>
+GenerationContext::emit_borrowed_place(const Expression &expression,
+                                       LocalPlaces &locals) {
+    const auto &record = semantics.expressions.at(&expression);
+    if (record.place.is_place)
+        return emit_place(expression, locals);
+    auto value = emit_value(expression, locals);
+    if (!value)
+        return std::nullopt;
+    if (path_ended(*value))
+        return NoContinuation{};
+    if (const auto *aggregate = std::get_if<AggregateValue>(&*value))
+        return Place{aggregate->address, &record.type};
+    return Place{materialize_value(std::get<ir::Operand>(*value)), &record.type};
+}
+
+// 生成 & 或 &mut：两者的计算值都是目标位置的地址。
 std::optional<EmitResult>
 GenerationContext::emit_borrow(const UnaryExpression &expression,
                                LocalPlaces &locals) {
     const auto &result_type = semantics.expressions.at(&expression).type;
     // 引用目标可以是标量、Box 或可按布局保存的聚合。
     if (!is_storable_value(result_type)) {
-        diagnostics << "IR 生成尚未支持此引用类型（P9）\n";
+        diagnostics << "IR 生成尚未支持引用类型 " << result_type.toString() << '\n';
         return std::nullopt;
     }
-    const auto &operand = *expression.operand;
-    const auto &operand_record = semantics.expressions.at(&operand);
-    // 操作数本身是 place 时借用原位置，不能先复制内容，否则会破坏别名关系。
-    if (operand_record.place.is_place) {
-        auto place = emit_place(operand, locals);
-        if (!place)
-            return std::nullopt;
-        if (path_ended(*place))
-            return EmitResult{NoContinuation{}};
-        return EmitResult{std::get<Place>(*place).address};
-    }
-    // 值表达式没有固定位置，只在借用发生处物化一次。
-    auto value = emit_value(operand, locals);
-    if (!value)
+    auto place = emit_borrowed_place(*expression.operand, locals);
+    if (!place)
         return std::nullopt;
-    if (path_ended(*value))
-        return EmitResult{NoContinuation{}};
-    // 聚合值已经位于独立临时存储，借用直接返回该存储地址。
-    if (const auto *aggregate = std::get_if<AggregateValue>(&*value))
-        return EmitResult{aggregate->address};
-    return EmitResult{materialize_value(std::get<ir::Operand>(*value))};
+    if (path_ended(*place))
+        return NoContinuation{};
+    return std::get<Place>(*place).address;
 }
 
-// 按 sema 已选定的调整路径执行引用/Box 转换。
-// 每个步骤只读取当前层保存的指针：引用保存目标地址，Box 保存拥有者指针，
-// 因此两者都执行一次 load ptr；不读取目标中保存的值。
-std::optional<ir::Operand>
-GenerationContext::emit_coercion(ir::Operand value,
-                                 const CoercionPlan &plan) {
+// 每个引用/Box 调整步骤都只读取一层指针，不读取最终目标的值。
+ir::Operand
+GenerationContext::emit_coercion_at(const UseSite &site, ir::Operand value) {
+    const auto &plan = semantics.coercion_plans.at(site);
     for (std::size_t step = 0; step < plan.steps.size(); ++step)
         value = load_value(value, ir::Type::Ptr);
     return value;
-}
-
-// 直接读取固定使用位置已经保存的调整路径；缺失记录不能当作无转换处理。
-std::optional<ir::Operand>
-GenerationContext::emit_coercion_at(const UseSite &site, ir::Operand value) {
-    return emit_coercion(value, semantics.coercion_plans.at(site));
 }
 
 } // namespace rx

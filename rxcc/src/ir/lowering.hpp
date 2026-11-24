@@ -7,6 +7,7 @@
 #include "sema/result.hpp"
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <string>
@@ -40,11 +41,11 @@ using LocalPlaces = std::map<LocalId, ir::Operand>;
 // 已经求得的独立聚合值；address 是入口分配的值存储，不等同于源变量的 place。
 struct AggregateValue {
     ir::Operand address; // 聚合值存储地址，IR 类型必须为 ptr。
-    const SemanticType *type; // 这个值保存的源聚合类型。
 };
 // 表达式正常完成但没有数据值，例如 () 或已经产生副作用的 unit 调用。
 struct UnitResult {};
-// 当前执行路径已经由 return 结束，外层不能再生成任何指令。
+// 当前路径不再正常继续，例如 return、break、continue 或无出口循环；
+// 外层不能沿该路径再生成指令。
 struct NoContinuation {};
 // 一条表达式或语句的生成结果；生成失败仍用外层 std::nullopt 表示。
 using EmitResult =
@@ -77,7 +78,7 @@ public:
     // 返回 false 表示遇到尚未支持或内部不一致的情况，原因已写入 diagnostics。
     bool emit_function_body(const FunctionSymbol &function, ir::IRFunctionId id);
     // 生成所有已登记但还没有函数体的辅助函数，供生成器在函数体之后调用。
-    bool emit_pending_helpers();
+    void emit_pending_helpers();
 
 private:
     enum class ResultUse { Value, Discard }; // 调用方是否消费表达式的数据结果。
@@ -97,17 +98,11 @@ private:
     };
 
     // 一个按“操作种类 + 完整具体类型”登记的辅助函数。
-    // 先登记身份和签名，真正生成函数体时再标记 Generating/Complete。
+    // 先登记身份和签名；函数体按登记顺序生成一次。
     struct Helper {
-        enum class State {
-            Pending,    // 已登记，尚未开始生成函数体。
-            Generating, // 正在生成函数体；递归请求直接复用这个身份。
-            Complete,   // 函数体已经完成。
-        };
         HelperKind kind = HelperKind::Clone; // 这个辅助函数执行哪种操作。
         ir::IRFunctionId function; // 分配好的 IR 函数身份。
         SemanticType type; // 该辅助函数处理的完整具体类型。
-        State state = State::Pending; // 函数体生成状态。
     };
 
     // lowering.cpp：表达式和语句分派。
@@ -140,9 +135,6 @@ private:
     std::optional<EmitResult>
     emit_prepared_value(const Expression &expression, LocalPlaces &locals,
                         const UseSite &site);
-    // 对已经求好的结果执行 sema 记录的调整；聚合值保持同一存储。
-    std::optional<EmitResult> adjust_value(const EmitResult &value,
-                                           const UseSite &site);
     // 把已准备好的标量或聚合值写入目标存储。
     void store_prepared_value(const ir::Operand &destination,
                               const EmitResult &prepared,
@@ -150,6 +142,10 @@ private:
     // 按完整聚合结构把 source 存储搬运到 destination；数组使用有界循环。
     void copy_value(const ir::Operand &destination, const ir::Operand &source,
                     const SemanticType &type);
+    // 按声明顺序或数组下标投影两个同类型聚合，把对应成员的地址和类型交给调用方。
+    void for_each_member_pair(
+        const ir::Operand &first, const ir::Operand &second, const SemanticType &type,
+        const std::function<void(ir::Operand, ir::Operand, const SemanticType &)> &body);
     // 源位置可能被后续表达式修改，私有结果槽则已经是独立的值。
     enum class StorageOrigin { SourcePlace, PrivateSlot };
     std::optional<EmitResult> read_stored_value(
@@ -176,8 +172,7 @@ private:
     // 生成 break/continue：查 sema 记录的 LoopId，再跳到当前循环帧的目标块。
     std::optional<EmitResult> emit_break(const BreakExpression &expression,
                                          LocalPlaces &locals);
-    std::optional<EmitResult> emit_continue(
-        const ContinueExpression &expression, LocalPlaces &locals);
+    EmitResult emit_continue(const ContinueExpression &expression);
     LoopFrame &active_loop(LoopId target);
 
     // lowering/value.cpp：基础值、存储表示和固定临时 slot。
@@ -208,15 +203,14 @@ private:
                                                 LocalPlaces &locals);
     std::optional<PlaceResult> emit_index_place(const IndexExpression &expression,
                                                 LocalPlaces &locals);
-    // 生成 & / &mut：已有 place 直接取地址，值表达式只物化一次。
+    // 借用已有位置，或为值表达式准备一次临时存储。
+    std::optional<PlaceResult> emit_borrowed_place(const Expression &expression,
+                                                   LocalPlaces &locals);
+    // 生成 & / &mut，返回借用位置的地址。
     std::optional<EmitResult> emit_borrow(const UnaryExpression &expression,
                                           LocalPlaces &locals);
-    // 按 sema 已选定的路径执行引用调整；每步只读取一层指针。
-    std::optional<ir::Operand> emit_coercion(ir::Operand value,
-                                             const CoercionPlan &plan);
     // 读取某个固定使用位置的调整路径，并把准备好的值调整到目标类型。
-    std::optional<ir::Operand> emit_coercion_at(const UseSite &site,
-                                                 ir::Operand value);
+    ir::Operand emit_coercion_at(const UseSite &site, ir::Operand value);
 
     // lowering/operators.cpp：操作数读取时机和标量运算。
     // 先求值左操作数，再求值右操作数，最后按源类型选择二元指令。
@@ -229,11 +223,10 @@ private:
     std::optional<EmitResult> emit_cast(const CastExpression &expression,
                                         LocalPlaces &locals);
     // 只接收已求好的标量操作数，按源类型选择 add/sdiv/udiv/icmp/移位等指令。
-    std::optional<ir::Operand>
-    emit_binary_operation(BinaryOperator operation,
-                          const SemanticType &operand_type,
-                          ir::Operand left, ir::Operand right);
-    // 完成标量操作数：直接标量已可用；一层共享引用此时才读取目标。
+    ir::Operand emit_binary_operation(BinaryOperator operation,
+                                      const SemanticType &operand_type,
+                                      ir::Operand left, ir::Operand right);
+    // 完成标量操作数：直接标量已可用；沿语义阶段允许的引用层逐层读取目标。
     ir::Operand finish_scalar_operand(ir::Operand value,
                                        const SemanticType &type);
 
@@ -262,22 +255,27 @@ private:
     std::optional<EmitResult> emit_receiver(const Expression &receiver,
                                             const ResolvedMethod &method,
                                             LocalPlaces &locals);
+    // 接收者（若有）已准备好；按源码下标求其余实参，再按语义目标分派。
+    std::optional<EmitResult> finish_call(
+        const Expression &call, const CallTarget &target,
+        const std::vector<std::shared_ptr<Expression>> &arguments,
+        LocalPlaces &locals, std::vector<EmitResult> prepared);
     // 把已经按调用顺序求好的实参传给目标函数，并按 ABI 处理聚合结果。
-    std::optional<EmitResult> emit_target_call(ir::IRFunctionId target,
-                                               std::vector<EmitResult> arguments,
-                                               const SemanticType &result_type);
+    EmitResult emit_target_call(ir::IRFunctionId target,
+                                const std::vector<EmitResult> &arguments);
     // Box::<T>::new：申请 T 的存储并把已求好的值复制/移动到新分配。
-    std::optional<EmitResult> emit_box_new(const SemanticType &box_type,
-                                           std::vector<EmitResult> prepared);
+    EmitResult emit_box_new(const SemanticType &box_type, const EmitResult &value);
     // Vec::<T>::new：生成 {null, 0, 0} 头，不申请零字节缓冲区。
-    std::optional<EmitResult> emit_vec_new(const SemanticType &vec_type);
+    EmitResult emit_vec_new();
+    enum class VecField { Data, Length, Capacity };
+    ir::Operand vec_field_address(ir::Operand header, VecField field);
+    ir::Operand vec_element_address(ir::Operand data, const SemanticType &element,
+                                    ir::Operand index);
     // Vec 的 len/is_empty：从真实头的长度字段读取，header 必须指向 {ptr,i32,i32}。
-    std::optional<EmitResult> emit_vec_query(BuiltinCallKind kind,
-                                             ir::Operand header);
+    EmitResult emit_vec_query(BuiltinCallKind kind, ir::Operand header);
     // Vec::push：按当前头决定是否增长，搬运活动元素后写入新元素并更新 len。
-    std::optional<EmitResult> emit_vec_push(const SemanticType &vec_type,
-                                            ir::Operand header,
-                                            EmitResult element);
+    EmitResult emit_vec_push(const SemanticType &vec_type, ir::Operand header,
+                             const EmitResult &element);
     // Vec::remove：先保存被移除值，再把后缀左移一位并更新 len。
     std::optional<EmitResult> emit_vec_remove(const SemanticType &vec_type,
                                               ir::Operand header,
@@ -285,8 +283,7 @@ private:
 
     // lowering/clone.cpp：按具体类型执行深克隆并登记辅助函数。
     // 从保存 T 的 source 地址克隆，返回 T 的计算值或独立聚合存储。
-    std::optional<EmitResult> emit_clone(const SemanticType &type,
-                                         ir::Operand source);
+    EmitResult emit_clone(const SemanticType &type, ir::Operand source);
     // 在 destination 中生成 T 的深克隆；复合类型内部按成员继续分派。
     void emit_clone_into(const ir::Operand &destination,
                          const ir::Operand &source,
@@ -300,9 +297,6 @@ private:
     // 先借用两侧，再生成一次 ==；!= 只对这次相等结果取反。
     std::optional<EmitResult> emit_equality(const BinaryExpression &expression,
                                             LocalPlaces &locals);
-    // 准备一侧的借用地址；已有 place 保留原位置，值表达式只物化一次。
-    std::optional<PlaceResult>
-    emit_equality_operand(const Expression &expression, LocalPlaces &locals);
     // 比较 left/right 地址中的 T，返回 i1；复合类型内部按字段/元素分派。
     ir::Operand emit_equality_into(const ir::Operand &left,
                                    const ir::Operand &right,

@@ -127,6 +127,8 @@ def verify_module(args, name, ir_path, bitcode, logs=None):
     if name in ("discarded-if-value", "discarded-loop-and-logic") and re.search(
             r"\b(?:alloca|store|load)\b", text):
         raise RuntimeError(f"{name}: discarded results must not need a storage slot")
+    if name == "discarded-equality" and ("__rx_eq_helper_" in text or "icmp " in text):
+        raise RuntimeError(f"{name}: discarded comparisons must not emit a comparison or helper")
     for forbidden in (" nsw ", " nuw ", " exact", "noalias",
                       "inbounds", "nonnull", "sret(", "byval("):
         if forbidden in text:
@@ -1762,6 +1764,34 @@ def main():
                     println_i32(no_exit());
                 }
              """, b"10\n1\n2\n90\n20\n4\n20\n90\n32\n33\n34\n36\n37\n"),
+            ("discarded-equality", """
+                fn scalar(tag: i32) -> i32 { println_i32(tag); tag }
+                fn array(tag: i32) -> [i32; 1] { [scalar(tag)] }
+                fn compare(stop_left: bool, stop_right: bool) -> i32 {
+                    array({ if stop_left { return 7; } 3 }) !=
+                        array({ if stop_right { return 8; } 4 });
+                    9
+                }
+                fn main() {
+                    scalar(1) == scalar(2);
+                    println_i32(compare(true, false));
+                    println_i32(compare(false, true));
+                    println_i32(compare(false, false));
+                }
+             """, b"1\n2\n7\n3\n8\n3\n4\n9\n"),
+            ("p73-discarded-place", """
+                fn select(rows: &[[i32; 2]; 1]) -> &[[i32; 2]; 1] {
+                    println_i32(1); rows
+                }
+                fn index() -> usize { println_i32(2); 0 }
+                fn discard(rows: &[[i32; 2]; 1]) -> i32 {
+                    select(rows)[index()];
+                    select(rows)[{ println_i32(3); return 4; 0usize }][index()];
+                    println_i32(99);
+                    0
+                }
+                fn main() { println_i32(discard(&[[10, 20]])); }
+             """, b"1\n2\n1\n3\n4\n"),
             ("p73-assignment-early-exit", """
                 fn rhs_exit() -> i32 {
                     let mut rows = [[1, 2], [3, 4]];
@@ -1781,7 +1811,7 @@ def main():
             output = temp / f"{name}.ll"
             source.write_text(contents, encoding="utf-8")
             run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
-            if name in ("p73-results", "p73-assignment-early-exit") and re.search(
+            if name in ("p73-results", "p73-discarded-place", "p73-assignment-early-exit") and re.search(
                     r"\bcall\b[^\n]*\bi32 99\b", output.read_text(encoding="utf-8")):
                 raise RuntimeError(f"{name}: unreachable aggregate continuation was emitted")
             modules.append((name, output, expected, b""))
@@ -1916,6 +1946,167 @@ def main():
                 if repeated.read_bytes() != output.read_bytes():
                     raise RuntimeError(f"{name}: helper definitions must be deterministic")
             modules.append((name, output, (p10 / f"{stem}.out").read_bytes(), b""))
+
+        # 覆盖展开边界和大数组；同一 helper 在不等之后还必须能重新判等。
+        regression_cases = []
+        for length in (8, 9, 513):
+            regression_cases.append((f"p10-array-boundary-{length}", f"""
+                fn main() {{
+                    let original = [7i32; {length}];
+                    let mut round = 0;
+                    while round < 2 {{
+                        let mut copied = original.clone();
+                        println_i32((copied == original) as i32);
+                        copied[{length - 1}] = 8;
+                        println_i32((copied == original) as i32);
+                        println_i32((copied != original) as i32);
+                        println_i32((original == original) as i32);
+                        copied[{length - 1}] = 7;
+                        println_i32((copied == original) as i32);
+                        copied[0] = 9;
+                        copied[{length - 1}] = 11;
+                        println_i32(original[0]);
+                        println_i32(original[{length - 1}]);
+                        println_i32(copied[0]);
+                        println_i32(copied[{length - 1}]);
+                        round += 1;
+                    }}
+                }}
+             """, b"1\n0\n1\n1\n1\n7\n7\n9\n11\n" * 2))
+
+        regression_cases.extend((
+            # 17 次 push 跨过当前实现的多次增长；删除中间项后检查全部元素。
+            # bool 数组夹在 bool/i32 字段之间，不能把 i1 计算值误当作存储布局。
+            ("p10-vec-array-loops", """
+                #[derive(Clone, PartialEq, Eq)]
+                struct Packet {
+                    ready: bool, flags: [bool; 9], stamp: i32, rows: Vec<[i32; 9]>
+                }
+                fn main() {
+                    let mut rows = Vec::<[i32; 9]>::new();
+                    let mut index = 0usize;
+                    while index < 17usize {
+                        let mut row = [index as i32; 9];
+                        row[8] += 100;
+                        rows.push(row);
+                        index += 1usize;
+                    }
+                    let removed = rows.remove(8);
+                    println_i32(rows.len() as i32);
+                    println_i32(removed[0]);
+                    println_i32(removed[8]);
+                    println_i32((removed == [8, 8, 8, 8, 8, 8, 8, 8, 108]) as i32);
+                    let mut ordered = true;
+                    index = 0;
+                    while index < rows.len() {
+                        let value = (if index < 8usize { index } else { index + 1usize }) as i32;
+                        let mut column = 0usize;
+                        while column < 9usize {
+                            let expected = if column == 8usize { value + 100 } else { value };
+                            ordered &= rows[index][column] == expected;
+                            column += 1usize;
+                        }
+                        index += 1usize;
+                    }
+                    println_i32(ordered as i32);
+                    let mut flags = [false; 9];
+                    flags[0] = true;
+                    flags[8] = true;
+                    let original = Packet { ready: true, flags: flags, stamp: 123, rows: rows };
+                    let mut outer = 0;
+                    while outer < 2 {
+                        let mut inner = 0;
+                        while inner < 2 {
+                            let mut copied = original.clone();
+                            println_i32((copied == original) as i32);
+                            copied.rows[15][8] = -1;
+                            println_i32((copied == original) as i32);
+                            println_i32((copied != original) as i32);
+                            copied.rows[15][8] = 116;
+                            println_i32((copied == original) as i32);
+                            copied.flags[8] = false;
+                            println_i32((copied == original) as i32);
+                            copied.flags[8] = true;
+                            println_i32((copied == original) as i32);
+                            copied.flags[0] = false;
+                            copied.rows[0][0] = -2;
+                            copied.rows[15][8] = -3;
+                            println_i32(original.rows[0][0]);
+                            println_i32(original.rows[15][8]);
+                            println_i32(original.flags[0] as i32);
+                            println_i32(original.flags[8] as i32);
+                            println_i32(copied.rows[0][0]);
+                            println_i32(copied.rows[15][8]);
+                            println_i32(copied.flags[0] as i32);
+                            println_i32(copied.ready as i32);
+                            println_i32(copied.stamp);
+                            inner += 1;
+                        }
+                        outer += 1;
+                    }
+                }
+             """, b"16\n8\n108\n1\n1\n" +
+             b"1\n0\n1\n1\n0\n1\n0\n116\n1\n1\n-2\n-3\n0\n1\n123\n" * 4),
+            # 不可达尾值仍给 receiver 定型，发散标记不代表 record.type 是 Box。
+            # 分别经过正次数自动解引用的 Box 值、引用值和索引 place 入口。
+            ("p9-receiver-autoderef-exit", """
+                struct Data { value: i32 }
+                impl Data {
+                    fn sum(&self, left: i32, right: i32) -> i32 {
+                        println_i32(93);
+                        self.value + left + right
+                    }
+                }
+                fn mark(tag: i32) -> i32 { println_i32(tag); tag }
+                fn box_exit() -> i32 {
+                    ({ println_i32(11); return 21;
+                       Box::<Data>::new(Data { value: 0 }) }).sum(mark(91), mark(92))
+                }
+                fn reference_exit() -> i32 {
+                    ({ println_i32(12); return 22;
+                       &&Box::<Data>::new(Data { value: 0 }) }).sum(mark(91), mark(92))
+                }
+                fn place_exit() -> i32 {
+                    ({ println_i32(13); return 23;
+                       &[Box::<Data>::new(Data { value: 0 })] })[0].sum(mark(91), mark(92))
+                }
+                fn main() {
+                    println_i32(box_exit());
+                    println_i32(reference_exit());
+                    println_i32(place_exit());
+                }
+             """, b"11\n21\n12\n22\n13\n23\n"),
+        ))
+        for name, contents, expected in regression_cases:
+            source = temp / f"{name}.rx"
+            output = temp / f"{name}.ll"
+            source.write_text(contents, encoding="utf-8")
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            text = output.read_text(encoding="utf-8")
+            if name == "p9-receiver-autoderef-exit":
+                bodies = re.findall(r"^define .*?\{\n(.*?)^\}", text, re.MULTILINE | re.DOTALL)
+                for marker in (11, 12, 13):
+                    receivers = [body for body in bodies
+                                 if f"call void @println_i32(i32 {marker})" in body]
+                    if len(receivers) != 1 or re.search(
+                            r"\b(?:load|store|getelementptr|alloca)\b|\bcall\b[^\n]*@(?:__rx_alloc|__rx_fn_)",
+                            receivers[0]):
+                        raise RuntimeError(f"{name}: receiver {marker} must end before dereference or argument calls")
+            else:
+                check_p10_helpers(name, text, 4 if name == "p10-vec-array-loops" else 1)
+                # helper 的槽都是标量，沿用既有入口槽检查，不绑定 SSA 或块编号。
+                helpers = "\n".join(re.findall(
+                    r"^define internal (?:void|i1) @__rx_(?:clone|eq)_helper_\d+\([^\n]*\) \{\n.*?^\}",
+                    text, re.MULTILINE | re.DOTALL))
+                check_loop_storage(helpers)
+                # 513 项若重新展开会远超此上界；不限制具体指令选择或精确数量。
+                limit = 1800 if name == "p10-vec-array-loops" else 600
+                if len(re.findall(r"^  (?:%\S+ = )?[a-z]+\b", text, re.MULTILINE)) > limit:
+                    raise RuntimeError(f"{name}: aggregate operations must have bounded instruction count")
+                if re.search(r"\bicmp (?:eq|ne) ptr\b|@(?:memcmp|bcmp)\b", text):
+                    raise RuntimeError(f"{name}: equality must compare values, not addresses or raw bytes")
+            modules.append((name, output, expected, b""))
 
         for name, command, expected in (
             ("model-smoke", [args.model_test], b""),

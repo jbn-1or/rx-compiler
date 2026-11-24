@@ -1,7 +1,8 @@
 # P3：局部存储、普通调用与返回
 
 对应 P3.0–P3.6；规范 §6、§7、§9、§10、§11、§15。
-全部 lowering 断言待接入。小步验收只使用此前能力；不要以 cast、赋值或 if 作为 P3 前置条件。
+源码种子和多项结构断言已接入，逐点边界见下表后的接入矩阵；不等于全部目标变体已补齐。
+小步验收只使用此前能力；不要以 cast、赋值或 if 作为 P3 前置条件。
 
 | 编号/步骤 | 源码/构造 | 预期与关键断言 | 层次/依赖 |
 | --- | --- | --- | --- |
@@ -24,3 +25,29 @@
 | P3-16 / .4 | 常量项作为参数和尾返回 | 读取 SemanticResult 的位模式，不能生成对未定义全局符号的 load | S/I/E；P3.4 |
 
 验收：新存储/转换指令经独立 U/I 测试，源码 E 验收不以手工模块替代。
+
+## 接入证据与缺口
+
+以下是当前测试代码的静态接入记录，不是本轮执行成绩。`entry` 指 `../entry_test.cpp`，
+`model` 指 `../model_test.cpp`，`runner` 指 `../../run_ir.py`；结构自检不单独算外部 I，
+runner 的执行断言只有加 `--reimu` 才运行。状态含义见 [README](../README.md#测试层次与状态)。
+
+| 编号 | 当前接入证据 | 未补齐或不能据此推断的部分 |
+| --- | --- | --- |
+| P3-17 | 已接入：entry `check_println` 检查声明、常量与 void 无结果；runner `println-42` 验证/执行种子 | 无额外矩阵缺口记录；运行结果另报 |
+| P3-03 | 已接入：entry `check_locals` 检查独立入口 slot 和初始化读取顺序；runner `shadowing` 执行完整种子 | 不以单独 semantic 接受作为执行证据 |
+| P3-04 | 已接入：model `add_storage`、`check_invalid_models` 及 `run_tests` 的存储构建反例；`--emit-model` 经 runner 外部验证 | 手工存储函数未被执行，不替代源码存取 E |
+| P3-05 | 部分：runner `nested-integer-block` 覆盖标量块；entry `check_reference_temporaries` 检查调用后的初始化和入口分配 | 打印后返回的标量块作为 let 初始化器的专门一次性/写入时机断言待补 |
+| P3-06 | 已接入：entry `check_unit_calls_and_blocks`；runner `unit-blocks` | 无额外矩阵缺口记录 |
+| P3-01 | 已接入：runner `literal-io` 精确比较 `1242\n`，外部 LLVM 检查调用类型 | 不等于所有 I/O 声明都有专门的内部结构断言 |
+| P3-02 | 已接入：runner `read-io` 使用配套输入/输出；另有 `read-single-negative` | 不只检查生成成功或空 stdout |
+| P3-07 | 已接入：entry `check_integer_calls_and_returns` 检查参数顺序、签名和尾返回；runner `scalar-calls` | 无额外矩阵缺口记录 |
+| P3-08 | 部分：entry 检查标量参数 slot；runner `call-then-continue` 检查调用后仍读取 caller 局部 | 参数被同名 let 遮蔽、mut 标量参数修改后的 caller 独立性专例待补 |
+| P3-09 | 部分：entry 和 runner `scalar-nine-args` 已覆盖九参数及第九参数结果 | 目标表中的十参数及第 1/8/10 参数结果矩阵未补齐 |
+| P3-10 | 已接入：entry `check_early_return`；runner `early-return` 及无打印 99 的文本检查 | 无额外矩阵缺口记录 |
+| P3-11 | 已接入：entry `check_early_return` 检查 never let、嵌套 return；runner `never-let`、`return-stops-later-argument` 等 | 不把发散路径伪造为 Unit 或常量结果 |
+| P3-12 | 已接入：entry 独立函数返回断言；runner `return-independence` | 无额外矩阵缺口记录 |
+| P3-13 | 已接入：entry `check_bool_boundary`、model `add_bool_scalar` 及转换反例；runner `bool-boundary`、`model-bool` | 空输出种子本身不区分真值；`model-bool` 是底层驱动，不是源码 cast |
+| P3-14 | 部分：runner `p04-casts` 覆盖 true/false 到整数；`model-bool` 覆盖模型往返后打印 | 源码经多次 let/call 再 cast 的完整链路专例待补，不能用两组独立测试代替 |
+| P3-15 | 已接入联合回归：entry `check_while` 检查循环内初始化但入口分配；runner `p68-recursive-call-order` 和 P11 `loop_storage`、`recursive_frames` | P11 资源/执行结果须由相应命令单独报告 |
+| P3-16 | 已接入：entry `check_scalar_constants` 检查常量尾返回位模式，`check_locals` 检查局部常量；runner `local-constant` 等 | 不将语义查询的成功单独算为 IR 执行通过 |

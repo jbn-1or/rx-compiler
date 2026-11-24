@@ -19,11 +19,11 @@
 git submodule update --init --recursive
 ```
 
-本 Fork 的语义检查器是 C++20 实现的 `rxcc`。默认 `BUILD` 只构建它；
+本 Fork 的语义检查和 IR 生成使用 C++20 实现的 `rxcc`。默认 `BUILD` 构建它；
 运行官方语义测试仅需 CMake、C++20 编译器和 Python 3：
 
 ```sh
-make test FILTER=official:semantic
+make test STAGE=semantic FILTER=official:semantic
 ```
 
 向 OJ 提交时选择 **C / C++** 和 **Semantic**。解析器的生成源码及匹配的
@@ -32,9 +32,11 @@ ANTLR 4.13.2 运行库源码已提交，构建过程无需联网、Cargo、Java 
 并一并提交 `rxcc/gen/*.cpp` 和 `rxcc/gen/*.h`；脚本支持通过
 `ANTLR4_JAVA`、`ANTLR4_JAR` 指定本地生成工具。
 
-IR / codegen / optimization 命令目前仍使用模板的 Rust 参考编译器。
-在安装下述 Rust、REIMU 和 Clang 工具后，使用 `make test BUILD_REFERENCE=true`
-显式构建 Rust 参考库并运行这些本地测试。
+`IR` 命令使用自有 `rxcc --stage ir`，`BUILD` 在需要 IR 的阶段用 Clang 编译
+`rxcc/runtime/runtime.c` 作为共享运行时；仅运行语义阶段不需要该运行时。
+codegen / optimization 仍使用 Rust 参考编译器，使用 `make test BUILD_REFERENCE=true`
+显式构建参考库；这些参考汇编成绩不能代替自有 IR 验收。
+开发期外部 LLVM 验证及 RV32 O0/O2 执行入口见 [IR 分阶段测试说明](rxcc/tests/ir/README.md)。
 
 编译 REIMU 需要 Python 3、[xmake](https://xmake.io/) 以及支持 C++23 的编译器。在运行测试前，请在项目根目录下单独编译 REIMU：
 
@@ -57,8 +59,8 @@ IR 测试还需要 **Clang 22**。
 在本门课程中，你可以使用**任意语言**来实现你的编译器。如果你的实现语言较为冷门，请联系助教以便我们在 Online Judge（评测机）上提供支持。因此，我们在此提供的模板是**与实现语言无关的（language-agnostic）**。仓库中包含：
 
 - `tests/` 目录下的测试用例。官方测试用例位于 `tests/official`（作为 Git 子模块引入）。你可以在 `tests/custom` 下添加自己的测试用例。
-- 测试运行器（Test runner）。`Makefile` 会调用在 `config.mk` 中配置的编译器来运行测试用例。默认情况下，它使用系统安装的 rustc（目标架构为 `riscv32im-unknown-none-elf`），并在 REIMU 中执行生成的汇编代码。**请将 `config.mk` 中的编译器命令替换为你自己的编译器命令**，以此为你的编译器配置测试。详见[运行测试](#运行测试)。
-    - 一些辅助文件（如 `crates/rx` 中的参考编译器辅助代码）用于帮助默认的 rustc 输出适合 REIMU 的汇编文件。其中 `src/entry.rs` 针对每个测试用例单独编译，提供裸机程序入口点以及 `Box`/`Vec` 导入；库通过 REIMU 的 libc 实现了整数 I/O，并在 `src/runtime.rs` 中为裸机 RV32 目标提供内存分配与 panic 处理。默认的 IR 和 codegen 命令分别请求生成 LLVM IR 或汇编，同时生成静态库，以便 rustc 进行全程序 LTO（链接时优化）并将运行时包含在生成的程序中。额外的 `{output}.a` 属于构建产物。Codegen 通过 `scripts/strip_asm_debug.py` 去除 REIMU 无法汇编的调试元数据；IR 运行器先用 Clang 编译 `.ll`，再移除同类元数据。两种路径中的 `RUN` 都接收汇编形式的 `{output}`。当你将编译器命令替换为你自己的编译器时，这些辅助文件均可移除。
+- 测试运行器（Test runner）。`Makefile` 调用 `config.mk`：SEMANTIC/IR 使用自有 C++ rxcc，CODEGEN/optimization 使用 Rust 参考实现，生成的 RV32IM 汇编在 REIMU 中执行。详见[运行测试](#运行测试)。
+- `crates/rx` 中的辅助文件只服务于 Rust 参考汇编路径：`src/entry.rs` 提供裸机入口和 Box/Vec 导入，`src/runtime.rs` 提供 I/O、分配和 panic；参考命令同时输出汇编和用于 LTO 的 `{output}.a`。自有 IR 不依赖这些 Rust 文件，而链接 `rxcc/runtime/runtime.c` 生成的汇编。两条路径都去除 REIMU 不支持的调试元数据，`RUN` 接收的 `{output}` 均为汇编。
 - `vendor/REIMU` 下的 REIMU，为 Git 子模块。`config.mk` 中的 `RUN` 命令会调用它；测试运行器本身并不依赖特定的模拟器。
 - `grammar/` 目录下的 Rx 语言 G4 文法。你可以使用它来为编译器生成词法分析器和语法分析器。
 

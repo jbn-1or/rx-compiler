@@ -7,7 +7,7 @@
 
 namespace rx {
 
-// 查找已有辅助函数；没有时先分配身份、签名并登记为 Pending。
+// 查找已有辅助函数；没有时分配身份、签名并追加到生成队列。
 // 登记先于函数体生成，因此递归类型在生成时能直接引用自身或尚未展开的对方。
 ir::IRFunctionId
 GenerationContext::request_helper(HelperKind kind, const SemanticType &type) {
@@ -30,22 +30,16 @@ GenerationContext::request_helper(HelperKind kind, const SemanticType &type) {
     const auto function =
         module.add_function(name, signature, ir::Linkage::Internal);
     helper_indices_.emplace(key, helper_index);
-    helpers_.push_back(
-        Helper{kind, function, type, Helper::State::Pending});
+    helpers_.push_back(Helper{kind, function, type});
     return function;
 }
 
 // 按登记顺序生成所有尚未完成的辅助函数体；生成过程中新登记的会追加到末尾。
 // 主函数体和机器入口已经结束，因此这里复用主 builder 不会覆盖任何源函数状态。
-bool GenerationContext::emit_pending_helpers() {
+void GenerationContext::emit_pending_helpers() {
     for (std::size_t index = 0; index < helpers_.size(); ++index) {
-        if (helpers_[index].state == Helper::State::Complete)
-            continue;
         // 复制身份、种类和类型，避免生成期间 helpers_ 扩容使引用失效。
-        helpers_[index].state = Helper::State::Generating;
-        const auto kind = helpers_[index].kind;
-        const auto function = helpers_[index].function;
-        const auto type = helpers_[index].type;
+        const auto [kind, function, type] = helpers_[index];
         auto &ir_function = module.function(function);
         builder.set_insert_point(ir_function.add_block());
         if (kind == HelperKind::Clone) {
@@ -57,10 +51,7 @@ bool GenerationContext::emit_pending_helpers() {
                 ir_function.argument(0), ir_function.argument(1), type);
             builder.ret(equal);
         }
-        // 生成期间若递归请求了自己，这里仍通过原下标把同一项标为完成。
-        helpers_[index].state = Helper::State::Complete;
     }
-    return true;
 }
 
 } // namespace rx

@@ -18,15 +18,13 @@ GenerationContext::emit_if(const IfExpression &expression, LocalPlaces &locals,
     const bool needs_value = use == ResultUse::Value &&
                              !record.diverges && !result_type.is_unit();
     if (needs_value && !is_storable_value(result_type)) {
-        diagnostics << "IR 生成尚未支持此 if 结果类型（P9）\n";
+        diagnostics << "IR 生成尚未支持 if 结果类型 " << result_type.toString() << '\n';
         return std::nullopt;
     }
     // 条件在当前块求值一次；条件自身提前 return 时，整个 if 不再发射。
     auto condition_result = emit_value(*expression.condition, locals);
-    if (!condition_result)
-        return std::nullopt;
-    if (path_ended(*condition_result))
-        return EmitResult{NoContinuation{}};
+    if (!condition_result || path_ended(*condition_result))
+        return condition_result;
     // 语义检查保证 if 条件是 bool，这里直接取它对应的 i1 计算值。
     const auto condition = std::get<ir::Operand>(*condition_result);
 
@@ -87,10 +85,8 @@ GenerationContext::emit_logical(const BinaryExpression &expression,
 
     // 左侧总是先求值；左侧提前 return 时，右侧和外层都不能继续发射。
     auto left_result = emit_value(*expression.left, locals);
-    if (!left_result)
-        return std::nullopt;
-    if (path_ended(*left_result))
-        return EmitResult{NoContinuation{}};
+    if (!left_result || path_ended(*left_result))
+        return left_result;
     const auto left_value = std::get<ir::Operand>(*left_result);
 
     // 条件可能包含嵌套控制流，插入点在求值后以 builder 记录的当前块为准。
@@ -149,11 +145,9 @@ GenerationContext::emit_while(const WhileExpression &expression,
 
     builder.set_insert_point(condition_block);
     auto condition_result = emit_value(*expression.condition, locals);
-    if (!condition_result)
-        return std::nullopt;
     // 条件自身提前 return 时，循环没有正常进入 body 或 exit 的路径。
-    if (path_ended(*condition_result))
-        return EmitResult{NoContinuation{}};
+    if (!condition_result || path_ended(*condition_result))
+        return condition_result;
     const auto condition = std::get<ir::Operand>(*condition_result);
 
     // 条件正常完成后才需要 body 和 exit；body 回跳 cond，条件 false 进入 exit。
@@ -191,7 +185,7 @@ GenerationContext::emit_loop(const LoopExpression &expression,
     std::optional<Place> result;
     if (use == ResultUse::Value && !record.diverges && !result_type.is_unit()) {
         if (!is_storable_value(result_type)) {
-            diagnostics << "IR 生成尚未支持此 loop 结果类型（P9）\n";
+            diagnostics << "IR 生成尚未支持 loop 结果类型 " << result_type.toString() << '\n';
             return std::nullopt;
         }
         result = Place{allocate_storage_slot(ir::storage_type_of(result_type)), &result_type};
@@ -261,9 +255,7 @@ GenerationContext::emit_break(const BreakExpression &expression,
 }
 
 // 生成 continue：while 回条件块，loop 回循环体块。
-std::optional<EmitResult>
-GenerationContext::emit_continue(const ContinueExpression &expression,
-                                 LocalPlaces &) {
+EmitResult GenerationContext::emit_continue(const ContinueExpression &expression) {
     builder.branch(active_loop(semantics.continue_targets.at(&expression)).continue_target);
     return EmitResult{NoContinuation{}};
 }

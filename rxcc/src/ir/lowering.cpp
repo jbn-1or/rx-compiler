@@ -43,6 +43,9 @@ GenerationContext::emit_expression(const Expression &expression,
         if (path_ended(*place))
             return NoContinuation{};
         const auto &source = std::get<Place>(*place);
+        // 地址已求值；丢弃可存储的值不需要读取标量或创建聚合快照。
+        if (use == ResultUse::Discard && is_storable_value(*source.type))
+            return UnitResult{};
         return read_stored_value(source.address, *source.type,
                                  StorageOrigin::SourcePlace);
     }
@@ -80,7 +83,7 @@ GenerationContext::emit_expression(const Expression &expression,
         return emit_break(*break_expression, locals);
     if (const auto *continue_expression =
             dynamic_cast<const ContinueExpression *>(&expression))
-        return emit_continue(*continue_expression, locals);
+        return emit_continue(*continue_expression);
 
     // 调用表达式由统一的目标解析和参数求值逻辑生成。
     if (const auto *call = dynamic_cast<const CallExpression *>(&expression))
@@ -156,7 +159,7 @@ GenerationContext::emit_discarded_expression(const Expression &expression,
     // 丢弃块结果时先处理语句，不必为不可达的尾值准备存储。
     if (!type.is_unit() && !type.is_never() && !is_storable_value(type) &&
         !dynamic_cast<const BlockExpression *>(&expression)) {
-        diagnostics << "IR 生成尚未支持丢弃此类型的表达式结果\n";
+        diagnostics << "IR 生成尚未支持丢弃类型为 " << type.toString() << " 的表达式结果\n";
         return std::nullopt;
     }
     auto result = emit_expression(expression, locals, ResultUse::Discard);
@@ -173,39 +176,23 @@ bool GenerationContext::emit_function_body(const FunctionSymbol &function,
     auto &ir_function = module.function(id);
     current_return_type_ = &function.return_type;
     function_result_pointer_.reset();
-    std::size_t parameter_offset = 0;
+    std::size_t argument_index = 0;
     // 聚合返回的第一个降级形参由调用者提供，保存最终结果的地址。
     if (ir_function.abi.result_storage) {
-        function_result_pointer_ = ir_function.argument(0);
-        parameter_offset = 1;
+        function_result_pointer_ = ir_function.argument(argument_index++);
     }
     const auto &parameter_locals = semantics.function_locals.at(function.id);
-    // 方法接收者位于形参表首位；self 与普通参数使用同一套存储和复制规则。
-    std::vector<LocalId> binding_ids;
-    binding_ids.reserve(parameter_locals.parameters.size() + 1);
+    // 聚合实参已是调用方的私有快照；其余参数（含引用）仍需可取址的 slot。
+    const auto bind_parameter = [&](LocalId local) {
+        const auto &storage = ir_function.abi.parameter_storage[argument_index];
+        const auto argument = ir_function.argument(argument_index++);
+        locals.emplace(local, storage.kind == ir::StorageType::Kind::Unit
+                                  ? materialize_value(argument) : argument);
+    };
     if (parameter_locals.self)
-        binding_ids.push_back(*parameter_locals.self);
-    binding_ids.insert(binding_ids.end(), parameter_locals.parameters.begin(),
-                       parameter_locals.parameters.end());
-    // 每个源绑定存入自己的 LocalId 存储；按值聚合先从实参快照复制到独立 slot。
-    for (std::size_t binding_index = 0; binding_index < binding_ids.size();
-         ++binding_index) {
-        const auto local_id = binding_ids[binding_index];
-        const auto &local_type = semantics.locals[local_id.index].type;
-        const auto &abi_storage =
-            ir_function.abi.parameter_storage[parameter_offset + binding_index];
-        const auto argument =
-            ir_function.argument(parameter_offset + binding_index);
-        const bool by_value =
-            abi_storage.kind != ir::StorageType::Kind::Unit;
-        const auto address = allocate_storage_slot(
-            by_value ? abi_storage : ir::storage_type_of(local_type));
-        if (by_value)
-            copy_value(address, argument, local_type);
-        else
-            store_value(argument, address);
-        locals.emplace(local_id, address);
-    }
+        bind_parameter(*parameter_locals.self);
+    for (const auto local : parameter_locals.parameters)
+        bind_parameter(local);
     // 函数体语句按源码顺序生成；提前 return 后停止整条路径。
     const auto statements = emit_statements(*function.node->body, locals);
     if (!statements)

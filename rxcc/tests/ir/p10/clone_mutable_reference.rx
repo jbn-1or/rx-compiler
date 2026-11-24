@@ -1,0 +1,4 @@
+// Neither this mutable reference nor its referent supplies Clone.
+struct Item { value: i32 }
+fn bad(item: &mut Item) { item.clone(); }
+fn main() {}

@@ -37,6 +37,36 @@ bool is_storable_value(const SemanticType &type) {
     return is_scalar(type) || is_aggregate_value(type);
 }
 
+// 生成完整具体类型的稳定键，区分整数种类、结构体身份、子类型和数组长度。
+// 结构体只记录 StructId，不展开字段，因此递归类型也能有限生成键。
+std::string type_identity_key(const SemanticType &type) {
+    switch (type.kind) {
+        case SemanticType::Kind::Unit:
+            return "unit";
+        case SemanticType::Kind::Never:
+            return "never";
+        case SemanticType::Kind::Error:
+            return "error";
+        case SemanticType::Kind::Int:
+            return "int" + std::to_string(static_cast<int>(type.int_kind));
+        case SemanticType::Kind::Bool:
+            return "bool";
+        case SemanticType::Kind::Reference:
+            return (type.is_mut ? "refmut" : "ref") +
+                   type_identity_key(*type.inner);
+        case SemanticType::Kind::Array:
+            return "array" + std::to_string(type.length) + ":" +
+                   type_identity_key(*type.inner);
+        case SemanticType::Kind::Box:
+            return "box" + type_identity_key(*type.inner);
+        case SemanticType::Kind::Vec:
+            return "vec" + type_identity_key(*type.inner);
+        case SemanticType::Kind::Struct:
+            return "struct" + std::to_string(type.struct_symbol->id.index);
+    }
+    throw std::logic_error("未知源类型不能生成稳定类型键");
+}
+
 // 计算普通值使用的 IR 类型：标量沿用标量映射，引用和 Box 统一为 ptr。
 ir::Type lower_value_type(const SemanticType &type) {
     if (is_reference(type) || type.kind == SemanticType::Kind::Box)

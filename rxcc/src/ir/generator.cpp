@@ -135,6 +135,9 @@ std::optional<IRArtifact> generate_ir(const SemanticResult &semantics,
         builder.set_insert_point(module.function(entry).add_block());
         builder.call(functions[semantics.main_function->index]);
         builder.ret(ir::Operand::constant(ir::Type::I32, 0));
+        // clone 和相等辅助函数在源函数体之后统一补全，确保内部函数都有定义。
+        if (!context.emit_pending_helpers())
+            return std::nullopt;
         // 完整模块仍可被调用方修改；在输出边界统一做结构和布局校验。
         return artifact;
     } catch (const std::logic_error &error) {

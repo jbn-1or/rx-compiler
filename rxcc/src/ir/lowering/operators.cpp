@@ -28,6 +28,10 @@ GenerationContext::emit_binary(const BinaryExpression &expression,
     if (expression.operation == BinaryOperator::LogicalAnd ||
         expression.operation == BinaryOperator::LogicalOr)
         return emit_logical(expression, locals, use);
+    // 相等比较先准备两侧借用，再按内容比较；不能用地址比较代替。
+    if (expression.operation == BinaryOperator::Equal ||
+        expression.operation == BinaryOperator::NotEqual)
+        return emit_equality(expression, locals);
     const auto &left_type =
         semantics.expressions.at(expression.left.get()).type;
     const auto &right_type =
@@ -40,13 +44,6 @@ GenerationContext::emit_binary(const BinaryExpression &expression,
     if (!right || path_ended(*right))
         return right;
 
-    // 非标量相等留到 P10，不能把聚合值取成标量，也不能用地址比较代替。
-    if ((expression.operation == BinaryOperator::Equal ||
-         expression.operation == BinaryOperator::NotEqual) &&
-        !is_scalar(left_type)) {
-        diagnostics << "IR 生成尚未支持非标量相等比较（P10）\n";
-        return std::nullopt;
-    }
     const auto left_scalar =
         finish_scalar_operand(std::get<ir::Operand>(*left), left_type);
     const auto right_scalar =

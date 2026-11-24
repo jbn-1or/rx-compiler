@@ -1,0 +1,29 @@
+// Exercise equality through references and fields containing nested owning values.
+#[derive(PartialEq)]
+struct Bag { items: Vec<[Box<i32>; 2]> }
+
+fn bag() -> Bag {
+    let mut items = Vec::<[Box<i32>; 2]>::new();
+    items.push([Box::<i32>::new(7), Box::<i32>::new(8)]);
+    Bag { items: items }
+}
+
+fn equal_items(left: &Bag, right: &Bag) -> bool { left.items == right.items }
+
+fn main() {
+    let left = bag();
+    let mut right = bag();
+    println_i32((&&left == &&right) as i32);
+    *right.items[0][1] = 9;
+    println_i32(equal_items(&left, &right) as i32);
+    println_i32(*left.items[0][1]);
+    println_i32(*right.items[0][1]);
+
+    let mut x = 7;
+    let mut y = 7;
+    let a = &mut x;
+    let b = &mut y;
+    println_i32((a == b) as i32);
+    *b = 8;
+    println_i32((a != b) as i32);
+}

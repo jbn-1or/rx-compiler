@@ -7,7 +7,7 @@
     "metadata": {
       "testpoint": "P10-01",
       "requires": "P10.1",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -18,7 +18,7 @@
     "metadata": {
       "testpoint": "P10-01",
       "requires": "P10.1",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -28,6 +28,29 @@
     ]
   },
   {
+    "source": "container_clone.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "克隆嵌套数组、Box、Vec 及有无旧缓冲区的空 Vec",
+    "metadata": {
+      "testpoint": "P10-02",
+      "requires": "P10.1",
+      "ir_status": "covered"
+    }
+  },
+  {
+    "source": "container_clone.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "克隆嵌套数组、Box、Vec 及有无旧缓冲区的空 Vec",
+    "metadata": {
+      "testpoint": "P10-02",
+      "requires": "P10.1",
+      "ir_status": "covered"
+    },
+    "io": [{ "input": null, "output": "container_clone.out" }]
+  },
+  {
     "source": "shared_ref_clone.rx",
     "stage": "semantic",
     "compilation_success": true,
@@ -35,7 +58,7 @@
     "metadata": {
       "testpoint": "P10-03",
       "requires": "P10.1",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -46,7 +69,7 @@
     "metadata": {
       "testpoint": "P10-03",
       "requires": "P10.1",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -56,6 +79,51 @@
     ]
   },
   {
+    "source": "clone_dispatch.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "标量和限定 Box 克隆、同名用户方法、接收者求值与提前返回",
+    "metadata": {
+      "testpoint": "P10-04",
+      "requires": "P10.1",
+      "ir_status": "covered"
+    }
+  },
+  {
+    "source": "clone_dispatch.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "标量和限定 Box 克隆、同名用户方法、接收者求值与提前返回",
+    "metadata": {
+      "testpoint": "P10-04",
+      "requires": "P10.1",
+      "ir_status": "covered"
+    },
+    "io": [{ "input": null, "output": "clone_dispatch.out" }]
+  },
+  {
+    "source": "clone_mutable_reference.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "可变引用和不可 Clone 的目标都没有可选 Clone 方法",
+    "metadata": {
+      "testpoint": "P10-05",
+      "requires": "P10.1",
+      "ir_status": "covered"
+    }
+  },
+  {
+    "source": "clone_nonclone_vec.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "即使 Vec 为空，元素也必须实现 Clone",
+    "metadata": {
+      "testpoint": "P10-05",
+      "requires": "P10.1",
+      "ir_status": "covered"
+    }
+  },
+  {
     "source": "equality.rx",
     "stage": "semantic",
     "compilation_success": true,
@@ -63,7 +131,7 @@
     "metadata": {
       "testpoint": "P10-06",
       "requires": "P10.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -74,7 +142,7 @@
     "metadata": {
       "testpoint": "P10-06",
       "requires": "P10.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -91,7 +159,7 @@
     "metadata": {
       "testpoint": "P10-09",
       "requires": "P10.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -102,7 +170,7 @@
     "metadata": {
       "testpoint": "P10-09",
       "requires": "P10.2",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -112,6 +180,28 @@
     ]
   },
   {
+    "source": "equality_nested.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "比较多层引用、可变引用和嵌套拥有值的内容",
+    "metadata": { "testpoint": "P10-10", "requires": "P10.2", "ir_status": "covered" }
+  },
+  {
+    "source": "equality_nested.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "比较多层引用、可变引用和嵌套拥有值的内容",
+    "metadata": { "testpoint": "P10-10", "requires": "P10.2", "ir_status": "covered" },
+    "io": [{ "input": null, "output": "equality_nested.out" }]
+  },
+  {
+    "source": "equality_requires_partial_eq.rx",
+    "stage": "semantic",
+    "compilation_success": false,
+    "description": "Vec 元素缺少 PartialEq 时拒绝比较",
+    "metadata": { "testpoint": "P10-10", "requires": "P10.2", "ir_status": "covered" }
+  },
+  {
     "source": "recursive_tree.rx",
     "stage": "semantic",
     "compilation_success": true,
@@ -119,7 +209,7 @@
     "metadata": {
       "testpoint": "P10-11",
       "requires": "P10.3",
-      "ir_status": "planned"
+      "ir_status": "covered"
     }
   },
   {
@@ -130,7 +220,7 @@
     "metadata": {
       "testpoint": "P10-11",
       "requires": "P10.3",
-      "ir_status": "planned"
+      "ir_status": "covered"
     },
     "io": [
       {
@@ -138,5 +228,50 @@
         "output": "recursive_tree.out"
       }
     ]
+  },
+  {
+    "source": "mutual_recursion.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "相互递归类型深入 A、B 后到达 A 叶子",
+    "metadata": { "testpoint": "P10-12", "requires": "P10.3", "ir_status": "covered" }
+  },
+  {
+    "source": "mutual_recursion.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "相互递归的克隆值独立，比较可走过真实递归回边",
+    "metadata": { "testpoint": "P10-12", "requires": "P10.3", "ir_status": "covered" },
+    "io": [{ "input": null, "output": "mutual_recursion.out" }]
+  },
+  {
+    "source": "helper_cache.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "分支与循环内请求结构体和不同长度数组的 helper",
+    "metadata": { "testpoint": "P10-13", "requires": "P10.3", "ir_status": "covered" }
+  },
+  {
+    "source": "helper_cache.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "重复请求复用 helper，保持源类型区别和控制流",
+    "metadata": { "testpoint": "P10-13", "requires": "P10.3", "ir_status": "covered" },
+    "io": [{ "input": null, "output": "helper_cache.out" }]
+  },
+  {
+    "source": "recursive_declaration.rx",
+    "stage": "semantic",
+    "compilation_success": true,
+    "description": "无法构造有限值的 Box 递归声明有有限布局",
+    "metadata": { "testpoint": "P10-16", "requires": "P10.3", "ir_status": "covered" }
+  },
+  {
+    "source": "recursive_declaration.rx",
+    "stage": "codegen",
+    "compilation_success": true,
+    "description": "未使用的递归声明不请求克隆或比较 helper",
+    "metadata": { "testpoint": "P10-16", "requires": "P10.3", "ir_status": "covered" },
+    "io": [{ "input": null, "output": "recursive_declaration.out" }]
   }
 ]

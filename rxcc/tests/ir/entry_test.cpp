@@ -1448,7 +1448,7 @@ void check_reference_operation_early_return() {
     }
 }
 
-// 引用相等仍属于 P10；Box 显式解引用后的排序在 P9.1 已可生成，不能再作为负例。
+// P10 支持引用的结构化相等，但排序仍只支持规定的标量及引用形态。
 void check_reference_operation_boundaries() {
     check_generates("fn main() { let a = Box::<i32>::new(1); let b = Box::<i32>::new(2); "
                     "let less = *a < *b; }");
@@ -1458,7 +1458,7 @@ void check_reference_operation_boundaries() {
              "fn main() { let a = [1]; let b = [2]; let same = &a == &b; }",
              "#[derive(PartialEq)] struct Data { value: i32 } fn main() { "
              "let a = Data { value: 1 }; let b = Data { value: 2 }; let same = &a == &b; }"})
-        check_rejected(source);
+        check_generates(source);
     for (const auto &source : {
              "fn main() { let a = Box::<i32>::new(1); let b = Box::<i32>::new(2); let less = a < b; }",
              "fn main() { let mut a = 1; let b = 2; let less = &mut a < &b; }",
@@ -2842,6 +2842,197 @@ void check_vec_remove_ir() {
     check(starts_at_zero && length_writes == 1, "后缀为空时应跳过搬运，且长度只写回一次");
 }
 
+// P10.1：验证运行输出不能单独证明的性质：共享引用保持地址，Vec 只访问活动元素。
+void check_clone_ir() {
+    const auto crate = parse_crate(R"(
+        struct NonClone { value: i32 }
+        fn clone_reference<'a>(value: &'a NonClone) -> &'a NonClone { value.clone() }
+        fn clone_vec(values: &Vec<Box<bool>>) -> Vec<Box<bool>> { values.clone() }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    std::ostringstream text, diagnostics;
+    check(artifact.verify_and_print(text, diagnostics), "Clone 必须通过 IR 自检");
+    const auto &module = artifact.module();
+    const auto names = rx::assign_function_names(sema);
+    const auto result_of = [](const Instruction &instruction) {
+        return Operand::local(instruction.type, instruction.result.value());
+    };
+
+    const auto &reference = *module.find_function(names.at(0));
+    check(reference.blocks.size() == 1, "共享引用克隆只需要转交原指针");
+    // 跟踪原指针经过入口槽及临时槽后的值，不能用包含相同内容的新地址代替它。
+    std::set<std::size_t> aliases{reference.argument(0).value_id()->index};
+    std::set<std::size_t> slots;
+    for (const auto &allocation : reference.entry_allocas)
+        slots.insert(allocation.result.value().index);
+    std::set<std::size_t> populated_slots;
+    const auto aliases_source = [&](const Operand &operand) {
+        const auto *id = operand.value_id();
+        return operand.type == Type::Ptr && id && aliases.contains(id->index);
+    };
+    const auto &reference_block = reference.blocks.front();
+    for (const auto &instruction : reference_block.instructions) {
+        if (const auto *store = std::get_if<Store>(&instruction.operation)) {
+            const auto *slot = store->address.value_id();
+            check(slot && slots.contains(slot->index) && aliases_source(store->value),
+                  "共享引用克隆只能在私有槽中保存原指针");
+            populated_slots.insert(slot->index);
+        } else if (const auto *load = std::get_if<Load>(&instruction.operation)) {
+            const auto *slot = load->address.value_id();
+            check(load->storage_type == Type::Ptr && slot && populated_slots.contains(slot->index),
+                  "共享引用克隆不能读取引用目标");
+            aliases.insert(instruction.result.value().index);
+        } else {
+            throw std::runtime_error("共享引用克隆不应调用分配器或操作目标对象");
+        }
+    }
+    const auto &returned = return_value(reference_block);
+    check(returned && aliases_source(*returned), "共享引用克隆必须返回传入的原指针");
+
+    const auto &caller = *module.find_function(names.at(1));
+    const Function *helper = nullptr;
+    for (const auto &block : caller.blocks)
+        for (const auto &instruction : block.instructions)
+            if (const auto *call = std::get_if<Call>(&instruction.operation)) {
+                check(!helper, "Vec clone 必须只调用一次类型辅助函数");
+                helper = &module.function(call->function);
+            }
+    check(helper && helper->abi.signature == Signature{Type::Void, {Type::Ptr, Type::Ptr}},
+          "Vec clone 辅助函数必须接收结果和源地址");
+
+    const auto vec = StorageType::vec();
+    const auto zero = Operand::constant(Type::I32, 0);
+    const auto one = Operand::constant(Type::I32, 1);
+    const auto &entry = helper->blocks.front();
+    Operand length_address, length, is_empty;
+    for (const auto &instruction : entry.instructions) {
+        if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation);
+            gep && gep->source_type == vec && gep->base == helper->argument(1) &&
+            gep->indices == std::vector{zero, one})
+            length_address = result_of(instruction);
+        if (const auto *load = std::get_if<Load>(&instruction.operation);
+            load && load->address == length_address && load->storage_type == Type::I32)
+            length = result_of(instruction);
+        if (const auto *compare = std::get_if<Compare>(&instruction.operation);
+            compare && compare->predicate == Comparison::Equal &&
+            compare->left == length && compare->right == zero)
+            is_empty = result_of(instruction);
+    }
+    const auto &choice = std::get<CondBranch>(*entry.terminator);
+    check(length.type == Type::I32 && is_empty.type == Type::I1 && choice.condition == is_empty,
+          "Vec clone 必须按源 len 是否为零选择空路径");
+
+    // 空路径不得分配或投影任何缓冲区元素，包括最终返回前的公共块。
+    auto path = entry.id;
+    for (std::size_t visited = 0; ; ++visited) {
+        check(visited < helper->blocks.size(), "空 Vec clone 路径必须结束");
+        const auto &block = helper->block(path);
+        for (const auto &instruction : block.instructions) {
+            check(!std::holds_alternative<Call>(instruction.operation), "空 Vec clone 不应发出分配或元素调用");
+            if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation))
+                check(gep->source_type == vec, "空 Vec clone 不应投影缓冲区元素");
+        }
+        if (path == entry.id)
+            path = choice.when_true;
+        else if (const auto *next = std::get_if<Branch>(&*block.terminator))
+            path = next->target;
+        else {
+            check(std::holds_alternative<Return>(*block.terminator), "空 Vec clone 应直接返回结果");
+            break;
+        }
+    }
+
+    bool length_controls_loop = false;
+    for (const auto &block : helper->blocks) {
+        const auto *branch = std::get_if<CondBranch>(&*block.terminator);
+        for (const auto &instruction : block.instructions) {
+            if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation);
+                gep && gep->source_type == vec && gep->base == helper->argument(1))
+                check(gep->indices == std::vector{zero, zero} || gep->indices == std::vector{zero, one},
+                      "Vec clone 不应使用源 cap");
+            if (const auto *compare = std::get_if<Compare>(&instruction.operation);
+                compare && compare->predicate == Comparison::UnsignedLessThan &&
+                compare->right == length && branch && branch->condition == result_of(instruction))
+                length_controls_loop = true;
+        }
+    }
+    check(length_controls_loop, "Vec clone 必须用运行时 len 限制活动元素循环");
+}
+
+// P10.2：用 IR 模型区分合法字段读取、填充字节读取和 Vec 容量读取。
+void check_equality_ir() {
+    const auto crate = parse_crate(R"(
+        #[derive(PartialEq)]
+        struct Mixed { flag: bool, value: i32, tail: bool }
+        fn same_fields(left: &Mixed, right: &Mixed) -> bool { *left == *right }
+        fn same_sequence(left: &Vec<i32>, right: &Vec<i32>) -> bool { *left == *right }
+        fn main() {}
+    )");
+    const auto sema = analyze(*crate);
+    const auto artifact = generate(sema);
+    const auto &module = artifact.module();
+    const auto names = rx::assign_function_names(sema);
+    const auto helper_of = [&](std::size_t index) -> const Function & {
+        const auto &caller = *module.find_function(names.at(index));
+        const Function *helper = nullptr;
+        for (const auto &block : caller.blocks) {
+            for (const auto &instruction : block.instructions) {
+                if (const auto *call = std::get_if<Call>(&instruction.operation)) {
+                    check(!helper, "每个复合相等表达式只应执行一次比较调用");
+                    helper = &module.function(call->function);
+                }
+            }
+        }
+        check(helper && helper->abi.signature == Signature{Type::I1, {Type::Ptr, Type::Ptr}},
+              "相等 helper 接收两个借用地址并返回 i1");
+        return *helper;
+    };
+
+    const auto zero = Operand::constant(Type::I32, 0);
+    const auto &fields = helper_of(0);
+    const std::vector field_types{Type::I8, Type::I32, Type::I8};
+    std::set<std::pair<std::size_t, uint32_t>> projected;
+    std::map<std::size_t, Type> unread;
+    for (const auto &block : fields.blocks) {
+        for (const auto &instruction : block.instructions) {
+            check(!std::holds_alternative<Call>(instruction.operation),
+                  "只含标量字段的相等不应调用字节比较或分配");
+            if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation)) {
+                check(gep->source_type == StorageType::struct_of(0) &&
+                          (gep->base == fields.argument(0) || gep->base == fields.argument(1)) &&
+                          gep->indices.size() == 2 && gep->indices[0] == zero &&
+                          gep->indices[1].constant_bits(), "相等只能投影两侧的实际字段");
+                const auto field = *gep->indices[1].constant_bits();
+                projected.emplace(gep->base.value_id()->index, field);
+                unread.emplace(instruction.result.value().index, field_types.at(field));
+            } else if (const auto *load = std::get_if<Load>(&instruction.operation)) {
+                const auto *id = load->address.value_id();
+                const auto address = id ? unread.find(id->index) : unread.end();
+                check(address != unread.end() && load->storage_type == address->second,
+                      "相等必须按字段宽度读取，不能连同填充字节一起比较");
+                unread.erase(address);
+            }
+        }
+    }
+    check(projected.size() == 2 * field_types.size() && unread.empty(),
+          "相等必须读取两侧的每个实际字段");
+
+    const auto &sequence = helper_of(1);
+    const auto one = Operand::constant(Type::I32, 1);
+    for (const auto &block : sequence.blocks) {
+        for (const auto &instruction : block.instructions) {
+            check(!std::holds_alternative<Call>(instruction.operation),
+                  "标量 Vec 相等不应分配、克隆或调用字节比较");
+            if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation);
+                gep && gep->source_type == StorageType::vec())
+                check(gep->indices == std::vector{zero, zero} || gep->indices == std::vector{zero, one},
+                      "Vec 相等只能使用 data 与 len，不应读取 cap");
+        }
+    }
+}
+
 void run_tests() {
     check_function_names();
     check_named_storage_layouts();
@@ -2853,6 +3044,8 @@ void run_tests() {
     check_box_allocator_ir();
     check_vec_header_and_index_ir();
     check_vec_remove_ir();
+    check_clone_ir();
+    check_equality_ir();
     check_println();
     check_locals();
     check_scalar_constants();

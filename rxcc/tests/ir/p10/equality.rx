@@ -13,10 +13,21 @@ fn main() {
     println_i32((v == w) as i32);
     println_i32(v[1]);
     println_i32(w[1]);
+    w[1] = 1;
+    println_i32((v == w) as i32);
+    w.remove(1);
+    println_i32((v == w) as i32);
+    w.remove(0);
+    let empty = Vec::<i32>::new();
+    println_i32((w == empty) as i32);
+    println_i32((empty != v) as i32);
     let x = 5;
     let y = 5;
     println_i32((&x == &y) as i32);
     let left = Mixed { flag: true, value: 7, tail: false };
-    let right = Mixed { tail: false, value: 7, flag: true };
+    let mut right = Mixed { tail: false, value: 11, flag: true };
+    right.value = 7;
+    println_i32((left == right) as i32);
+    right.tail = true;
     println_i32((left == right) as i32);
 }

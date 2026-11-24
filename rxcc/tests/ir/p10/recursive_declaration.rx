@@ -1,0 +1,4 @@
+// A Box gives a finite layout even when no terminating value can be constructed.
+#[derive(Clone, PartialEq, Eq)]
+struct Chain { next: Box<Chain> }
+fn main() { println_i32(0); }

@@ -350,6 +350,15 @@ GenerationContext::emit_call(const CallExpression &call,
     }
     const auto *builtin = std::get_if<BuiltinCall>(&target);
     if (builtin) {
+        if (builtin->kind == BuiltinCallKind::Clone) {
+            // 显式 T::clone(&value)：实参已经是指向源值的借用地址。
+            if (prepared.size() != 1)
+                throw std::logic_error("Clone 的显式参数数量不匹配");
+            const auto *source = std::get_if<ir::Operand>(&prepared.front());
+            if (!source)
+                throw std::logic_error("Clone 的接收者必须是指针");
+            return emit_clone(builtin->owner, *source);
+        }
         if (builtin->kind == BuiltinCallKind::BoxNew)
             return emit_box_new(builtin->owner, std::move(prepared));
         if (builtin->kind == BuiltinCallKind::VecNew)
@@ -385,8 +394,7 @@ GenerationContext::emit_call(const CallExpression &call,
             return emit_vec_remove(builtin->owner, *header, *index);
         }
     }
-    // clone 等剩余容器操作留到 P10。
-    diagnostics << "IR 生成尚未支持内置方法或容器构造器\n";
+    diagnostics << "IR 生成尚未支持此内置方法或容器构造器\n";
     return std::nullopt;
 }
 
@@ -483,6 +491,16 @@ GenerationContext::emit_method_call(const MethodCallExpression &call,
     // Vec 的 len/is_empty 读取真实头，两者都不能略过接收者求值。
     if (const auto *builtin = std::get_if<BuiltinCall>(&resolved.target)) {
         const auto kind = builtin->kind;
+        // clone 的接收者按 &self 调整：普通值取原位置地址，引用本身取指针。
+        if (kind == BuiltinCallKind::Clone) {
+            auto receiver = emit_receiver(*call.receiver, resolved, locals);
+            if (!receiver || path_ended(*receiver))
+                return receiver;
+            const auto *source = std::get_if<ir::Operand>(&*receiver);
+            if (!source)
+                throw std::logic_error("Clone 的接收者必须是指针");
+            return emit_clone(builtin->owner, *source);
+        }
         // 查询类内置方法只读取接收者求值后的头；固定数组的 len 直接取类型长度。
         if (kind == BuiltinCallKind::ArrayLen ||
             kind == BuiltinCallKind::VecLen ||

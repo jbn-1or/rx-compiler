@@ -1,0 +1,36 @@
+// Reuse helpers across call sites without conflating operations or source types.
+#[derive(Clone, Copy, PartialEq)]
+struct Short { value: i32 }
+#[derive(Clone, PartialEq)]
+struct Long { value: i32, tail: i32 }
+
+fn check_calls() -> i32 {
+    let short = Short { value: 7 };
+    let long = Long { value: 7, tail: 8 };
+    let two = [short; 2];
+    let three = [short; 3];
+
+    let mut round = 0;
+    while round < 2 {
+        if round == 0 {
+            let mut copy = three.clone();
+            println_i32((copy == three) as i32);
+            copy[2].value = 9;
+            println_i32((copy != three) as i32);
+        } else {
+            let copy = two.clone();
+            println_i32((copy == two) as i32);
+            println_i32((two.clone() == copy) as i32);
+        }
+        round += 1;
+    }
+
+    let mut copied = long.clone();
+    println_i32((copied == long) as i32);
+    copied.tail = 9;
+    println_i32((copied != long) as i32);
+    println_i32((short.clone() == short) as i32);
+    round
+}
+
+fn main() { println_i32(check_calls()); }

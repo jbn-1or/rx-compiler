@@ -1,0 +1,6 @@
+// An empty Vec still requires its element type to implement Clone.
+struct Item { value: i32 }
+fn main() {
+    let values = Vec::<Item>::new();
+    Vec::<Item>::clone(&values);
+}

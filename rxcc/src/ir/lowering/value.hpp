@@ -3,6 +3,7 @@
 
 #include "ir/model.hpp"
 #include "sema/type.hpp"
+#include <string>
 
 namespace rx {
 
@@ -19,5 +20,9 @@ bool is_storable_value(const SemanticType &type);
 
 // 计算普通值使用的 IR 类型：标量沿用标量映射，引用统一为 ptr。
 ir::Type lower_value_type(const SemanticType &type);
+
+// 生成完整具体类型的稳定键：结构体用 StructId，容器和数组保留子类型与长度。
+// 供 clone/相等辅助函数按类型缓存，不依赖打印名称或内存地址。
+std::string type_identity_key(const SemanticType &type);
 
 } // namespace rx

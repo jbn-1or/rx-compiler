@@ -1,0 +1,4 @@
+// A non-PartialEq field type cannot be compared even through a container.
+struct Item { value: i32 }
+fn compare(left: Vec<Item>, right: Vec<Item>) -> bool { left == right }
+fn main() {}

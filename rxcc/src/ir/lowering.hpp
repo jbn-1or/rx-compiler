@@ -9,6 +9,8 @@
 #include <map>
 #include <optional>
 #include <ostream>
+#include <string>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -74,6 +76,8 @@ public:
     // 生成一个完整函数体：参数写入各自 slot，再按语句和尾表达式生成并正常返回。
     // 返回 false 表示遇到尚未支持或内部不一致的情况，原因已写入 diagnostics。
     bool emit_function_body(const FunctionSymbol &function, ir::IRFunctionId id);
+    // 生成所有已登记但还没有函数体的辅助函数，供生成器在函数体之后调用。
+    bool emit_pending_helpers();
 
 private:
     enum class ResultUse { Value, Discard }; // 调用方是否消费表达式的数据结果。
@@ -84,6 +88,26 @@ private:
         ir::BlockId continue_target; // while 回到条件块，loop 回到循环体块。
         std::optional<ir::BlockId> break_target; // 退出块；loop 在首次 break 时创建。
         std::optional<Place> result; // 仅在调用方需要 break 的值时保存结果位置。
+    };
+
+    // 辅助函数的不同操作；同一具体类型可以分别需要 clone 和相等实现。
+    enum class HelperKind {
+        Clone,    // void clone_T(ptr destination, ptr source)
+        Equality, // i1 eq_T(ptr left, ptr right)
+    };
+
+    // 一个按“操作种类 + 完整具体类型”登记的辅助函数。
+    // 先登记身份和签名，真正生成函数体时再标记 Generating/Complete。
+    struct Helper {
+        enum class State {
+            Pending,    // 已登记，尚未开始生成函数体。
+            Generating, // 正在生成函数体；递归请求直接复用这个身份。
+            Complete,   // 函数体已经完成。
+        };
+        HelperKind kind = HelperKind::Clone; // 这个辅助函数执行哪种操作。
+        ir::IRFunctionId function; // 分配好的 IR 函数身份。
+        SemanticType type; // 该辅助函数处理的完整具体类型。
+        State state = State::Pending; // 函数体生成状态。
     };
 
     // lowering.cpp：表达式和语句分派。
@@ -258,6 +282,36 @@ private:
     std::optional<EmitResult> emit_vec_remove(const SemanticType &vec_type,
                                               ir::Operand header,
                                               ir::Operand index);
+
+    // lowering/clone.cpp：按具体类型执行深克隆并登记辅助函数。
+    // 从保存 T 的 source 地址克隆，返回 T 的计算值或独立聚合存储。
+    std::optional<EmitResult> emit_clone(const SemanticType &type,
+                                         ir::Operand source);
+    // 在 destination 中生成 T 的深克隆；复合类型内部按成员继续分派。
+    void emit_clone_into(const ir::Operand &destination,
+                         const ir::Operand &source,
+                         const SemanticType &type);
+    // 克隆一个字段或元素：复合类型调用自己的辅助函数，标量/引用直接复制。
+    void emit_clone_member(const ir::Operand &destination,
+                           const ir::Operand &source,
+                           const SemanticType &type);
+
+    // lowering/equality.cpp：按内容比较两个同源类型操作数。
+    // 先借用两侧，再生成一次 ==；!= 只对这次相等结果取反。
+    std::optional<EmitResult> emit_equality(const BinaryExpression &expression,
+                                            LocalPlaces &locals);
+    // 准备一侧的借用地址；已有 place 保留原位置，值表达式只物化一次。
+    std::optional<PlaceResult>
+    emit_equality_operand(const Expression &expression, LocalPlaces &locals);
+    // 比较 left/right 地址中的 T，返回 i1；复合类型内部按字段/元素分派。
+    ir::Operand emit_equality_into(const ir::Operand &left,
+                                   const ir::Operand &right,
+                                   const SemanticType &type);
+    // 比较一个嵌套字段或元素；复合类型调用自己的辅助函数，标量直接比较。
+    ir::Operand emit_equality_member(const ir::Operand &left,
+                                     const ir::Operand &right,
+                                     const SemanticType &type);
+
     // 调用 __rx_alloc，首次使用时声明外部 C ABI，后续复用。
     ir::Operand emit_alloc(ir::Operand size, ir::Operand align);
     // 对运行时 count 个下标生成 body；循环条件和下标都在运行时读取。
@@ -273,6 +327,12 @@ private:
     std::ostream &diagnostics; // 收集 IR 生成期间错误信息的输出流。
     // 当前正在生成的循环帧，按嵌套顺序保存；break/continue 用 LoopId 定位目标。
     std::vector<LoopFrame> loop_frames_;
+    // 查找或首次登记某个操作/具体类型的辅助函数；返回可立即调用的身份。
+    ir::IRFunctionId request_helper(HelperKind kind, const SemanticType &type);
+    // 按请求顺序保存全部辅助函数；函数体在主函数体之后统一生成。
+    std::vector<Helper> helpers_;
+    // “操作种类 + 完整类型键”到 helpers_ 下标的映射，同一项只登记一次。
+    std::unordered_map<std::string, std::size_t> helper_indices_;
     const SemanticType *current_return_type_ = nullptr; // 当前函数的源返回类型。
     std::optional<ir::Operand> function_result_pointer_; // 聚合返回的调用者结果地址。
 };

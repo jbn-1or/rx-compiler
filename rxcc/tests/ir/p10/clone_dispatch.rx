@@ -1,0 +1,46 @@
+// Distinguish built-in Clone from a user method and observe receiver evaluation.
+#[derive(Clone)]
+struct Tag { value: i32 }
+
+impl Tag {
+    fn clone(self, delta: i32) -> i32 {
+        println_i32(90);
+        self.value + delta
+    }
+}
+
+fn make(value: i32) -> Box<Tag> {
+    println_i32(value);
+    Box::<Tag>::new(Tag { value: value })
+}
+
+fn clone_receiver(early: bool) -> i32 {
+    let cloned = {
+        println_i32(20);
+        if early { return 21; }
+        make(22)
+    }.clone();
+    cloned.value
+}
+
+fn main() {
+    let number = -4;
+    let flag = true;
+    println_i32(number.clone());
+    println_i32(flag.clone() as i32);
+
+    let original = make(7);
+    let mut cloned = Box::<Tag>::clone(&original);
+    cloned.value = 8;
+    println_i32(original.value);
+    println_i32(cloned.value);
+
+    let tag = Tag { value: 10 };
+    let reference = &tag;
+    let builtin: Tag = reference.clone();
+    println_i32(builtin.value);
+    println_i32(tag.clone(5));
+
+    println_i32(clone_receiver(true));
+    println_i32(clone_receiver(false));
+}

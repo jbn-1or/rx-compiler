@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the P2-P9.4 IR and execution fixtures with external LLVM 22 tools."""
+"""Validate the P2-P10 IR and execution fixtures with external LLVM 22 tools."""
 
 import argparse
 import os
@@ -43,6 +43,44 @@ def run(command, *, expected=0, timeout=60, stdin_data=None):
             f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
     return result
+
+
+def check_p10_helpers(name, text, expected_per_operation, *, recursive=False):
+    # 不固定 helper 编号，只检查定义、调用边和操作之间的隔离。
+    symbol = r"__rx_(?:clone|eq)_helper_\d+"
+    definitions = re.findall(rf"^define internal (void|i1) @({symbol})"
+                             r"\(ptr [^,\n]+, ptr [^)\n]+\) \{\n(.*?)^\}",
+                             text, re.MULTILINE | re.DOTALL)
+    all_symbols = set(re.findall(rf"@({symbol})\b", text))
+    defined = {function for _, function, _ in definitions}
+    if all_symbols != defined or len(definitions) != len(defined):
+        raise RuntimeError(f"{name}: every helper must have exactly one internal definition with its ABI")
+
+    for operation, return_type in (("clone", "void"), ("eq", "i1")):
+        functions = {}
+        for result, function, body in definitions:
+            if not function.startswith(f"__rx_{operation}_helper_"):
+                continue
+            if result != return_type:
+                raise RuntimeError(f"{name}: {function} has the wrong result type")
+            calls = set(re.findall(rf"\bcall (?:void|i1) @({symbol})\(", body))
+            functions[function] = calls
+        if len(functions) != expected_per_operation:
+            raise RuntimeError(f"{name}: expected {expected_per_operation} {operation} helpers, got {len(functions)}")
+        if any(calls - functions.keys() for calls in functions.values()):
+            raise RuntimeError(f"{name}: {operation} helper calls a helper for a different operation")
+        if recursive:
+            # 两个递归样例的类型依赖各组成一个环；定义数量正确但缺少回边也要失败。
+            start = current = next(iter(functions))
+            visited = set()
+            while current not in visited:
+                visited.add(current)
+                calls = functions[current]
+                if len(calls) != 1:
+                    raise RuntimeError(f"{name}: {current} must call exactly one helper in its cycle")
+                current = next(iter(calls))
+            if current != start or visited != functions.keys():
+                raise RuntimeError(f"{name}: {operation} helpers do not form the expected recursive cycle")
 
 
 def main():
@@ -1664,6 +1702,28 @@ def main():
             run([args.compiler, "--stage", "ir", str(p09 / f"{stem}.rx"), "-o", str(output)])
             modules.append((name, output, (p09 / f"{stem}.out").read_bytes(), b""))
 
+        p10 = p08.parent / "p10"
+        helper_counts = {"recursive_tree": 2, "mutual_recursion": 4,
+                         "helper_cache": 4, "recursive_declaration": 0}
+        for stem in ("deep_clone", "container_clone", "shared_ref_clone", "clone_dispatch",
+                     "equality", "eq_order", "equality_nested", *helper_counts):
+            name = f"p10-{stem}"
+            source = p10 / f"{stem}.rx"
+            output = temp / f"{name}.ll"
+            run([args.compiler, "--stage", "semantic", str(source)])
+            run([args.compiler, "--stage", "ir", str(source), "-o", str(output)])
+            text = output.read_text(encoding="utf-8")
+            if re.search(r"\bicmp (?:eq|ne) ptr\b|@(?:memcmp|bcmp)\b", text):
+                raise RuntimeError(f"{name}: equality must compare values, not addresses or raw bytes")
+            if stem in helper_counts:
+                check_p10_helpers(name, text, helper_counts[stem],
+                                  recursive=stem in ("recursive_tree", "mutual_recursion"))
+                repeated = temp / f"{name}-repeated.ll"
+                run([args.compiler, "--stage", "ir", str(source), "-o", str(repeated)])
+                if repeated.read_bytes() != output.read_bytes():
+                    raise RuntimeError(f"{name}: helper definitions must be deterministic")
+            modules.append((name, output, (p10 / f"{stem}.out").read_bytes(), b""))
+
         for name, command, expected in (
             ("model-smoke", [args.model_test], b""),
             ("model-values", [args.model_test, "--emit-model"], b""),
@@ -1715,14 +1775,6 @@ def main():
         # All are semantically valid. Reject unsupported lowering even in unused bodies.
         for index, contents in enumerate((
             "fn main() { let x = { (); }; }",
-            # 引用相等需要 P10 的结构化读取，不能比较地址后声称完成。
-            "fn main() { let a = 1; let b = 1; let ra = &a; let rb = &b; "
-             "println_i32((ra == rb) as i32); }",
-            "fn main() { let a = 1; let b = 2; println_i32((&a != &b) as i32); }",
-            "fn main() { let a = [1i32]; println_i32((a == a) as i32); }",
-            # Vec 元素相等仍需 P10 的结构化比较，不能比较头部或缓冲区地址。
-            "struct Bag { items: Vec<i32> } fn unused(a: &Bag, b: &Bag) -> bool { "
-             "a.items == b.items } fn main() {}",
         )):
             unsupported = temp / f"unsupported-{index}.rx"
             unsupported.write_text(contents, encoding="utf-8")
@@ -1789,6 +1841,12 @@ def main():
                 "cannot mutably borrow an immutable or shared place",
             "fn bad(values: &mut Vec<i32>, index: i32) { values.remove(index); } fn main() {}":
                 "type mismatch: expected usize, found i32",
+            (p10 / "clone_mutable_reference.rx").read_text(encoding="utf-8"):
+                "no method named clone for type &mut Item",
+            (p10 / "clone_nonclone_vec.rx").read_text(encoding="utf-8"):
+                "type Vec<Item> does not support clone",
+            (p10 / "equality_requires_partial_eq.rx").read_text(encoding="utf-8"):
+                "equality requires PartialEq on the operand type",
         }
         for index, contents in enumerate((
             "fn main(value: i32) {}",
@@ -1933,7 +1991,7 @@ def main():
                     if stdout.read_bytes() != expected_stdout or exits != [b"Exit code: 0"]:
                         raise RuntimeError(f"{name} {optimization}: expected stdout {expected_stdout!r} "
                                            f"and exit zero, got {stdout.read_bytes()!r}, {exits!r}")
-    print(f"P2-P9.4 IR fixtures passed: {len(modules)} modules verified" +
+    print(f"P2-P10 IR fixtures passed: {len(modules)} modules verified" +
           (f", {2 * len(modules)} RV32 O0/O2 executions" if args.reimu else ""))
     return 0
 

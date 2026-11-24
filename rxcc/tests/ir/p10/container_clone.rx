@@ -1,0 +1,40 @@
+// Check nested owning clones and empty Vecs with and without a previous buffer.
+fn clone_empty() {
+    let mut source = Vec::<Box<i32>>::new();
+    let fresh = source.clone();
+    println_i32(fresh.len() as i32);
+
+    source.push(Box::<i32>::new(7));
+    let removed = source.remove(0);
+    let mut cloned = source.clone();
+    println_i32(cloned.is_empty() as i32);
+    cloned.push(Box::<i32>::new(9));
+    println_i32(*removed);
+    println_i32(source.len() as i32);
+    println_i32(*cloned[0]);
+}
+
+fn main() {
+    let mut rows = Vec::<[Box<bool>; 2]>::new();
+    rows.push([Box::<bool>::new(true), Box::<bool>::new(false)]);
+    rows.push([Box::<bool>::new(false), Box::<bool>::new(false)]);
+    rows.push([Box::<bool>::new(false), Box::<bool>::new(true)]);
+    rows.remove(1);
+
+    let original = Box::<Vec<[Box<bool>; 2]>>::new(rows);
+    let mut cloned = Box::<Vec<[Box<bool>; 2]>>::clone(&original);
+    *(*cloned)[0][0] = false;
+    *(*cloned)[1][1] = false;
+    (*cloned)[0][1] = Box::<bool>::new(true);
+
+    println_i32(original.len() as i32);
+    println_i32(cloned.len() as i32);
+    println_i32(*(*original)[0][0] as i32);
+    println_i32(*(*original)[0][1] as i32);
+    println_i32(*(*original)[1][0] as i32);
+    println_i32(*(*original)[1][1] as i32);
+    println_i32(*(*cloned)[0][0] as i32);
+    println_i32(*(*cloned)[0][1] as i32);
+    println_i32(*(*cloned)[1][1] as i32);
+    clone_empty();
+}

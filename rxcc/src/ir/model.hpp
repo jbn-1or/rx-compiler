@@ -78,20 +78,19 @@ bool valid_constant(const Operand &operand);
 
 // Internal 表示函数只在当前模块可见，External 表示函数符号可以跨模块链接。
 enum class Linkage { Internal, External };
-// 保存函数的返回类型和参数类型，用来检查函数定义、调用和返回指令。
-struct Signature {
-    Type result = Type::Void; // 函数的返回类型；Void 表示没有返回数据。
-    std::vector<Type> parameters; // 按声明顺序排列的参数类型，不允许 Void 参数。
-    bool operator==(const Signature &) const = default;
+// 一个降级后的形参；按值聚合通过 ptr 传递调用方准备的快照。
+struct ParameterABI {
+    Type type = Type::Void; // LLVM 参数类型；有效形参不能是 void。
+    std::optional<StorageType> by_value_storage = std::nullopt; // 仅按值聚合参数带快照存储类型。
+    bool operator==(const ParameterABI &) const = default;
 };
 
 // 内部调用的共享 ABI：声明、定义、调用和 return 都读取这一份描述。
-// parameter_storage 与签名的形参表等长，只有按值聚合形参在对应位置保存自己的存储类型。
-// result_storage 有值时，签名返回 Void，结果写入调用者提供的第一个 ptr 形参。
+// result_storage 有值时，IR 返回 void，聚合结果写入调用者提供的首个 ptr 形参。
 struct FunctionABI {
-    Signature signature; // 降级后的 LLVM 返回类型和形参类型，包含隐藏结果指针。
-    std::vector<StorageType> parameter_storage; // 每个降级形参的按值聚合存储；非聚合为 Unit。
-    std::optional<StorageType> result_storage; // 聚合返回的调用者结果存储类型；直接返回为空。
+    Type result = Type::Void; // LLVM 返回类型；void 表示不直接返回数据。
+    std::vector<ParameterABI> parameters; // 按传递顺序排列的形参，包含隐藏结果指针（若有）。
+    std::optional<StorageType> result_storage = std::nullopt; // 聚合返回的调用者结果存储类型。
     bool operator==(const FunctionABI &) const = default;
 };
 // 检查 ABI 自身的形状是否自洽，不访问模块类型表；具体布局由 check_module 再验证。
@@ -248,7 +247,7 @@ struct Function {
     bool is_declaration() const { return blocks.empty(); }
     // 参数占用最前面的值编号，按签名和序号直接构造操作数，不另存参数表。
     Operand argument(std::size_t parameter_index) const {
-        return Operand::local(abi.signature.parameters.at(parameter_index),
+        return Operand::local(abi.parameters.at(parameter_index).type,
                               ValueId{id, parameter_index});
     }
     // 为新指令结果分配 ID 并保存类型；调用方还需要把它记录为指令结果。
@@ -288,12 +287,9 @@ public:
 
     // 返回模块编号，用来检查函数是否属于这个模块。
     uint64_t identity() const { return identity_; }
-    // 添加函数并分配函数和参数的 ID；名称不能重复，函数体随后再添加。
-    IRFunctionId add_function(std::string name, Signature signature,
+    // 按 ABI 登记函数并分配函数和参数的 ID；名称不能重复，函数体随后再添加。
+    IRFunctionId add_function(std::string name, FunctionABI abi,
                               Linkage linkage);
-    // 按共享 ABI 添加函数，保留按值聚合和隐藏结果指针信息。
-    IRFunctionId add_function_abi(std::string name, FunctionABI abi,
-                                  Linkage linkage);
     // 按函数名查找，找不到时返回 nullptr。
     Function *find_function(const std::string &name);
     const Function *find_function(const std::string &name) const;

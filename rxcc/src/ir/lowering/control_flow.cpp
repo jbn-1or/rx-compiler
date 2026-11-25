@@ -45,26 +45,37 @@ GenerationContext::emit_if(const IfExpression &expression, LocalPlaces &locals,
         merge_block = false_block;
     builder.cond_branch(condition, then_block, false_block);
 
-    const auto emit_branch = [&](const Expression &branch, ir::BlockId block,
-                                  std::size_t index) {
-        builder.set_insert_point(block);
-        auto result = result_slot
-            ? emit_prepared_value(branch, locals, {&expression, UseKind::IfBranch, index})
-            : emit_discarded_expression(branch, locals);
-        if (!result)
-            return false;
-        if (path_ended(*result))
-            return true;
+    // 先生成 then；只有正常完成时才保存结果并连到汇合块。
+    builder.set_insert_point(then_block);
+    auto then_result = result_slot
+        ? emit_prepared_value(*expression.then, locals, {&expression, UseKind::IfBranch, 0})
+        : emit_discarded_expression(*expression.then, locals);
+    if (!then_result)
+        return std::nullopt;
+    if (!path_ended(*then_result)) {
         if (result_slot)
-            store_prepared_value(*result_slot, *result, result_type);
+            store_prepared_value(*result_slot, *then_result, result_type);
         if (!merge_block)
             merge_block = function.add_block();
         builder.branch(*merge_block);
-        return true;
-    };
-    if (!emit_branch(*expression.then, then_block, 0) ||
-        (expression.else_ && !emit_branch(*expression.else_, false_block, 1)))
-        return std::nullopt;
+    }
+
+    // 有 else 才生成 false 分支；无 else 时 false 边已经直接进入汇合块。
+    if (expression.else_) {
+        builder.set_insert_point(false_block);
+        auto else_result = result_slot
+            ? emit_prepared_value(*expression.else_, locals, {&expression, UseKind::IfBranch, 1})
+            : emit_discarded_expression(*expression.else_, locals);
+        if (!else_result)
+            return std::nullopt;
+        if (!path_ended(*else_result)) {
+            if (result_slot)
+                store_prepared_value(*result_slot, *else_result, result_type);
+            if (!merge_block)
+                merge_block = function.add_block();
+            builder.branch(*merge_block);
+        }
+    }
 
     // 两支都提前结束时没有结果路径，外层不能继续读取 slot。
     if (!merge_block)

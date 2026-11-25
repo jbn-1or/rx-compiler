@@ -76,11 +76,11 @@ void check_entry(const std::string &source) {
     const auto *entry = module.find_function("main");
     check(module.target_triple == rv32_triple && module.data_layout == rv32_data_layout,
           "目标必须是 RV32IM/ILP32");
-    check(main && main->linkage == Linkage::Internal && main->abi.signature == Signature{Type::Void, {}} &&
+    check(main && main->linkage == Linkage::Internal && main->abi == FunctionABI{Type::Void, {}} &&
               main->blocks.size() == 1 && main->blocks[0].instructions.empty() &&
               !return_value(main->blocks[0]), "源入口应为空的 internal void()");
     check(entry && entry != main && entry->linkage == Linkage::External &&
-              entry->abi.signature == Signature{Type::I32, {}} && entry->blocks.size() == 1,
+              entry->abi == FunctionABI{Type::I32, {}} && entry->blocks.size() == 1,
           "机器入口应为独立的 external i32()");
     const auto &block = entry->blocks[0];
     check(block.instructions.size() == 1 && !block.instructions[0].result &&
@@ -246,8 +246,11 @@ void check_aggregate_call_abi() {
     const auto &callee = *module.find_function("__rx_fn_" + std::to_string(sema.functions.at(0)->id.index));
     const auto &caller = *module.find_function("__rx_fn_" + std::to_string(sema.main_function->index));
     const auto array = StorageType::array_of(StorageType::scalar(Type::I32), 2);
-    const std::vector<Type> types{Type::Ptr, Type::Ptr, Type::I32, Type::Ptr, Type::I1, Type::Ptr};
-    check(callee.abi == FunctionABI{{Type::Void, types}, {{}, array, {}, array, {}, {}}, array},
+    const FunctionABI expected_abi{
+        Type::Void,
+        {{Type::Ptr}, {Type::Ptr, array}, {Type::I32}, {Type::Ptr, array}, {Type::I1}, {Type::Ptr}},
+        array};
+    check(callee.abi == expected_abi,
           "隐藏结果地址必须在首位，聚合快照与普通引用的 ABI 记录必须不同");
 
     const Call *call = nullptr;
@@ -267,15 +270,16 @@ void check_aggregate_call_abi() {
             side_effect = index;
         }
     }
-    check(call && call->arguments.size() == types.size() && side_effect > 0 && side_effect < call_index,
-          "混合实参必须在副作用之后按共享签名发出调用");
+    check(call && call->arguments.size() == expected_abi.parameters.size() &&
+              side_effect > 0 && side_effect < call_index,
+          "混合实参必须在副作用之后按共享 ABI 发出调用");
     const auto &arguments = call->arguments;
     check(arguments[2] == Operand::constant(Type::I32, 20) &&
               arguments[4] == Operand::constant(Type::I1, 1), "直接实参位置不可错位");
     std::set<std::size_t> slots;
     for (const auto index : {0, 1, 3, 5}) {
         const auto *slot = arguments[index].value_id();
-        check(slot && slots.insert(slot->index).second,
+        check(arguments[index].type == Type::Ptr && slot && slots.insert(slot->index).second,
               "结果、两个快照及普通引用目标必须是不同的存储");
         bool allocated = false;
         for (const auto &instruction : caller.entry_allocas)
@@ -340,6 +344,10 @@ void check_parameter_snapshot_reuse() {
     const auto artifact = generate(sema);
     const auto &sum = *artifact.module().find_function(
         rx::source_function_name(sema.functions.at(0)->id));
+    const auto data = StorageType::struct_of(sema.structs.at(0)->id.index);
+    const auto array = StorageType::array_of(StorageType::scalar(Type::I32), 2);
+    check(sum.abi == FunctionABI{Type::I32, {{Type::Ptr, data}, {Type::Ptr, array}, {Type::I32}}},
+          "按值 self 和数组参数应各自记录快照存储，标量参数和结果应直接传递");
     check(sum.entry_allocas.size() == 1 &&
               std::get<Alloca>(sum.entry_allocas.front().operation).storage_type == Type::I32,
           "被调方应只为标量参数分配 slot，不应再次分配 self 或数组快照");
@@ -409,7 +417,7 @@ void check_println() {
     const auto &module = artifact.module();
     const auto *println = module.find_function("println_i32");
     check(println && println->is_declaration() && println->linkage == Linkage::External &&
-              println->abi.signature == Signature{Type::Void, {Type::I32}} &&
+              println->abi == FunctionABI{Type::Void, {{Type::I32}}} &&
               module.functions().size() == sema.functions.size() + 2,
           "所有调用应共享一个运行时声明");
     const auto *main = module.find_function("__rx_fn_1");
@@ -710,8 +718,7 @@ void check_mixed_scalar_storage() {
     const auto sema = analyze(*crate);
     const auto artifact = generate(sema);
     const auto *mixed = artifact.module().find_function("__rx_fn_0");
-    check(mixed && mixed->abi.signature ==
-              Signature{Type::I1, {Type::I32, Type::I1, Type::I32}},
+    check(mixed && mixed->abi == FunctionABI{Type::I1, {{Type::I32}, {Type::I1}, {Type::I32}}},
           "混合形参和 bool 返回值必须保留各自的 IR 类型");
     const auto *main = artifact.module().find_function("__rx_fn_1");
     bool found_mixed_call = false;
@@ -854,7 +861,7 @@ rx::IRArtifact make_scalar_operation_driver() {
     auto &module = artifact.module();
     const auto names = expected_function_names(sema);
     const auto print = module.add_function(
-        "println_i32", {Type::Void, {Type::I32}}, Linkage::External);
+        "println_i32", {Type::Void, {{Type::I32}}}, Linkage::External);
     // 保留原入口调用，仅在 ret 前追加驱动；整数直接打印相同的 32 位模式。
     const auto entry = module.find_function("main")->id;
     module.function(entry).blocks[0].terminator.reset();
@@ -862,11 +869,11 @@ rx::IRArtifact make_scalar_operation_driver() {
     builder.set_insert_point(module.function(entry).blocks[0].id);
     for (std::size_t index = 0; index < arguments.size(); ++index) {
         const auto function = module.find_function(names[index])->id;
-        const auto signature = module.function(function).abi.signature;
+        const auto &parameters = module.function(function).abi.parameters;
         for (const auto &[left, right] : arguments[index]) {
             auto value = *builder.call(function, {
-                Operand::constant(signature.parameters[0], left),
-                Operand::constant(signature.parameters[1], right)});
+                Operand::constant(parameters[0].type, left),
+                Operand::constant(parameters[1].type, right)});
             if (value.type == Type::I1)
                 value = builder.zext(Type::I32, value);
             builder.call(print, {value});
@@ -1008,7 +1015,7 @@ void check_reference_places() {
     const auto &module = artifact.module();
     for (const auto *name : {"__rx_fn_0", "__rx_fn_1"}) {
         const auto &function = *module.find_function(name);
-        check(function.abi.signature == Signature{Type::Ptr, {Type::Ptr}} &&
+        check(function.abi == FunctionABI{Type::Ptr, {{Type::Ptr}}} &&
                   function.entry_allocas.size() == 1 &&
                   std::get<Alloca>(function.entry_allocas[0].operation).storage_type == Type::Ptr,
               "共享和可变引用的参数 slot、参数值及返回值都必须使用 ptr");
@@ -1145,7 +1152,7 @@ void check_reference_coercions() {
     for (std::size_t index = 0; index < steps.size(); ++index) {
         const auto &function = *artifact.module().find_function(names[index]);
         const auto &instructions = function.blocks[0].instructions;
-        check(function.abi.signature == Signature{Type::Ptr, {Type::Ptr}} &&
+        check(function.abi == FunctionABI{Type::Ptr, {{Type::Ptr}}} &&
                   function.entry_allocas.size() == 1 &&
                   instructions.size() == 2 + steps[index],
               "引用转换不得分配目标副本，也不得多读或漏读中间指针");
@@ -1715,7 +1722,10 @@ void check_assignment_unit_tails() {
     const auto names = expected_function_names(sema);
     for (std::size_t index = 0; index < names.size(); ++index) {
         const auto &function = *artifact.module().find_function(names[index]);
-        check(function.abi.signature.result == Type::Void && function.blocks.size() == 1 &&
+        const auto expected_abi = index == 4
+            ? FunctionABI{Type::Void, {}}
+            : FunctionABI{Type::Void, {{Type::Ptr}}};
+        check(function.abi == expected_abi && function.blocks.size() == 1 &&
                   function.blocks[0].terminator && !return_value(function.blocks[0]),
               "赋值完成后只能返回 void，不能产生虚构的 unit SSA 值");
         std::vector<const Store *> stores;
@@ -2360,14 +2370,14 @@ void check_control_flow_integration() {
     const auto &recurse = std::get<CondBranch>(*source_main.blocks.front().terminator);
     const auto &recursive_block = source_main.block(recurse.when_true);
     check(source_main.linkage == Linkage::Internal &&
-              source_main.abi.signature == Signature{Type::Void, {}} &&
+              source_main.abi == FunctionABI{Type::Void, {}} &&
               recursive_block.instructions.size() == 1 &&
               std::get<Call>(recursive_block.instructions.front().operation).function == source_main.id &&
               target(recursive_block) == recurse.when_false,
           "递归调用指向内部源 main，返回后继续执行外层源 main");
     const auto &entry = *module.find_function("main");
     const auto &wrapper = entry.blocks.front();
-    check(entry.linkage == Linkage::External && entry.abi.signature == Signature{Type::I32, {}} &&
+    check(entry.linkage == Linkage::External && entry.abi == FunctionABI{Type::I32, {}} &&
               wrapper.instructions.size() == 1 &&
               std::get<Call>(wrapper.instructions.front().operation).function == source_main.id &&
               return_value(wrapper) == Operand::constant(Type::I32, 0),
@@ -2409,11 +2419,10 @@ void check_method_call_abi() {
     const auto &shifted = method("shifted");
     const auto &caller = *module.find_function(names.at(sema.main_function->index));
     const auto storage = StorageType::struct_of(data.id.index);
-    check(set.abi == FunctionABI{{Type::Void, {Type::Ptr, Type::I32}}, {{}, {}}, std::nullopt} &&
-              get.abi == FunctionABI{{Type::I32, {Type::Ptr}}, {{}}, std::nullopt},
+    check(set.abi == FunctionABI{Type::Void, {{Type::Ptr}, {Type::I32}}} &&
+              get.abi == FunctionABI{Type::I32, {{Type::Ptr}}},
           "借用接收者应是首个源参数，不是按值聚合");
-    check(shifted.abi == FunctionABI{{Type::Void, {Type::Ptr, Type::Ptr, Type::I32}},
-                                     {{}, storage, {}}, storage},
+    check(shifted.abi == FunctionABI{Type::Void, {{Type::Ptr}, {Type::Ptr, storage}, {Type::I32}}, storage},
           "按值 self 的存储在隐藏结果地址之后、普通参数之前");
 
     std::vector<const Call *> calls;
@@ -2430,7 +2439,8 @@ void check_method_call_abi() {
           "共享和可变借用必须指向同一个原始对象");
     for (std::size_t index = 2; index < calls.size(); ++index) {
         const auto &arguments = calls.at(index)->arguments;
-        check(arguments.size() == 3 && arguments[0] != arguments[1] &&
+        check(arguments.size() == 3 && arguments[0].type == Type::Ptr && arguments[1].type == Type::Ptr &&
+                  arguments[0] != arguments[1] &&
                   arguments[0] != original && arguments[1] != original &&
                   arguments[2] == Operand::constant(Type::I32, static_cast<uint32_t>(index)),
               "聚合结果、按值 self 快照与原对象必须独立，普通实参不能错位");
@@ -2535,7 +2545,7 @@ void check_box_allocator_ir() {
     };
     const auto *allocator = module.find_function("__rx_alloc");
     check(allocator && allocator->linkage == Linkage::External && allocator->blocks.empty() &&
-              allocator->abi == FunctionABI{{Type::Ptr, {Type::I32, Type::I32}}, {{}, {}}, std::nullopt},
+              allocator->abi == FunctionABI{Type::Ptr, {{Type::I32}, {Type::I32}}},
           "分配器必须声明为外部 C ABI ptr(i32 size, i32 align)");
 
     const auto call_instructions = [](const Function &caller) {
@@ -2570,7 +2580,7 @@ void check_box_allocator_ir() {
     }
 
     const auto &transfer = function(3);
-    check(transfer.abi == FunctionABI{{Type::Ptr, {Type::Ptr}}, {{}}, std::nullopt} &&
+    check(transfer.abi == FunctionABI{Type::Ptr, {{Type::Ptr}}} &&
               call_instructions(transfer).empty(), "按值传递或移动 Box 只传拥有者指针");
     const auto &early = function(4);
     const auto early_calls = call_instructions(early);
@@ -2954,8 +2964,8 @@ void check_clone_ir() {
                 check(!helper, "Vec clone 必须只调用一次类型辅助函数");
                 helper = &module.function(call->function);
             }
-    check(helper && helper->abi.signature == Signature{Type::Void, {Type::Ptr, Type::Ptr}},
-          "Vec clone 辅助函数必须接收结果和源地址");
+    check(helper && helper->abi == FunctionABI{Type::Void, {{Type::Ptr}, {Type::Ptr}}},
+          "Vec clone 辅助函数必须直接接收结果和源地址");
 
     const auto vec = StorageType::vec();
     const auto zero = Operand::constant(Type::I32, 0);
@@ -3040,7 +3050,7 @@ void check_equality_ir() {
                 }
             }
         }
-        check(helper && helper->abi.signature == Signature{Type::I1, {Type::Ptr, Type::Ptr}},
+        check(helper && helper->abi == FunctionABI{Type::I1, {{Type::Ptr}, {Type::Ptr}}},
               "相等 helper 接收两个借用地址并返回 i1");
         return *helper;
     };

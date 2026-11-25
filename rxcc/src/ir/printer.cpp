@@ -111,7 +111,7 @@ void instruction(std::ostream &output, const Module &module,
     } else {
         const auto &call = std::get<Call>(instruction.operation);
         const auto &function = module.function(call.function);
-        output << "call " << type_name(function.abi.signature.result) << " @"
+        output << "call " << type_name(function.abi.result) << " @"
                << function.name << '(';
         for (std::size_t argument_index = 0;
              argument_index < call.arguments.size(); ++argument_index) {
@@ -150,21 +150,21 @@ std::string module_text(const Module &module) {
     }
     for (const auto &owned : module.functions()) {
         const auto &function = *owned;
-        const auto &signature = function.abi.signature;
+        const auto &abi = function.abi;
         output << (function.is_declaration() ? "declare " : "define ");
         // 内部源函数加 internal，外部声明和机器入口不加。
         if (function.linkage == Linkage::Internal)
             output << "internal ";
-        output << type_name(signature.result) << " @" << function.name
+        output << type_name(abi.result) << " @" << function.name
             << '(';
         for (std::size_t parameter_index = 0;
-             parameter_index < signature.parameters.size(); ++parameter_index) {
+             parameter_index < abi.parameters.size(); ++parameter_index) {
             // 只有第一个参数前不加分隔符。
             if (parameter_index)
                 output << ", ";
             // 函数声明只打印参数类型，函数定义还要打印参数名，供函数体引用。
             if (function.is_declaration())
-                output << type_name(signature.parameters[parameter_index]);
+                output << type_name(abi.parameters[parameter_index].type);
             else
                 operand(output, function.argument(parameter_index));
         }

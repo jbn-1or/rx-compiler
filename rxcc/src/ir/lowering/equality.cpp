@@ -5,6 +5,7 @@
 #include "ir/builder.hpp"
 #include "ir/layout.hpp"
 #include "ir/lowering/value.hpp"
+#include "sema/symbol.hpp"
 #include <stdexcept>
 #include <variant>
 
@@ -60,24 +61,37 @@ ir::Operand GenerationContext::emit_equality_into(const ir::Operand &left,
         case SemanticType::Kind::Struct: {
             // 空结构体没有字段，语义上彼此相等。
             auto result = boolean_constant(true);
-            for_each_member_pair(left, right, type,
-                [&](ir::Operand lhs, ir::Operand rhs, const SemanticType &field) {
-                    result = builder.binary(ir::BinaryOp::And, result,
-                                            emit_equality_member(lhs, rhs, field));
-                });
+            const auto &structure = *type.struct_symbol;
+            for (std::size_t index = 0; index < structure.fields.size(); ++index) {
+                const auto &field = structure.fields[index];
+                const auto field_index = ir::Operand::constant(ir::Type::I32, index);
+                const auto left_address = member_address(left, type, field_index);
+                const auto right_address = member_address(right, type, field_index);
+                const auto &member_type = structure.field_types.at(field.name);
+                result = builder.binary(ir::BinaryOp::And, result,
+                    emit_equality_member(left_address, right_address, member_type));
+            }
             return result;
         }
         case SemanticType::Kind::Array: {
             // 用私有 i1 槽累计所有元素结果；大数组循环也不会按长度展开。
             const auto result_slot = allocate_slot(ir::Type::I1);
             store_value(boolean_constant(true), result_slot);
-            for_each_member_pair(left, right, type,
-                [&](ir::Operand lhs, ir::Operand rhs, const SemanticType &element) {
-                    const auto equal = emit_equality_member(lhs, rhs, element);
-                    const auto combined = builder.binary(
-                        ir::BinaryOp::And, load_value(result_slot, ir::Type::I1), equal);
-                    store_value(combined, result_slot);
-                });
+            if (type.length <= array_unroll_limit) {
+                for (uint64_t index = 0; index < type.length; ++index) {
+                    const auto element_index = ir::Operand::constant(ir::Type::I32, index);
+                    const auto left_address = member_address(left, type, element_index);
+                    const auto right_address = member_address(right, type, element_index);
+                    accumulate_equality(result_slot, left_address, right_address, *type.inner);
+                }
+            } else {
+                const auto loop = begin_runtime_loop(
+                    ir::Operand::constant(ir::Type::I32, type.length));
+                const auto left_address = member_address(left, type, loop.index);
+                const auto right_address = member_address(right, type, loop.index);
+                accumulate_equality(result_slot, left_address, right_address, *type.inner);
+                end_runtime_loop(loop);
+            }
             return load_value(result_slot, ir::Type::I1);
         }
         case SemanticType::Kind::Vec: {
@@ -105,16 +119,11 @@ ir::Operand GenerationContext::emit_equality_into(const ir::Operand &left,
                 load_value(vec_field_address(left, VecField::Data), ir::Type::Ptr);
             const auto right_data =
                 load_value(vec_field_address(right, VecField::Data), ir::Type::Ptr);
-            for_each_runtime_index(left_length, [&](ir::Operand index) {
-                const auto left_element = vec_element_address(left_data, element_type, index);
-                const auto right_element = vec_element_address(right_data, element_type, index);
-                const auto element_equal = emit_equality_member(
-                    left_element, right_element, element_type);
-                const auto combined = builder.binary(
-                    ir::BinaryOp::And, load_value(result_slot, ir::Type::I1),
-                    element_equal);
-                store_value(combined, result_slot);
-            });
+            const auto loop = begin_runtime_loop(left_length);
+            const auto left_address = vec_element_address(left_data, element_type, loop.index);
+            const auto right_address = vec_element_address(right_data, element_type, loop.index);
+            accumulate_equality(result_slot, left_address, right_address, element_type);
+            end_runtime_loop(loop);
             builder.branch(done_block);
 
             builder.set_insert_point(done_block);
@@ -126,6 +135,16 @@ ir::Operand GenerationContext::emit_equality_into(const ir::Operand &left,
             throw std::logic_error("该源类型没有可比较的相等内容");
     }
     throw std::logic_error("未知源类型不能比较相等");
+}
+
+// 所有成员都相等时结果才为 true；槽用于跨运行时循环保存累计结果。
+void GenerationContext::accumulate_equality(
+    const ir::Operand &result_slot, const ir::Operand &left,
+    const ir::Operand &right, const SemanticType &type) {
+    const auto equal = emit_equality_member(left, right, type);
+    const auto combined = builder.binary(
+        ir::BinaryOp::And, load_value(result_slot, ir::Type::I1), equal);
+    store_value(combined, result_slot);
 }
 
 // 按普通左右顺序借用两个操作数；两侧都准备好后才生成一次比较。

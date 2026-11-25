@@ -1192,6 +1192,20 @@ def main():
              b"1\n0\n0\n1\n0\n0\n"),
             ("p62-if-values", if_values.read_text(encoding="utf-8"),
              if_values.with_suffix(".out").read_bytes(), b""),
+            # then 提前返回；else if 的两条正常路径仍须将值交给外层汇合。
+            ("p62-else-if-return", """
+                fn choose(first: bool, second: bool) -> i32 {
+                    let result = if first { return 10; }
+                                 else if second { 20 } else { 30 };
+                    println_i32(40);
+                    result
+                }
+                fn main() {
+                    println_i32(choose(true, false));
+                    println_i32(choose(false, true));
+                    println_i32(choose(false, false));
+                }
+             """, b"10\n40\n20\n40\n30\n", b""),
             ("discarded-if-value", """
                 fn run() {
                     if get_i32() == 0 {
@@ -1597,6 +1611,19 @@ def main():
                     println_i32(*mutable_first[0]); println_i32(*mutable_first[1]);
                 }
              """, b"11\n22\n" * 6),
+            # 展开阈值两侧都只求值一次重复元素；普通数组则按源码顺序求值。
+            ("p72-array-initialization-order", """
+                fn mark(value: i32) -> i32 { println_i32(value); value }
+                fn main() {
+                    let expanded = [mark(1); 8];
+                    let looped = [mark(2); 9];
+                    let listed = [mark(3), mark(4)];
+                    println_i32(expanded[7]);
+                    println_i32(looped[8]);
+                    println_i32(listed[0]);
+                    println_i32(listed[1]);
+                }
+             """, b"1\n2\n3\n4\n1\n2\n3\n4\n"),
             ("p72-repeat-large", """
                 const LENGTH: usize = 513;
                 #[derive(Clone, Copy)]

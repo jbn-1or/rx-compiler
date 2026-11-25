@@ -64,35 +64,35 @@ GenerationContext::emit_struct(const StructExpression &expression,
 std::optional<EmitResult>
 GenerationContext::emit_array(const ArrayExpression &expression,
                               LocalPlaces &locals) {
-    // 每个源码元素先固定为独立的值。[return] 的元素类型可能是 !，没有布局。
-    const auto count = expression.repeat_value ? 1 : expression.elements.size();
-    std::vector<EmitResult> values;
-    values.reserve(count);
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto &element = expression.repeat_value
-            ? expression.repeat_value : expression.elements[index];
+    const auto &type = semantics.expressions.at(&expression).type;
+    // 先求值，再分配存储：元素可能提前 return，此时整个数组不需要布局。
+    if (expression.repeat_value) {
+        // [value; N] 只求值一次 value，后面再将这个值写入各位置。
         auto prepared = emit_prepared_value(
-            *element, locals, UseSite{&expression, UseKind::ArrayElement, index});
+            *expression.repeat_value, locals, UseSite{&expression, UseKind::ArrayElement, 0});
+        if (!prepared || path_ended(*prepared))
+            return prepared;
+        const auto address = allocate_storage_slot(ir::storage_type_of(type));
+        fill_array(address, type, *prepared);
+        return AggregateValue{address};
+    }
+
+    // 普通数组按源码顺序固定各元素的值，再写入数组存储。
+    std::vector<EmitResult> values;
+    values.reserve(expression.elements.size());
+    for (std::size_t index = 0; index < expression.elements.size(); ++index) {
+        auto prepared = emit_prepared_value(
+            *expression.elements[index], locals,
+            UseSite{&expression, UseKind::ArrayElement, index});
         if (!prepared || path_ended(*prepared))
             return prepared;
         values.push_back(std::move(*prepared));
     }
 
-    const auto &type = semantics.expressions.at(&expression).type;
-    const auto storage = ir::storage_type_of(type);
-    const auto address = allocate_storage_slot(storage);
-    const auto store_element = [&](ir::Operand index, const EmitResult &value) {
-        const auto target = builder.get_element_ptr(storage, address,
-                                                    {index_constant(0), index});
-        store_prepared_value(target, value, *type.inner);
-    };
-    if (expression.repeat_value) {
-        for_each_array_index(type.length, [&](ir::Operand index) {
-            store_element(index, values.front());
-        });
-    } else {
-        for (std::size_t index = 0; index < values.size(); ++index)
-            store_element(index_constant(index), values[index]);
+    const auto address = allocate_storage_slot(ir::storage_type_of(type));
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        const auto element_address = member_address(address, type, index_constant(index));
+        store_prepared_value(element_address, values[index], *type.inner);
     }
     return AggregateValue{address};
 }
@@ -163,21 +163,44 @@ void GenerationContext::copy_value(const ir::Operand &destination,
             store_value(load_value(source, type), destination);
             return;
         }
-        case SemanticType::Kind::Struct:
-        case SemanticType::Kind::Array:
-            for_each_member_pair(destination, source, type,
-                [&](ir::Operand dest, ir::Operand src, const SemanticType &member) {
-                    copy_value(dest, src, member);
-                });
+        case SemanticType::Kind::Struct: {
+            const auto &structure = *type.struct_symbol;
+            for (std::size_t index = 0; index < structure.fields.size(); ++index) {
+                const auto &field = structure.fields[index];
+                const auto destination_address =
+                    member_address(destination, type, index_constant(index));
+                const auto source_address = member_address(source, type, index_constant(index));
+                const auto &member_type = structure.field_types.at(field.name);
+                copy_value(destination_address, source_address, member_type);
+            }
             return;
+        }
+        case SemanticType::Kind::Array: {
+            if (type.length <= array_unroll_limit) {
+                for (uint64_t index = 0; index < type.length; ++index) {
+                    const auto destination_address =
+                        member_address(destination, type, index_constant(index));
+                    const auto source_address =
+                        member_address(source, type, index_constant(index));
+                    copy_value(destination_address, source_address, *type.inner);
+                }
+            } else {
+                const auto loop = begin_runtime_loop(index_constant(type.length));
+                const auto destination_address = member_address(destination, type, loop.index);
+                const auto source_address = member_address(source, type, loop.index);
+                copy_value(destination_address, source_address, *type.inner);
+                end_runtime_loop(loop);
+            }
+            return;
+        }
         case SemanticType::Kind::Vec: {
             // 移动 Vec 只搬运头，不复制缓冲区。
             for (auto field : {VecField::Data, VecField::Length, VecField::Capacity}) {
-                const auto source_field = vec_field_address(source, field);
-                const auto destination_field = vec_field_address(destination, field);
+                const auto source_address = vec_field_address(source, field);
+                const auto destination_address = vec_field_address(destination, field);
                 const auto field_type =
                     field == VecField::Data ? ir::Type::Ptr : ir::Type::I32;
-                store_value(load_value(source_field, field_type), destination_field);
+                store_value(load_value(source_address, field_type), destination_address);
             }
             return;
         }
@@ -187,40 +210,28 @@ void GenerationContext::copy_value(const ir::Operand &destination,
     }
 }
 
-// 只遍历结构体或数组的一层，不决定成员需要搬运、深克隆还是比较。
-void GenerationContext::for_each_member_pair(
-    const ir::Operand &first, const ir::Operand &second, const SemanticType &type,
-    const std::function<void(ir::Operand, ir::Operand, const SemanticType &)> &body) {
-    const auto storage = ir::storage_type_of(type);
-    const auto zero = index_constant(0);
-    const auto project = [&](ir::Operand index, const SemanticType &member) {
-        const auto first_member = builder.get_element_ptr(storage, first, {zero, index});
-        const auto second_member = builder.get_element_ptr(storage, second, {zero, index});
-        body(first_member, second_member, member);
-    };
-    if (type.kind == SemanticType::Kind::Array) {
-        for_each_array_index(type.length, [&](ir::Operand index) {
-            project(index, *type.inner);
-        });
-        return;
-    }
-    const auto &structure = *type.struct_symbol;
-    for (std::size_t index = 0; index < structure.fields.size(); ++index) {
-        const auto &field = structure.fields[index];
-        project(index_constant(index), structure.field_types.at(field.name));
-    }
+// 用同一种 GEP 写法取得数组元素或结构体字段的地址。
+ir::Operand GenerationContext::member_address(
+    const ir::Operand &address, const SemanticType &type, ir::Operand index) {
+    return builder.get_element_ptr(ir::storage_type_of(type), address,
+                                   {index_constant(0), index});
 }
 
-// 小数组直接使用常量下标；大数组在循环体中使用运行时的 i32 下标。
-void GenerationContext::for_each_array_index(
-    uint64_t count, const std::function<void(ir::Operand)> &body) {
-    constexpr uint64_t unroll_limit = 8;
-    if (count <= unroll_limit) {
-        for (uint64_t index = 0; index < count; ++index)
-            body(index_constant(index));
-        return;
+// 重复数组的元素只求值一次；这里只生成向各个位置写入该值的操作。
+void GenerationContext::fill_array(const ir::Operand &address,
+                                    const SemanticType &type,
+                                    const EmitResult &value) {
+    if (type.length <= array_unroll_limit) {
+        for (uint64_t index = 0; index < type.length; ++index) {
+            const auto element_address = member_address(address, type, index_constant(index));
+            store_prepared_value(element_address, value, *type.inner);
+        }
+    } else {
+        const auto loop = begin_runtime_loop(index_constant(type.length));
+        const auto element_address = member_address(address, type, loop.index);
+        store_prepared_value(element_address, value, *type.inner);
+        end_runtime_loop(loop);
     }
-    for_each_runtime_index(index_constant(count), body);
 }
 
 } // namespace rx

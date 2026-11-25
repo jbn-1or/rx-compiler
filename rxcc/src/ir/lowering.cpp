@@ -183,16 +183,18 @@ bool GenerationContext::emit_function_body(const FunctionSymbol &function,
     }
     const auto &parameter_locals = semantics.function_locals.at(function.id);
     // 聚合实参已是调用方的私有快照；其余参数（含引用）仍需可取址的 slot。
-    const auto bind_parameter = [&](LocalId local) {
-        const auto &storage = ir_function.abi.parameter_storage[argument_index];
+    // self 先于普通参数绑定，保证入口分配和初始化的生成顺序不变。
+    if (parameter_locals.self) {
+        const auto &parameter = ir_function.abi.parameters[argument_index];
         const auto argument = ir_function.argument(argument_index++);
-        locals.emplace(local, storage.kind == ir::StorageType::Kind::Unit
-                                  ? materialize_value(argument) : argument);
-    };
-    if (parameter_locals.self)
-        bind_parameter(*parameter_locals.self);
-    for (const auto local : parameter_locals.parameters)
-        bind_parameter(local);
+        locals.emplace(*parameter_locals.self,
+                       parameter.by_value_storage ? argument : materialize_value(argument));
+    }
+    for (const auto local : parameter_locals.parameters) {
+        const auto &parameter = ir_function.abi.parameters[argument_index];
+        const auto argument = ir_function.argument(argument_index++);
+        locals.emplace(local, parameter.by_value_storage ? argument : materialize_value(argument));
+    }
     // 函数体语句按源码顺序生成；提前 return 后停止整条路径。
     const auto statements = emit_statements(*function.node->body, locals);
     if (!statements)

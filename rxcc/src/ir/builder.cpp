@@ -51,20 +51,20 @@ Operand IRBuilder::append(Function &function, Type type, Operation operation) {
 std::optional<Operand> IRBuilder::call(IRFunctionId function_id,
                                        std::vector<Operand> arguments) {
     auto &function = open_function();
-    const auto &signature = module_.function(function_id).abi.signature;
-    require(arguments.size() == signature.parameters.size(),
+    const auto &callee_abi = module_.function(function_id).abi;
+    require(arguments.size() == callee_abi.parameters.size(),
             "IR call 参数数量不匹配");
     for (std::size_t argument_index = 0;
          argument_index < arguments.size(); ++argument_index) {
         require_operand(function, arguments[argument_index]);
         require(arguments[argument_index].type ==
-                    signature.parameters[argument_index],
+                    callee_abi.parameters[argument_index].type,
                 "IR call 参数类型不匹配");
     }
     // 返回 void 的调用也要添加到块中，但没有可供后续指令使用的结果值。
-    const auto result = append(function, signature.result,
-                               Call{function_id, std::move(arguments)});
-    if (signature.result == Type::Void)
+    const auto result = append(function, callee_abi.result,
+                                Call{function_id, std::move(arguments)});
+    if (callee_abi.result == Type::Void)
         return std::nullopt;
     return result;
 }
@@ -183,7 +183,7 @@ void IRBuilder::terminate(Function &function, Terminator terminator) {
 // 检查返回值是否匹配函数返回类型，再添加 ret void 或带值的 ret 指令。
 void IRBuilder::ret(std::optional<Operand> value) {
     auto &function = open_function();
-    const auto result = function.abi.signature.result;
+    const auto result = function.abi.result;
     // 有返回值时先检查它属于当前函数，再比较类型是否匹配。
     if (value)
         require_operand(function, *value);

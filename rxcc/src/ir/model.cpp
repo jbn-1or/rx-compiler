@@ -193,10 +193,12 @@ bool valid_constant(const Operand &operand) {
 
 // 保存函数身份、名称、签名和链接属性，并为参数预分配值 ID。
 Function::Function(IRFunctionId function_id, std::string name,
-                   FunctionABI abi, Linkage linkage)
+                   FunctionABI function_abi, Linkage linkage)
     : id(function_id), name(std::move(name)), linkage(linkage),
-      abi(std::move(abi)) {
-    value_types = this->abi.signature.parameters;
+      abi(std::move(function_abi)) {
+    value_types.reserve(abi.parameters.size());
+    for (const auto &parameter : abi.parameters)
+        value_types.push_back(parameter.type);
 }
 
 // 为指令结果分配值 ID，并把类型添加到当前函数的值类型表。
@@ -260,6 +262,13 @@ bool is_symbol_character(char character) {
            (character >= '0' && character <= '9');
 }
 
+// 判断 ABI 中的快照或结果槽是否使用聚合存储。
+bool is_aggregate_storage(const StorageType &storage) {
+    return storage.kind == StorageType::Kind::Array ||
+           storage.kind == StorageType::Kind::Struct ||
+           storage.kind == StorageType::Kind::Vec;
+}
+
 } // namespace
 
 // 检查函数名能否直接写入 LLVM 文本而不加引号；首字符不能是数字。
@@ -270,44 +279,40 @@ bool valid_symbol_name(const std::string &name) {
 
 // 检查 ABI 的形参表、按值聚合标记和隐藏结果指针位置是否自洽。
 bool valid_function_abi(const FunctionABI &abi) {
-    const auto &signature = abi.signature;
-    if (!is_known_type(signature.result) ||
-        abi.parameter_storage.size() != signature.parameters.size())
+    if (!is_known_type(abi.result))
         return false;
-    for (std::size_t index = 0; index < signature.parameters.size(); ++index) {
-        const auto type = signature.parameters[index];
-        if (type == Type::Void || !is_known_type(type))
+    for (const auto &parameter : abi.parameters) {
+        if (parameter.type == Type::Void || !is_known_type(parameter.type))
             return false;
-        const bool by_value =
-            abi.parameter_storage[index].kind != StorageType::Kind::Unit;
-        if (by_value && type != Type::Ptr)
+        // 只有按值传递的聚合需要快照，IR 参数必须是指向该快照的 ptr。
+        if (!parameter.by_value_storage)
+            continue;
+        if (parameter.type != Type::Ptr || !is_aggregate_storage(*parameter.by_value_storage))
             return false;
     }
     if (abi.result_storage) {
-        // 聚合返回使用调用者提供的第一个 ptr 作为隐藏结果位置，IR 本身返回 void。
-        if (abi.result_storage->kind == StorageType::Kind::Unit ||
-            abi.result_storage->kind == StorageType::Kind::Scalar)
+        // 返回存储必须是聚合，不能是无数据类型或标量。
+        if (!is_aggregate_storage(*abi.result_storage))
             return false;
-        if (signature.result != Type::Void || signature.parameters.empty() ||
-            signature.parameters.front() != Type::Ptr ||
-            abi.parameter_storage.front().kind != StorageType::Kind::Unit)
+        // 结果写入调用者提供的存储，IR 函数本身不直接返回数据。
+        if (abi.result != Type::Void)
+            return false;
+        // 先确认有首参数，再检查它是否是隐藏结果指针。
+        if (abi.parameters.empty())
+            return false;
+        const auto &result_pointer = abi.parameters.front();
+        if (result_pointer.type != Type::Ptr)
+            return false;
+        // 隐藏结果指针直接传地址，不能再标记为按值聚合参数。
+        if (result_pointer.by_value_storage)
             return false;
     }
     return true;
 }
 
-// 只有普通签名时，所有形参都直接传递，不带聚合存储信息。
-IRFunctionId Module::add_function(std::string function_name,
-                                  Signature signature, Linkage linkage) {
-    FunctionABI abi;
-    abi.parameter_storage.resize(signature.parameters.size());
-    abi.signature = std::move(signature);
-    return add_function_abi(std::move(function_name), std::move(abi), linkage);
-}
-
 // 名称和 ABI 均有效时才登记函数，并按其签名分配参数 ID。
-IRFunctionId Module::add_function_abi(std::string function_name,
-                                      FunctionABI abi, Linkage linkage) {
+IRFunctionId Module::add_function(std::string function_name,
+                                  FunctionABI abi, Linkage linkage) {
     if (!valid_function_abi(abi))
         throw std::logic_error("IR FunctionABI 形状无效");
     if (!valid_symbol_name(function_name) || find_function(function_name))
@@ -388,11 +393,9 @@ bool valid_gep_indices(const Module &module, const StorageType &source_type,
 std::size_t Module::add_named_type(std::string type_name) {
     if (!valid_symbol_name(type_name))
         throw std::logic_error("IR 类型名称非法");
-    const auto duplicate = std::find_if(
-        named_types_.begin(), named_types_.end(),
-        [&](const NamedType &existing) { return existing.name == type_name; });
-    if (duplicate != named_types_.end())
-        throw std::logic_error("IR 类型名称重复");
+    for (const auto &existing : named_types_)
+        if (existing.name == type_name)
+            throw std::logic_error("IR 类型名称重复");
     NamedType type;
     type.name = std::move(type_name);
     named_types_.push_back(std::move(type));

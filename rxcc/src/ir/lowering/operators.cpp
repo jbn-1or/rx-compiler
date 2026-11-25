@@ -72,11 +72,6 @@ ir::Operand GenerationContext::emit_binary_operation(
         operand_type.is_int() &&
         (operand_type.int_kind == SemanticType::IntKind::I32 ||
          operand_type.int_kind == SemanticType::IntKind::Isize);
-    // 有符号比较只用于有符号整数；bool 和常见无符号整数都走无符号谓词。
-    const auto ordered_comparison = [&](ir::Comparison signed_comparison,
-                                        ir::Comparison unsigned_comparison) {
-        return is_signed ? signed_comparison : unsigned_comparison;
-    };
     switch (operation) {
     case BinaryOperator::Add:
         return builder.binary(ir::BinaryOp::Add, left, right);
@@ -98,26 +93,26 @@ ir::Operand GenerationContext::emit_binary_operation(
         return builder.binary(ir::BinaryOp::Or, left, right);
     case BinaryOperator::BitwiseXor:
         return builder.binary(ir::BinaryOp::Xor, left, right);
-    // bool 只能用无符号比较，避免把 i1 的 true 当成有符号的 -1。
+    // 有符号整数用有符号谓词；bool 和无符号整数用无符号谓词，避免把 true 当成 -1。
     case BinaryOperator::LessThan:
         return builder.compare(
-            ordered_comparison(ir::Comparison::SignedLessThan,
-                               ir::Comparison::UnsignedLessThan),
+            is_signed ? ir::Comparison::SignedLessThan
+                      : ir::Comparison::UnsignedLessThan,
             left, right);
     case BinaryOperator::LessThanOrEqual:
         return builder.compare(
-            ordered_comparison(ir::Comparison::SignedLessThanOrEqual,
-                               ir::Comparison::UnsignedLessThanOrEqual),
+            is_signed ? ir::Comparison::SignedLessThanOrEqual
+                      : ir::Comparison::UnsignedLessThanOrEqual,
             left, right);
     case BinaryOperator::GreaterThan:
         return builder.compare(
-            ordered_comparison(ir::Comparison::SignedGreaterThan,
-                               ir::Comparison::UnsignedGreaterThan),
+            is_signed ? ir::Comparison::SignedGreaterThan
+                      : ir::Comparison::UnsignedGreaterThan,
             left, right);
     case BinaryOperator::GreaterThanOrEqual:
         return builder.compare(
-            ordered_comparison(ir::Comparison::SignedGreaterThanOrEqual,
-                               ir::Comparison::UnsignedGreaterThanOrEqual),
+            is_signed ? ir::Comparison::SignedGreaterThanOrEqual
+                      : ir::Comparison::UnsignedGreaterThanOrEqual,
             left, right);
     // 移位量只保留低 5 位；即使右侧是字面量也保留这条掩码指令。
     case BinaryOperator::ShiftLeft:

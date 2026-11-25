@@ -41,7 +41,7 @@ rx::IRArtifact make_module(bool invalid = false) {
 
 void add_typed_calls(Module &module) {
     IRBuilder builder(module);
-    const auto id = module.add_function("identity", {Type::I32, {Type::I32}}, Linkage::Internal);
+    const auto id = module.add_function("identity", {Type::I32, {{Type::I32}}}, Linkage::Internal);
     auto &identity = module.function(id);
     builder.set_insert_point(identity.add_block());
     builder.ret(identity.argument(0));
@@ -52,7 +52,7 @@ void add_typed_calls(Module &module) {
     const auto second = builder.call(id, {*first});
     builder.ret(*second);
     // 测试声明的打印和 32 位位模式；这是手动模型，不代表源码参数/调用已接通。
-    module.add_function("external_io", {Type::Void, {Type::I32}}, Linkage::External);
+    module.add_function("external_io", {Type::Void, {{Type::I32}}}, Linkage::External);
     const auto bits = module.add_function("all_bits", {Type::I32, {}}, Linkage::Internal);
     builder.set_insert_point(module.function(bits).add_block());
     builder.ret(Operand::constant(Type::I32, 0xffffffffu));
@@ -63,7 +63,7 @@ void check_parameter_identity() {
     auto artifact = make_module();
     auto &module = artifact.module();
     const auto id = module.add_function(
-        "mixed_parameters", {Type::Ptr, {Type::I1, Type::I32, Type::Ptr}}, Linkage::Internal);
+        "mixed_parameters", {Type::Ptr, {{Type::I1}, {Type::I32}, {Type::Ptr}}}, Linkage::Internal);
     auto &function = module.function(id);
     check(function.argument(0) == Operand::local(Type::I1, {id, 0}) &&
               function.argument(1) == Operand::local(Type::I32, {id, 1}) &&
@@ -98,7 +98,7 @@ void add_storage(Module &module) {
 void add_pointer_storage(Module &module) {
     IRBuilder builder(module);
     const auto id = module.add_function(
-        "pointer_roundtrip", {Type::Ptr, {Type::Ptr}}, Linkage::Internal);
+        "pointer_roundtrip", {Type::Ptr, {{Type::Ptr}}}, Linkage::Internal);
     auto &roundtrip = module.function(id);
     builder.set_insert_point(roundtrip.add_block());
     const auto slot = builder.entry_alloca(Type::Ptr, 4);
@@ -136,7 +136,7 @@ void add_pointer_storage(Module &module) {
 // 构造一个完整的 bool 往返函数，覆盖 i1 计算、i8 存取和 zext/trunc。
 void add_bool_scalar(Module &module) {
     IRBuilder builder(module);
-    const auto id = module.add_function("bool_roundtrip", {Type::I1, {Type::I1}}, Linkage::Internal);
+    const auto id = module.add_function("bool_roundtrip", {Type::I1, {{Type::I1}}}, Linkage::Internal);
     auto &function = module.function(id);
     builder.set_insert_point(function.add_block());
     const auto slot = builder.entry_alloca(Type::I8, 1);
@@ -154,7 +154,7 @@ void add_bool_scalar(Module &module) {
 void add_operations(Module &module) {
     IRBuilder builder(module);
     const auto id = module.add_function(
-        "operations", {Type::I32, {Type::I32, Type::I32}}, Linkage::Internal);
+        "operations", {Type::I32, {{Type::I32}, {Type::I32}}}, Linkage::Internal);
     auto &function = module.function(id);
     builder.set_insert_point(function.add_block());
     const auto left = function.argument(0);
@@ -177,7 +177,7 @@ void add_operations(Module &module) {
     builder.ret(left);
     // bool 只能使用 i1 位运算和相等/无符号比较。
     const auto bool_id = module.add_function(
-        "bool_operations", {Type::I1, {Type::I1, Type::I1}},
+        "bool_operations", {Type::I1, {{Type::I1}, {Type::I1}}},
         Linkage::Internal);
     auto &bool_function = module.function(bool_id);
     builder.set_insert_point(bool_function.add_block());
@@ -304,7 +304,7 @@ void check_branch_models() {
 void add_dominance_loop(Module &module) {
     IRBuilder builder(module);
     auto &function = module.function(module.add_function(
-        "dominance_loop", {Type::I32, {Type::I32}}, Linkage::Internal));
+        "dominance_loop", {Type::I32, {{Type::I32}}}, Linkage::Internal));
     const auto entry = function.add_block();
     const auto header = function.add_block();
     const auto body = function.add_block();
@@ -356,7 +356,7 @@ void check_dominance() {
                   text.str().empty() && !diagnostics.str().empty(), message);
     };
     reject([](Function &function, Operand value, Operand) {
-        function.abi.signature.result = Type::I32;
+        function.abi.result = Type::I32;
         function.blocks.back().terminator = Return{value};
     }, "merge 的 ret 不能读取只在 then 中定义的值");
     reject([](Function &function, Operand value, Operand one) {
@@ -378,9 +378,9 @@ rx::IRArtifact make_bool_driver() {
     rx::IRArtifact artifact;
     auto &module = artifact.module();
     IRBuilder builder(module);
-    module.add_function("println_i32", {Type::Void, {Type::I32}}, Linkage::External);
+    module.add_function("println_i32", {Type::Void, {{Type::I32}}}, Linkage::External);
     const auto roundtrip =
-        module.add_function("bool_roundtrip", {Type::I1, {Type::I1}}, Linkage::Internal);
+        module.add_function("bool_roundtrip", {Type::I1, {{Type::I1}}}, Linkage::Internal);
     auto &function = module.function(roundtrip);
     builder.set_insert_point(function.add_block());
     const auto slot = builder.entry_alloca(Type::I8, 1);
@@ -500,7 +500,7 @@ void check_aggregate_gep() {
     module.define_named_type(record, {StorageType::scalar(Type::I8), StorageType::scalar(Type::I32)});
     const auto element = StorageType::struct_of(record);
     const auto array = StorageType::array_of(element, 2);
-    const auto id = module.add_function("project", {Type::I32, {Type::I32}}, Linkage::Internal);
+    const auto id = module.add_function("project", {Type::I32, {{Type::I32}}}, Linkage::Internal);
     auto &function = module.function(id);
     IRBuilder builder(module);
     builder.set_insert_point(function.add_block());
@@ -559,22 +559,36 @@ void check_aggregate_gep() {
 
 // 聚合 ABI 的隐藏位置和实参数量由构建器检查；输出前还要独立检查模块元数据。
 void check_aggregate_abi_validation() {
-    const auto array = StorageType::array_of(StorageType::scalar(Type::I32), 2);
-    const FunctionABI valid{{Type::Void, {Type::Ptr, Type::I32}}, {{}, {}}, array};
+    const auto word = StorageType::scalar(Type::I32);
+    const auto array = StorageType::array_of(word, 2);
+    const FunctionABI valid{Type::Void, {{Type::Ptr}, {Type::I32}}, array};
     auto artifact = make_module();
     auto &module = artifact.module();
     for (const FunctionABI &invalid : {
-             FunctionABI{{Type::Void, {Type::I32, Type::Ptr}}, {{}, {}}, array},
-             FunctionABI{{Type::Void, {Type::Ptr}}, {array}, array},
-             FunctionABI{{Type::I32, {Type::Ptr}}, {{}}, array},
-             FunctionABI{{Type::Void, {Type::Ptr}}, {}, array},
-             FunctionABI{{Type::Void, {Type::I32}}, {array}, std::nullopt},
+             FunctionABI{Type::Void, {{Type::I32}, {Type::Ptr}}, array},
+             FunctionABI{Type::Void, {{Type::Ptr, array}}, array},
+             FunctionABI{Type::I32, {{Type::Ptr}}, array},
+             FunctionABI{Type::Void, {{Type::I32, array}}},
+             // 没有首参数时必须直接拒绝，不能继续访问 front()。
+             FunctionABI{Type::Void, {}, array},
+             FunctionABI{Type::Void, {{Type::Ptr}}, StorageType{}},
+             FunctionABI{Type::Void, {{Type::Ptr}}, word},
+             // 显式 Unit 或标量存储即使配上 ptr，也不是合法的按值聚合参数。
+             FunctionABI{Type::Void, {{Type::Ptr, StorageType{}}}},
+             FunctionABI{Type::Void, {{Type::Ptr, word}}},
          }) {
-        rejects([&] { module.add_function_abi("rejected_abi", invalid, Linkage::External); });
+        rejects([&] { module.add_function("rejected_abi", invalid, Linkage::External); });
         check(!module.find_function("rejected_abi"), "无效 ABI 不能登记到模块");
     }
 
-    const auto callee = module.add_function_abi("fill", valid, Linkage::External);
+    const auto mixed = module.add_function(
+        "mixed_pointers", {Type::Void, {{Type::Ptr}, {Type::Ptr, array}}}, Linkage::External);
+    const auto &parameters = module.function(mixed).abi.parameters;
+    check(parameters.size() == 2 && parameters[0] == ParameterABI{Type::Ptr} &&
+              parameters[1] == ParameterABI{Type::Ptr, array},
+          "普通 ptr 无按值存储，按值聚合 ptr 必须保留自己的存储类型");
+
+    const auto callee = module.add_function("fill", valid, Linkage::External);
     const auto caller = module.add_function("invoke", {Type::Void, {}}, Linkage::Internal);
     auto &function = module.function(caller);
     IRBuilder builder(module);
@@ -598,16 +612,21 @@ void check_aggregate_abi_validation() {
               "错误数量或位置的隐藏参数必须被模块校验拒绝");
     }
     reject_model([&](Module &m) {
-        const auto id = m.add_function_abi("wrong_result", valid, Linkage::External);
-        m.function(id).abi.signature.parameters.front() = Type::I32;
+        const auto id = m.add_function("wrong_result", valid, Linkage::External);
+        m.function(id).abi.parameters.front().type = Type::I32;
     });
     reject_model([&](Module &m) {
-        const auto id = m.add_function_abi("wrong_layout", valid, Linkage::External);
+        const auto id = m.add_function("wrong_layout", valid, Linkage::External);
         m.function(id).abi.result_storage = StorageType::struct_of(999);
     });
+    reject_model([](Module &m) {
+        m.add_function("wrong_parameter_layout",
+                       {Type::Void, {{Type::Ptr, StorageType::struct_of(999)}}},
+                       Linkage::External);
+    });
     reject_model([&](Module &m) {
-        const auto id = m.add_function_abi("stale_signature", valid, Linkage::External);
-        m.function(id).abi.signature.parameters.back() = Type::I1;
+        const auto id = m.add_function("stale_parameter_type", valid, Linkage::External);
+        m.function(id).abi.parameters.back().type = Type::I1;
     });
 }
 
@@ -617,8 +636,8 @@ void add_aggregate_calls(Module &module) {
     module.define_named_type(record, {StorageType::scalar(Type::I8), StorageType::scalar(Type::I32)});
     const auto element = StorageType::struct_of(record);
     const auto array = StorageType::array_of(element, 2);
-    const FunctionABI abi{{Type::Void, {Type::Ptr, Type::Ptr}}, {{}, array}, array};
-    const auto callee = module.add_function_abi("aggregate_copy", abi, Linkage::Internal);
+    const FunctionABI abi{Type::Void, {{Type::Ptr}, {Type::Ptr, array}}, array};
+    const auto callee = module.add_function("aggregate_copy", abi, Linkage::Internal);
     auto &copy = module.function(callee);
     IRBuilder builder(module);
     builder.set_insert_point(copy.add_block());
@@ -682,7 +701,7 @@ void check_invalid_models() {
     });
     reject_model([](Module &m) {
         Module foreign;
-        const auto id = foreign.add_function("other", {Type::Void, {Type::I32}}, Linkage::External);
+        const auto id = foreign.add_function("other", {Type::Void, {{Type::I32}}}, Linkage::External);
         m.find_function("main")->blocks[0].terminator = Return{foreign.function(id).argument(0)};
     });
     reject_model([](Module &m) {
@@ -694,20 +713,18 @@ void check_invalid_models() {
         block.instructions.push_back(block.instructions[0]);
     });
     reject_model([](Module &m) {
-        m.find_function("external_io")->abi.signature.parameters[0] = Type::Void;
+        m.find_function("external_io")->abi.parameters[0].type = Type::Void;
     });
-    // 删除派生参数表后，签名与值类型表的缺项、多项和类型失配仍必须拒绝。
+    // ABI 参数和值类型表之间的缺项、多项和类型失配仍必须拒绝。
     reject_model([](Module &m) { m.find_function("identity")->value_types.clear(); });
     reject_model([](Module &m) { m.find_function("identity")->value_types[0] = Type::I1; });
     reject_model([](Module &m) {
         auto &function = *m.find_function("identity");
-        function.abi.signature.parameters.push_back(Type::I32);
-        function.abi.parameter_storage.emplace_back();
+        function.abi.parameters.push_back({Type::I32});
     });
     reject_model([](Module &m) {
         auto &function = *m.find_function("external_io");
-        function.abi.signature.parameters.clear();
-        function.abi.parameter_storage.clear();
+        function.abi.parameters.clear();
     });
     reject_model([](Module &m) { m.find_function("__rx_fn_0")->blocks.clear(); });
     reject_model([](Module &m) { std::get<Alloca>(m.find_function("storage")->entry_allocas[0].operation).alignment = 3; });
@@ -889,7 +906,7 @@ void run_tests() {
     rejects([&] { builder.set_insert_point(independent.module().find_function("main")->blocks[0].id); });
     rejects([&] { module.add_function("main", {Type::I32, {}}, Linkage::External); });
     rejects([&] { module.add_function("unsafe\"symbol", {Type::Void, {}}, Linkage::External); });
-    rejects([&] { module.add_function("bad", {Type::Void, {Type::Void}}, Linkage::External); });
+    rejects([&] { module.add_function("bad", {Type::Void, {{Type::Void}}}, Linkage::External); });
     check(!module.find_function("bad") && module.find_function("main")->id == main_id,
           "登记失败不能破坏函数名称索引");
     builder.set_insert_point(module.find_function("main")->blocks[0].id);

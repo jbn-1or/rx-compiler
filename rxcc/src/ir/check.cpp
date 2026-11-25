@@ -77,11 +77,12 @@ bool operand_available(const Function &function,
 // 参数按声明顺序从 0 编号，它们在进入任何基本块之前就已经可用。
 bool check_parameters(const Function &function, DefinitionTable &definitions,
                       std::ostream &diagnostics) {
+    const auto &parameters = function.abi.parameters;
     for (std::size_t parameter_index = 0;
-         parameter_index < function.abi.signature.parameters.size(); ++parameter_index) {
+         parameter_index < parameters.size(); ++parameter_index) {
         // 参数身份由签名序号决定；值类型表仍须匹配，而且不能重复定义。
         if (!define_value(function, definitions, {function.id, parameter_index},
-                          function.abi.signature.parameters[parameter_index],
+                          parameters[parameter_index].type,
                           {.before_entry = true}))
             return report_error(diagnostics, function,
                                 "函数参数身份或类型无效");
@@ -93,7 +94,7 @@ bool check_parameters(const Function &function, DefinitionTable &definitions,
 bool check_declaration(const Function &function,
                        std::ostream &diagnostics) {
     if (function.linkage != Linkage::External ||
-        function.value_types.size() != function.abi.signature.parameters.size() ||
+        function.value_types.size() != function.abi.parameters.size() ||
         !function.entry_allocas.empty())
         return report_error(diagnostics, function,
                             "内部函数未完成定义或声明携带函数体数据");
@@ -133,28 +134,24 @@ bool check_instruction(const Module &module, LayoutService &layouts,
                        const DominatorTable &dominators,
                        std::size_t use_block, std::size_t use_order,
                        std::ostream &diagnostics) {
-    // 所有操作数都按同一个使用点查询定义位置，避免每条指令重复展开参数。
-    const auto operand_ready = [&](const Operand &operand) {
-        return operand_available(function, definitions, dominators, use_block,
-                                 use_order, operand);
-    };
     if (const auto *call = std::get_if<Call>(&instruction.operation)) {
         if (!module.contains(call->function))
             return report_error(diagnostics, function,
                                 "调用目标无效或不属于当前模块");
-        const auto &signature = module.function(call->function).abi.signature;
+        const auto &callee_abi = module.function(call->function).abi;
         // 实参数量、结果类型和“是否有结果值”必须与被调用签名一致。
-        if (call->arguments.size() != signature.parameters.size() ||
-            instruction.type != signature.result ||
+        if (call->arguments.size() != callee_abi.parameters.size() ||
+            instruction.type != callee_abi.result ||
             instruction.result.has_value() !=
-                (signature.result != Type::Void))
+                (callee_abi.result != Type::Void))
             return report_error(diagnostics, function,
                                 "call 的签名或结果不一致");
         for (std::size_t argument_index = 0;
              argument_index < call->arguments.size(); ++argument_index)
-            if (!operand_ready(call->arguments[argument_index]) ||
+            if (!operand_available(function, definitions, dominators, use_block,
+                                   use_order, call->arguments[argument_index]) ||
                 call->arguments[argument_index].type !=
-                    signature.parameters[argument_index])
+                     callee_abi.parameters[argument_index].type)
                 return report_error(diagnostics, function,
                                     "call 操作数类型、归属或定义位置无效");
     } else if (const auto *load = std::get_if<Load>(&instruction.operation)) {
@@ -162,16 +159,19 @@ bool check_instruction(const Module &module, LayoutService &layouts,
         if (!valid_storage(load->storage_type, load->alignment) ||
             instruction.type != load->storage_type ||
             !instruction.result || load->address.type != Type::Ptr ||
-            !operand_ready(load->address))
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, load->address))
             return report_error(diagnostics, function,
                                 "load 类型、地址、对齐或结果无效");
     } else if (const auto *store = std::get_if<Store>(&instruction.operation)) {
         // 值本身决定写入类型；对齐合法、地址可用，且 store 不产生结果。
         if (!valid_storage(store->value.type, store->alignment) ||
             instruction.type != Type::Void || instruction.result ||
-            !operand_ready(store->value) ||
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, store->value) ||
             store->address.type != Type::Ptr ||
-            !operand_ready(store->address))
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, store->address))
             return report_error(diagnostics, function,
                                 "store 类型、地址、对齐或结果无效");
     } else if (const auto *binary =
@@ -180,8 +180,10 @@ bool check_instruction(const Module &module, LayoutService &layouts,
         if (binary->left.type != binary->right.type ||
             !valid_binary_type(binary->operation, binary->left.type) ||
             instruction.type != binary->left.type || !instruction.result ||
-            !operand_ready(binary->left) ||
-            !operand_ready(binary->right))
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, binary->left) ||
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, binary->right))
             return report_error(diagnostics, function,
                                 "二元运算的操作数或结果类型无效");
     } else if (const auto *comparison =
@@ -191,22 +193,26 @@ bool check_instruction(const Module &module, LayoutService &layouts,
             !valid_comparison(comparison->predicate,
                               comparison->left.type) ||
             instruction.type != Type::I1 || !instruction.result ||
-            !operand_ready(comparison->left) ||
-            !operand_ready(comparison->right))
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, comparison->left) ||
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, comparison->right))
             return report_error(diagnostics, function,
                                 "比较谓词、操作数或结果类型无效");
     } else if (const auto *extension = std::get_if<ZExt>(&instruction.operation)) {
         // zext 只允许较窄整数到较宽整数，结果类型等于目标类型。
         if (!is_narrower_integer(extension->value.type, extension->target_type) ||
             instruction.type != extension->target_type || !instruction.result ||
-            !operand_ready(extension->value))
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, extension->value))
             return report_error(diagnostics, function,
                                 "zext 类型、操作数或结果无效");
     } else if (const auto *truncation = std::get_if<Trunc>(&instruction.operation)) {
         // 源和目标都必须是整数；非整数的位宽 0 不能当作合法截断目标。
         if (!is_narrower_integer(truncation->target_type, truncation->value.type) ||
             instruction.type != truncation->target_type || !instruction.result ||
-            !operand_ready(truncation->value))
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, truncation->value))
             return report_error(diagnostics, function,
                                 "trunc 类型、操作数或结果无效");
     } else if (const auto *gep = std::get_if<GetElementPtr>(&instruction.operation)) {
@@ -221,11 +227,14 @@ bool check_instruction(const Module &module, LayoutService &layouts,
                                 "getelementptr 源存储类型布局无效");
         }
         if (instruction.type != Type::Ptr || !instruction.result ||
-            gep->base.type != Type::Ptr || !operand_ready(gep->base))
+            gep->base.type != Type::Ptr ||
+            !operand_available(function, definitions, dominators, use_block,
+                               use_order, gep->base))
             return report_error(diagnostics, function,
                                 "getelementptr 基址或结果类型无效");
         for (const auto &index : gep->indices)
-            if (!operand_ready(index))
+            if (!operand_available(function, definitions, dominators, use_block,
+                                   use_order, index))
                 return report_error(diagnostics, function,
                                     "getelementptr 下标操作数不可用");
     } else {
@@ -250,22 +259,25 @@ bool check_block(const Module &module, LayoutService &layouts, const Function &f
                                instruction_index, diagnostics))
             return false;
     // 终结指令在所有普通指令之后使用操作数。
-    const auto operand_ready = [&](const Operand &operand) {
-        return operand_available(function, definitions, dominators, block_index,
-                                 block.instructions.size(), operand);
-    };
     const auto &terminator = *block.terminator;
     // ret 的值也要先定义，并与函数返回类型相同；没有值时函数必须返回 void。
     if (const auto *return_instruction = std::get_if<Return>(&terminator)) {
         const auto &value = return_instruction->value;
-        const auto result = function.abi.signature.result;
-        if (value ? (value->type != result || !operand_ready(*value))
-                  : result != Type::Void)
+        const auto result_type = function.abi.result;
+        if (value) {
+            if (value->type != result_type ||
+                !operand_available(function, definitions, dominators,
+                                   block_index, block.instructions.size(), *value))
+                return report_error(diagnostics, function,
+                                    "ret 的操作数、定义位置或返回类型无效");
+        } else if (result_type != Type::Void) {
             return report_error(diagnostics, function,
                                 "ret 的操作数、定义位置或返回类型无效");
+        }
     } else if (const auto *conditional = std::get_if<CondBranch>(&terminator)) {
         if (conditional->condition.type != Type::I1 ||
-            !operand_ready(conditional->condition))
+            !operand_available(function, definitions, dominators, block_index,
+                               block.instructions.size(), conditional->condition))
             return report_error(diagnostics, function,
                                 "condbr 的条件类型或定义位置无效");
     }
@@ -302,16 +314,19 @@ struct ControlFlowGraph {
     std::vector<std::vector<std::size_t>> successors;   // 每个块的直接后继。
 };
 
+// 跳转目标合法时，按顺序把这条边加入后继表和前驱表。
+bool add_edge(const Function &function, ControlFlowGraph &graph,
+              std::size_t from, BlockId target) {
+    if (!valid_jump_target(function, target))
+        return false;
+    graph.successors[from].push_back(target.index);
+    graph.predecessors[target.index].push_back(from);
+    return true;
+}
+
 // 包括不可达块在内，每个块的身份、终结指令和跳转目标都合法才能使用这张图。
 bool build_cfg(const Function &function, ControlFlowGraph &graph,
                std::ostream &diagnostics) {
-    const auto add_edge = [&](std::size_t from, BlockId target) {
-        if (!valid_jump_target(function, target))
-            return false;
-        graph.successors[from].push_back(target.index);
-        graph.predecessors[target.index].push_back(from);
-        return true;
-    };
     for (std::size_t block_index = 0; block_index < function.blocks.size();
          ++block_index) {
         const auto &block = function.blocks[block_index];
@@ -319,13 +334,13 @@ bool build_cfg(const Function &function, ControlFlowGraph &graph,
             return report_error(diagnostics, function,
                                 "基本块身份无效或缺少终结指令");
         if (const auto *branch = std::get_if<Branch>(&*block.terminator)) {
-            if (!add_edge(block_index, branch->target))
+            if (!add_edge(function, graph, block_index, branch->target))
                 return report_error(diagnostics, function,
                                     "br 的跳转目标无效或指向入口块");
         } else if (const auto *conditional =
                        std::get_if<CondBranch>(&*block.terminator)) {
-            if (!add_edge(block_index, conditional->when_true) ||
-                !add_edge(block_index, conditional->when_false))
+            if (!add_edge(function, graph, block_index, conditional->when_true) ||
+                !add_edge(function, graph, block_index, conditional->when_false))
                 return report_error(diagnostics, function,
                                     "condbr 的跳转目标无效或指向入口块");
         }
@@ -365,17 +380,11 @@ DominatorTable analyze_dominance(const ControlFlowGraph &graph) {
              ++block_index) {
             if (!reachable[block_index])
                 continue;
-            std::vector<bool> intersection(block_count, false);
-            bool first_predecessor = true;
-            // 只与可达前驱求交；可达块至少有一个可达前驱。
+            // 支配者只能是可达块，从这个全集开始与每个可达前驱求交。
+            auto intersection = reachable;
             for (const auto predecessor : graph.predecessors[block_index]) {
                 if (!reachable[predecessor])
                     continue;
-                if (first_predecessor) {
-                    intersection = dominators[predecessor];
-                    first_predecessor = false;
-                    continue;
-                }
                 for (std::size_t candidate = 0; candidate < block_count;
                      ++candidate)
                     intersection[candidate] =
@@ -399,14 +408,11 @@ bool check_abi(LayoutService &layouts, const Function &function,
     const auto &abi = function.abi;
     if (!valid_function_abi(abi))
         return report_error(diagnostics, function, "函数 ABI 形状无效");
-    for (const auto &storage : abi.parameter_storage) {
-        if (storage.kind == StorageType::Kind::Unit)
+    for (const auto &parameter : abi.parameters) {
+        if (!parameter.by_value_storage)
             continue;
-        if (storage.kind == StorageType::Kind::Scalar)
-            return report_error(diagnostics, function,
-                                "按值聚合形参不能使用标量存储");
         try {
-            (void)layouts.layout(storage);
+            (void)layouts.layout(*parameter.by_value_storage);
         } catch (const std::logic_error &) {
             return report_error(diagnostics, function,
                                 "按值聚合形参布局无效");

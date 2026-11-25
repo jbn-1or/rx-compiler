@@ -3,6 +3,7 @@
 #include "ir/lowering.hpp"
 #include "ir/builder.hpp"
 #include "ir/layout.hpp"
+#include "sema/symbol.hpp"
 #include <stdexcept>
 
 namespace rx {
@@ -82,25 +83,49 @@ void GenerationContext::emit_clone_into(const ir::Operand &destination,
             const auto new_data = emit_alloc(
                 bytes,
                 ir::Operand::constant(ir::Type::I32, element_layout.align));
-            for_each_runtime_index(length, [&](ir::Operand index) {
-                const auto source_element = vec_element_address(data, element_type, index);
-                const auto destination_element = vec_element_address(new_data, element_type, index);
-                emit_clone_member(destination_element, source_element,
-                                  element_type);
-            });
+            const auto loop = begin_runtime_loop(length);
+            const auto source_address = vec_element_address(data, element_type, loop.index);
+            const auto destination_address =
+                vec_element_address(new_data, element_type, loop.index);
+            emit_clone_member(destination_address, source_address, element_type);
+            end_runtime_loop(loop);
             store_value(new_data, destination_data);
             builder.branch(done_block);
 
             builder.set_insert_point(done_block);
             return;
         }
-        case SemanticType::Kind::Struct:
-        case SemanticType::Kind::Array:
-            for_each_member_pair(destination, source, type,
-                [&](ir::Operand dest, ir::Operand src, const SemanticType &member) {
-                    emit_clone_member(dest, src, member);
-                });
+        case SemanticType::Kind::Struct: {
+            const auto &structure = *type.struct_symbol;
+            for (std::size_t index = 0; index < structure.fields.size(); ++index) {
+                const auto &field = structure.fields[index];
+                const auto field_index = ir::Operand::constant(ir::Type::I32, index);
+                const auto destination_address = member_address(destination, type, field_index);
+                const auto source_address = member_address(source, type, field_index);
+                const auto &member_type = structure.field_types.at(field.name);
+                emit_clone_member(destination_address, source_address, member_type);
+            }
             return;
+        }
+        case SemanticType::Kind::Array: {
+            if (type.length <= array_unroll_limit) {
+                for (uint64_t index = 0; index < type.length; ++index) {
+                    const auto element_index = ir::Operand::constant(ir::Type::I32, index);
+                    const auto destination_address =
+                        member_address(destination, type, element_index);
+                    const auto source_address = member_address(source, type, element_index);
+                    emit_clone_member(destination_address, source_address, *type.inner);
+                }
+            } else {
+                const auto loop = begin_runtime_loop(
+                    ir::Operand::constant(ir::Type::I32, type.length));
+                const auto destination_address = member_address(destination, type, loop.index);
+                const auto source_address = member_address(source, type, loop.index);
+                emit_clone_member(destination_address, source_address, *type.inner);
+                end_runtime_loop(loop);
+            }
+            return;
+        }
         case SemanticType::Kind::Never:
         case SemanticType::Kind::Error:
             throw std::logic_error("发散或错误类型没有可克隆的值");

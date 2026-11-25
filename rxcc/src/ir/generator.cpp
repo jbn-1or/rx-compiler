@@ -15,44 +15,43 @@
 namespace rx {
 namespace {
 
+// 把一个源参数或 self 追加到 ABI；按值聚合传 ptr 快照，其余参数直接传值。
+bool append_parameter(ir::FunctionABI &abi, const FunctionSymbol &function,
+                      const SemanticType &type, std::ostream &diagnostics) {
+    if (!is_storable_value(type)) {
+        diagnostics << "IR 生成尚未支持函数 " << function.name << " 的参数类型 "
+                    << type.toString() << '\n';
+        return false;
+    }
+    if (is_aggregate_value(type))
+        abi.parameters.push_back({ir::Type::Ptr, ir::storage_type_of(type)});
+    else
+        abi.parameters.push_back({lower_value_type(type)});
+    return true;
+}
+
 // 把源函数签名降级成共享 ABI：按值聚合参数用 ptr 快照，聚合返回用隐藏首参数。
 std::optional<ir::FunctionABI> make_function_abi(const FunctionSymbol &function,
                                                  std::ostream &diagnostics) {
     ir::FunctionABI abi;
     if (function.return_type.is_unit()) {
-        abi.signature.result = ir::Type::Void;
+        abi.result = ir::Type::Void;
     } else if (!is_storable_value(function.return_type)) {
         diagnostics << "IR 生成尚未支持函数 " << function.name << " 的返回类型 "
                     << function.return_type.toString() << '\n';
         return std::nullopt;
     } else if (is_aggregate_value(function.return_type)) {
         abi.result_storage = ir::storage_type_of(function.return_type);
-        abi.signature.parameters.push_back(ir::Type::Ptr);
-        abi.parameter_storage.push_back(ir::StorageType{});
+        abi.parameters.push_back({ir::Type::Ptr});
     } else {
-        abi.signature.result = lower_value_type(function.return_type);
+        abi.result = lower_value_type(function.return_type);
     }
-    // 一个源参数或方法的 self 在这里降级；按值聚合传 ptr 快照。
-    const auto append_parameter = [&](const SemanticType &type) {
-        if (!is_storable_value(type)) {
-            diagnostics << "IR 生成尚未支持函数 " << function.name << " 的参数类型 "
-                        << type.toString() << '\n';
-            return false;
-        }
-        if (is_aggregate_value(type)) {
-            abi.signature.parameters.push_back(ir::Type::Ptr);
-            abi.parameter_storage.push_back(ir::storage_type_of(type));
-        } else {
-            abi.signature.parameters.push_back(lower_value_type(type));
-            abi.parameter_storage.push_back(ir::StorageType{});
-        }
-        return true;
-    };
     // 方法接收者位于形参表首位，显式关联调用和点调用都按此顺序传参。
-    if (function.receiver && !append_parameter(function.receiver->type))
+    if (function.receiver &&
+        !append_parameter(abi, function, function.receiver->type, diagnostics))
         return std::nullopt;
     for (const auto &parameter : function.parameters)
-        if (!append_parameter(parameter.type))
+        if (!append_parameter(abi, function, parameter.type, diagnostics))
             return std::nullopt;
     return abi;
 }
@@ -92,7 +91,7 @@ std::optional<IRArtifact> generate_ir(const SemanticResult &semantics,
             auto abi = make_function_abi(*source, diagnostics);
             if (!abi)
                 return std::nullopt;
-            functions.push_back(module.add_function_abi(
+            functions.push_back(module.add_function(
                 source_function_name(source->id), std::move(*abi), ir::Linkage::Internal));
         }
         // 按源码顺序生成所有函数体，包括未被调用的函数。

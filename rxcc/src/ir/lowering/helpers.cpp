@@ -21,14 +21,9 @@ GenerationContext::request_helper(HelperKind kind, const SemanticType &type) {
     const auto name = std::string(is_clone ? "__rx_clone_helper_"
                                            : "__rx_eq_helper_") +
                       std::to_string(helper_index);
-    const ir::Signature signature =
-        is_clone
-            ? ir::Signature{ir::Type::Void,
-                            {ir::Type::Ptr, ir::Type::Ptr}}
-            : ir::Signature{ir::Type::I1,
-                            {ir::Type::Ptr, ir::Type::Ptr}};
-    const auto function =
-        module.add_function(name, signature, ir::Linkage::Internal);
+    const auto result_type = is_clone ? ir::Type::Void : ir::Type::I1;
+    const auto function = module.add_function(
+        name, {result_type, {{ir::Type::Ptr}, {ir::Type::Ptr}}}, ir::Linkage::Internal);
     helper_indices_.emplace(key, helper_index);
     helpers_.push_back(Helper{kind, function, type});
     return function;

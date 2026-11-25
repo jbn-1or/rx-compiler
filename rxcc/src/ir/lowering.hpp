@@ -5,7 +5,6 @@
 #include "ir/lowering/value.hpp"
 #include "ir/model.hpp"
 #include "sema/result.hpp"
-#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -142,19 +141,18 @@ private:
     // 按完整聚合结构把 source 存储搬运到 destination；数组使用有界循环。
     void copy_value(const ir::Operand &destination, const ir::Operand &source,
                     const SemanticType &type);
-    // 按声明顺序或数组下标投影两个同类型聚合，把对应成员的地址和类型交给调用方。
-    void for_each_member_pair(
-        const ir::Operand &first, const ir::Operand &second, const SemanticType &type,
-        const std::function<void(ir::Operand, ir::Operand, const SemanticType &)> &body);
     // 源位置可能被后续表达式修改，私有结果槽则已经是独立的值。
     enum class StorageOrigin { SourcePlace, PrivateSlot };
     std::optional<EmitResult> read_stored_value(
         const ir::Operand &address, const SemanticType &type,
         StorageOrigin origin = StorageOrigin::PrivateSlot);
-    // 对每个下标生成 body；小数组直接展开，大数组生成计数循环。
-    void for_each_array_index(
-        uint64_t count,
-        const std::function<void(ir::Operand)> &body);
+    // 取得数组元素地址，或按声明序号取得结构体字段地址。
+    ir::Operand member_address(const ir::Operand &address,
+                               const SemanticType &type, ir::Operand index);
+    // 将同一个已求好的值写入每个数组元素，小数组展开，大数组生成循环。
+    void fill_array(const ir::Operand &address, const SemanticType &type,
+                    const EmitResult &value);
+    static constexpr uint64_t array_unroll_limit = 8; // 小数组直接展开的最大元素数。
 
     // lowering/control_flow.cpp：if 的分块、跳转和正常边汇合。
     // 仅在调用方需要数据结果时创建 slot，供正常分支写入并在汇合块读回。
@@ -303,15 +301,26 @@ private:
                                    const SemanticType &type);
     // 比较一个嵌套字段或元素；复合类型调用自己的辅助函数，标量直接比较。
     ir::Operand emit_equality_member(const ir::Operand &left,
-                                     const ir::Operand &right,
-                                     const SemanticType &type);
+                                      const ir::Operand &right,
+                                      const SemanticType &type);
+    // 比较一对成员，将结果与槽中已经累计的相等结果合并。
+    void accumulate_equality(const ir::Operand &result_slot,
+                             const ir::Operand &left, const ir::Operand &right,
+                             const SemanticType &type);
 
     // 调用 __rx_alloc，首次使用时声明外部 C ABI，后续复用。
     ir::Operand emit_alloc(ir::Operand size, ir::Operand align);
-    // 对运行时 count 个下标生成 body；循环条件和下标都在运行时读取。
-    void for_each_runtime_index(
-        ir::Operand count,
-        const std::function<void(ir::Operand)> &body);
+    // 保存生成计数循环后半部分所需的位置和下标。
+    struct RuntimeLoop {
+        ir::Operand index; // 循环体使用的当前下标。
+        ir::Operand index_slot; // 保存下轮下标的存储位置。
+        ir::BlockId condition_block; // 每轮检查下标是否小于元素数量的块。
+        ir::BlockId exit_block; // 循环结束后的插入位置。
+    };
+    // 生成从 0 到 count（不含）的循环入口，并把插入点移到循环体。
+    RuntimeLoop begin_runtime_loop(ir::Operand count);
+    // 在调用方生成循环体后，递增下标、跳回条件块，再切换到出口。
+    void end_runtime_loop(const RuntimeLoop &loop);
 
     const SemanticResult &semantics; // 语义分析结果，提供表达式、路径和调用的记录。
     const std::vector<ir::IRFunctionId> &functions; // 源 FunctionId 下标到已登记 IRFunctionId 的映射。

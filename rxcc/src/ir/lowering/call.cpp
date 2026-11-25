@@ -21,7 +21,7 @@ GenerationContext::emit_target_call(ir::IRFunctionId target,
     // 结果 slot 只是内部传递地址，不改变按值语义。
     std::optional<ir::Operand> result_slot;
     std::vector<ir::Operand> arguments;
-    arguments.reserve(abi.signature.parameters.size());
+    arguments.reserve(abi.parameters.size());
     if (abi.result_storage) {
         result_slot = allocate_storage_slot(*abi.result_storage);
         arguments.push_back(*result_slot);
@@ -67,19 +67,18 @@ ir::Operand GenerationContext::emit_alloc(ir::Operand size, ir::Operand align) {
     } else {
         alloc = module.add_function(
             "__rx_alloc",
-            {ir::Type::Ptr, {ir::Type::I32, ir::Type::I32}},
+            {ir::Type::Ptr, {{ir::Type::I32}, {ir::Type::I32}}},
             ir::Linkage::External);
     }
     return builder.call(alloc, {std::move(size), std::move(align)}).value();
 }
 
-// 生成运行时计数循环；下标从 0 递增到 count（不含），每轮调用 body。
-void GenerationContext::for_each_runtime_index(
-    ir::Operand count, const std::function<void(ir::Operand)> &body) {
+// 生成计数循环的初始化和条件判断，调用方接着在循环体中生成操作。
+GenerationContext::RuntimeLoop
+GenerationContext::begin_runtime_loop(ir::Operand count) {
     const auto insertion = builder.insert_point();
     auto &function = module.function(insertion->function);
     const auto zero = ir::Operand::constant(ir::Type::I32, 0);
-    const auto one = ir::Operand::constant(ir::Type::I32, 1);
     const auto index_slot = allocate_slot(ir::Type::I32);
     builder.store(ir::Type::I32, zero, index_slot, 4);
 
@@ -95,11 +94,16 @@ void GenerationContext::for_each_runtime_index(
     builder.cond_branch(less, body_block, exit_block);
 
     builder.set_insert_point(body_block);
-    body(index);
-    const auto next = builder.binary(ir::BinaryOp::Add, index, one);
-    builder.store(ir::Type::I32, next, index_slot, 4);
-    builder.branch(condition_block);
-    builder.set_insert_point(exit_block);
+    return {index, index_slot, condition_block, exit_block};
+}
+
+// 循环体已经生成完毕；递增下标并回到条件判断，随后继续生成出口代码。
+void GenerationContext::end_runtime_loop(const RuntimeLoop &loop) {
+    const auto one = ir::Operand::constant(ir::Type::I32, 1);
+    const auto next = builder.binary(ir::BinaryOp::Add, loop.index, one);
+    builder.store(ir::Type::I32, next, loop.index_slot, 4);
+    builder.branch(loop.condition_block);
+    builder.set_insert_point(loop.exit_block);
 }
 
 // 投影真实 Vec 头的指定字段，只取地址，不提前读取内容。
@@ -174,11 +178,11 @@ GenerationContext::emit_vec_push(const SemanticType &vec_type,
     const auto new_data = emit_alloc(
         bytes, ir::Operand::constant(ir::Type::I32, element_layout.align));
     const auto old_data = builder.load(ir::Type::Ptr, data_field, 4);
-    for_each_runtime_index(length, [&](ir::Operand index) {
-        const auto source = vec_element_address(old_data, element_type, index);
-        const auto destination = vec_element_address(new_data, element_type, index);
-        copy_value(destination, source, element_type);
-    });
+    const auto copy_loop = begin_runtime_loop(length);
+    const auto source = vec_element_address(old_data, element_type, copy_loop.index);
+    const auto destination = vec_element_address(new_data, element_type, copy_loop.index);
+    copy_value(destination, source, element_type);
+    end_runtime_loop(copy_loop);
     builder.store(ir::Type::Ptr, new_data, data_field, 4);
     builder.store(ir::Type::I32, new_capacity, capacity_field, 4);
     builder.branch(after_block);
@@ -216,15 +220,15 @@ GenerationContext::emit_vec_remove(const SemanticType &vec_type,
     const auto suffix_start = builder.binary(ir::BinaryOp::Add, index, one);
     const auto suffix_count = builder.binary(
         ir::BinaryOp::Subtract, next_length, index);
-    for_each_runtime_index(suffix_count, [&](ir::Operand offset) {
-        const auto source_index = builder.binary(
-            ir::BinaryOp::Add, suffix_start, offset);
-        const auto destination_index = builder.binary(
-            ir::BinaryOp::Add, index, offset);
-        const auto source = vec_element_address(data, element_type, source_index);
-        const auto destination = vec_element_address(data, element_type, destination_index);
-        copy_value(destination, source, element_type);
-    });
+    const auto shift_loop = begin_runtime_loop(suffix_count);
+    const auto source_index = builder.binary(
+        ir::BinaryOp::Add, suffix_start, shift_loop.index);
+    const auto destination_index = builder.binary(
+        ir::BinaryOp::Add, index, shift_loop.index);
+    const auto source = vec_element_address(data, element_type, source_index);
+    const auto destination = vec_element_address(data, element_type, destination_index);
+    copy_value(destination, source, element_type);
+    end_runtime_loop(shift_loop);
 
     // 最后缩短活动长度；原末尾位置的字节不再属于活动元素。
     builder.store(ir::Type::I32, next_length, length_field, 4);
@@ -301,7 +305,8 @@ std::optional<EmitResult> GenerationContext::finish_call(
             const auto &signature = semantics.builtin_signatures.at(*builtin);
             ir_target = module.add_function(name,
                 {signature.return_type.is_unit() ? ir::Type::Void : ir::Type::I32,
-                 std::vector<ir::Type>(signature.parameters.size(), ir::Type::I32)},
+                 std::vector<ir::ParameterABI>(signature.parameters.size(),
+                                               ir::ParameterABI{ir::Type::I32})},
                 ir::Linkage::External);
         }
         return emit_target_call(ir_target, prepared);
